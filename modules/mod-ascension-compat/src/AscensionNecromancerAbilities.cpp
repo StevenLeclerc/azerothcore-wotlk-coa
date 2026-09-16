@@ -204,7 +204,8 @@ class necromancer_casts : public AllSpellScript
         uint32 id = aura->GetId();
         if ((id == 803741 || id == 800706) && player->HasAura(302923))
             duration = duration * 125 / 100;
-        if (aura->GetUnitOwner() && aura->GetUnitOwner()->IsPlayer())
+        // Ground effects (dynamic object auras) come through this hook too: GetUnitOwner asserts on them.
+        if (aura->GetType() == UNIT_AURA_TYPE && aura->GetUnitOwner() && aura->GetUnitOwner()->IsPlayer())
         {
             if (id == 504845)
                 duration = std::min(duration, 8000);

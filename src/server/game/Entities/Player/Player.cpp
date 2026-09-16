@@ -9693,7 +9693,15 @@ void Player::StopCastingCharm(Aura* except /*= nullptr*/)
         if (charm->GetCharmerGUID())
         {
             LOG_FATAL("entities.player", "Charmed unit has charmer {}", charm->GetCharmerGUID().ToString());
-            ABORT();
+            // Conquest of Azeroth: a Tinker killed while controlling its Destructo-Bot (50300)
+            // reaches this point with the charm half released. Stopping the whole server for
+            // one creature is worse than forcing the release.
+            LOG_ERROR("entities.player", "Player::StopCastingCharm - forcing the release of {} by {}",
+                      charm->GetGUID().ToString(), GetGUID().ToString());
+            if (charm->GetCharmerGUID() == GetGUID())
+                charm->RemoveCharmedBy(this);
+            if (GetCharmGUID())
+                SetGuidValue(UNIT_FIELD_CHARM, ObjectGuid::Empty);
         }
         else
         {
