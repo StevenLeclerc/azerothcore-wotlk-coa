@@ -4668,6 +4668,84 @@ bool IsAscensionPrimalistWeaponsEligible(Player const* player, bool allowUnconfi
             (allowUnconfirmed && !AscensionClassService::Instance().GetActiveSpecialization(player)));
 }
 
+uint32 GetAscensionActiveSpecialization(Player const* player)
+{
+    if (!player || !IsAscensionCustomClass(player))
+        return 0;
+
+    if (uint32 const active = AscensionClassService::Instance().GetActiveSpecialization(player))
+        return active;
+
+    // GetPlayerSetting is not const but only reads the cached settings.
+    return const_cast<Player*>(player)->GetPlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0).value;
+}
+
+bool SwitchAscensionSpecialization(Player* player, uint32 specializationId)
+{
+    return player && ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) &&
+        AscensionClassService::Instance().SwitchSpecialization(player, specializationId);
+}
+
+static AscensionCompatData::CoATalentEntry const* FindAscensionTalentEntry(uint32 entryId)
+{
+    auto const& entries = AscensionCompatData::CoATalentEntries;
+    auto itr = std::lower_bound(entries.begin(), entries.end(), entryId,
+        [](AscensionCompatData::CoATalentEntry const& entry, uint32 id) { return entry.EntryId < id; });
+    return itr != entries.end() && itr->EntryId == entryId ? &*itr : nullptr;
+}
+
+uint32 GetAscensionTalentRank(Player const* player, uint32 entryId)
+{
+    AscensionCompatData::CoATalentEntry const* entry = FindAscensionTalentEntry(entryId);
+    if (!player || !entry)
+        return 0;
+
+    for (uint32 rank = entry->SpellCount; rank > 0; --rank)
+        if (entry->SpellIds[rank - 1] && player->HasSpell(entry->SpellIds[rank - 1]))
+            return rank;
+    return 0;
+}
+
+bool SetAscensionTalentRank(Player* player, uint32 entryId, uint32 rank)
+{
+    AscensionCompatData::CoATalentEntry const* entry = FindAscensionTalentEntry(entryId);
+    if (!player || !entry || !IsAscensionCustomClass(player) || entry->ClassId != player->getClass() ||
+        rank > entry->SpellCount)
+        return false;
+
+    // Automatic entries belong to SynchronizeProgression, never to a purchase.
+    uint32 const freeChoiceGroup = AscensionClassService::GetSelectableFreeGroup(entryId);
+    if (entry->AECost == 0 && entry->TECost == 0 && !freeChoiceGroup)
+        return false;
+
+    if (rank > 0 && entry->SpecId != 0 && entry->SpecId != GetAscensionActiveSpecialization(player))
+        return false;
+
+    uint32 const selectedSpellId = rank > 0 ? entry->SpellIds[rank - 1] : 0;
+    if (rank > 0 && (!selectedSpellId || !sSpellMgr->GetSpellInfo(selectedSpellId)))
+        return false;
+
+    // Same resolution as ".local talent": a selection clears the other options of its free group,
+    // then every rank of the entry, before learning the chosen rank.
+    if (rank > 0 && freeChoiceGroup)
+        for (auto const& other : AscensionCompatData::CoATalentEntries)
+            if (other.ClassId == player->getClass() && other.SpecId == entry->SpecId && other.EntryId != entryId &&
+                AscensionClassService::GetSelectableFreeGroup(other.EntryId) == freeChoiceGroup)
+                for (uint32 spellId : other.SpellIds)
+                    if (spellId && player->HasSpell(spellId))
+                        player->removeSpell(spellId, SPEC_MASK_ALL, false);
+
+    for (uint32 spellId : entry->SpellIds)
+        if (spellId && player->HasSpell(spellId))
+            player->removeSpell(spellId, SPEC_MASK_ALL, false);
+
+    if (rank > 0)
+        player->learnSpell(selectedSpellId, false);
+
+    AscensionClassService::Instance().SynchronizeProgression(player);
+    return true;
+}
+
 void AddAscensionCompatScripts() {
   new npc_ascension_training_book();
   RegisterSpellScript(spell_ascension_experience_potion);
