@@ -41,6 +41,7 @@
 #include "AscensionReaperDeathwind.h"
 #include "AscensionReaperPainmail.h"
 #include "AscensionVenomancerCatalyst.h"
+#include "AscensionSpecialization.h"
 #include "AscensionSpellProgressionData.h"
 #include "AscensionTalentReplacementData.h"
 #include "AscensionTaughtAbilityData.h"
@@ -4744,6 +4745,52 @@ bool SetAscensionTalentRank(Player* player, uint32 entryId, uint32 rank)
 
     AscensionClassService::Instance().SynchronizeProgression(player);
     return true;
+}
+
+bool IsAscensionCustomClassId(uint8 classId)
+{
+    return classId >= CLASS_BARBARIAN && classId <= CLASS_SPIRIT_MAGE;
+}
+
+std::vector<AscensionClassAbility> GetAscensionClassAbilities(uint8 classId)
+{
+    std::vector<AscensionClassAbility> abilities;
+    if (!IsAscensionCustomClassId(classId))
+        return abilities;
+
+    for (auto const& grant : AscensionCompatData::ClassSpells)
+        if (grant.ClassId == classId)
+            abilities.push_back({ grant.SpellId, grant.SpellId, 0, grant.RequiredLevel });
+
+    // Each rank of a Character Advancement entry; remember which specialization grants it for the ranks below.
+    std::unordered_map<uint32, uint16> specializationOf;
+    for (auto const& entry : AscensionCompatData::CoATalentEntries)
+    {
+        if (entry.ClassId != classId || !entry.SpellIds[0])
+            continue;
+
+        for (uint32 spellId : entry.SpellIds)
+        {
+            if (!spellId)
+                continue;
+
+            abilities.push_back({ spellId, entry.SpellIds[0], entry.SpecId, entry.RequiredLevel });
+            specializationOf.emplace(spellId, entry.SpecId);
+        }
+    }
+
+    // Higher ranks the progression teaches with level.
+    for (auto const& rank : AscensionProgression::Ranks)
+    {
+        if (rank.ClassId != classId)
+            continue;
+
+        auto const specialization = specializationOf.find(rank.FirstSpellId);
+        uint16 const specId = specialization != specializationOf.end() ? specialization->second : 0;
+        abilities.push_back({ rank.SpellId, rank.FirstSpellId, specId, rank.RequiredLevel });
+    }
+
+    return abilities;
 }
 
 void AddAscensionCompatScripts() {
