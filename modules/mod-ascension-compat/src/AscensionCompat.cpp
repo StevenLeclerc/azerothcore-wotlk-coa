@@ -6165,22 +6165,25 @@ private:
     // vivante et au maximum de ses points de vie (voir OnAllCreatureUpdate) :
     // un combat en cours ne change jamais de niveau sous les pieds de
     // personne.
+    // A zero cap restores the original maximum across all eligible players.
+    bool const useNearestPlayer = LocalLevelScaling::CreatureMaxLift.load(std::memory_order_relaxed) != 0;
     uint8 desired = original;
     float range = creature->GetSightRange();
     float meilleure = -1.0f;
     for (auto const& reference : map->GetPlayers())
     {
-      Player* player = reference.GetSource();
-      if (!player || !player->IsAlive() || player->IsGameMaster() ||
-          !creature->InSamePhase(player) || !creature->IsWithinDistInMap(player, range) ||
-          !player->IsValidAttackTarget(creature))
-        continue;
-      float distance = creature->GetExactDist(player);
-      if (meilleure >= 0.0f && distance >= meilleure)
-        continue;
-      meilleure = distance;
-      desired = LocalLevelScaling::ScaleCreatureLevel(original, player->GetLevel(),
-          LocalLevelScaling::CreatureOffset.load(std::memory_order_relaxed));
+        Player* player = reference.GetSource();
+        if (!player || !player->IsAlive() || player->IsGameMaster() ||
+            !creature->InSamePhase(player) || !creature->IsWithinDistInMap(player, range) ||
+            !player->IsValidAttackTarget(creature))
+            continue;
+        float distance = creature->GetExactDist(player);
+        if (useNearestPlayer && meilleure >= 0.0f && distance >= meilleure)
+            continue;
+        meilleure = distance;
+        uint8 const scaledLevel = LocalLevelScaling::ScaleCreatureLevel(original, player->GetLevel(),
+            LocalLevelScaling::CreatureOffset.load(std::memory_order_relaxed));
+        desired = useNearestPlayer ? scaledLevel : std::max(desired, scaledLevel);
     }
     return desired;
   }
