@@ -4269,8 +4269,32 @@ private:
     if (!map)
       return original;
 
+    // On se regle sur le joueur le PLUS PROCHE, et non sur le plus haut niveau
+    // a la ronde.
+    //
+    // POURQUOI CE CHANGEMENT
+    // La boucle d'origine prenait le maximum sur tous les joueurs a portee de
+    // vue. Sur un serveur ou les joueurs presents ont des niveaux voisins,
+    // c'est le bon choix : le contenu reste pertinent pour le groupe. Avec une
+    // population de bots, l'hypothese tombe. Un joueur de niveau 30 traversant
+    // une zone de depart hissait toute creature a portee au niveau 27, y
+    // compris celles que des bots de niveau 1 etaient en train de combattre a
+    // quarante metres de la. Ils se faisaient tuer par des creatures qui
+    // n'etaient pas les leurs.
+    //
+    // POURQUOI PAS « CELUI QUI ATTAQUE »
+    // Ce serait la regle juste, mais elle est irrealisable : une creature n'a
+    // qu'un seul niveau, diffuse a tous les clients. Le meme loup ne peut pas
+    // etre de niveau 1 pour un bot et de niveau 27 pour un joueur. Le plus
+    // proche en est l'approximation fidele : c'est lui qui va l'engager.
+    //
+    // Le reglage ne s'applique de toute facon qu'a une creature hors combat,
+    // vivante et au maximum de ses points de vie (voir OnAllCreatureUpdate) :
+    // un combat en cours ne change jamais de niveau sous les pieds de
+    // personne.
     uint8 desired = original;
     float range = creature->GetSightRange();
+    float meilleure = -1.0f;
     for (auto const& reference : map->GetPlayers())
     {
       Player* player = reference.GetSource();
@@ -4278,8 +4302,12 @@ private:
           !creature->InSamePhase(player) || !creature->IsWithinDistInMap(player, range) ||
           !player->IsValidAttackTarget(creature))
         continue;
-      desired = std::max(desired, LocalLevelScaling::ScaleCreatureLevel(original, player->GetLevel(),
-          LocalLevelScaling::CreatureOffset.load(std::memory_order_relaxed)));
+      float distance = creature->GetExactDist(player);
+      if (meilleure >= 0.0f && distance >= meilleure)
+        continue;
+      meilleure = distance;
+      desired = LocalLevelScaling::ScaleCreatureLevel(original, player->GetLevel(),
+          LocalLevelScaling::CreatureOffset.load(std::memory_order_relaxed));
     }
     return desired;
   }
