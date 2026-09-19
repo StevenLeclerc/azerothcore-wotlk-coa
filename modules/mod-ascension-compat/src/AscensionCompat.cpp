@@ -6227,12 +6227,6 @@ public:
         AscensionCompatConfig::LEVEL_SCALING), std::memory_order_relaxed);
     LocalLevelScaling::QuestEnabled.store(enabled && ascensionCompatConfig.GetConfigValue<bool>(
         AscensionCompatConfig::QUEST_LEVEL_SCALING), std::memory_order_relaxed);
-
-    // Lu directement plutot que via l'enumeration du module : cela evite de
-    // toucher a sa table de reglages, et la valeur est rechargeable a chaud.
-    uint32 lift = sConfigMgr->GetOption<uint32>("AscensionCompat.LevelScalingMaxLift", 5);
-    LocalLevelScaling::CreatureMaxLift.store(
-        static_cast<std::uint8_t>(std::min<uint32>(lift, 255)), std::memory_order_relaxed);
   }
 
   void OnLoadCustomDatabaseTable() override {
