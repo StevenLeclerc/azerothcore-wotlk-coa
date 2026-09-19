@@ -5,11 +5,14 @@
 #include "Item.h"
 #include "ItemTemplate.h"
 #include "Map.h"
+#include "ObjectGuid.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellScript.h"
 
+#include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace
@@ -174,11 +177,67 @@ std::string MoneyText(uint32 copper)
     return out;
 }
 
-void Apply(Player* victim, uint8 killerLevel)
+// La sanction est DECIDEE a la mort, APPLIQUEE au relachement.
+//
+// OnPlayerPVPKill / OnPlayerKilledByCreature sont appeles depuis Unit::Kill,
+// c'est-a-dire APRES le SetHealth(0) de securite de Unit::setDeathState et
+// AVANT Player::KillPlayer. Toucher la victime la est interdit : retirer les
+// auras d'une piece d'equipement y ramene un cadavre a 1 PV, le client croit
+// le joueur vivant, ferme sa fenetre de relachement, et le joueur reste roote
+// sur son corps sans aucune option de resurrection. Ces deux crochets ne font
+// donc plus que noter la dette.
+//
+// OnPlayerReleasedGhost tombe a la fin de BuildPlayerRepop : la mort est
+// finalisee, le cadavre existe, le joueur est fantome. Qui se deconnecte sans
+// relacher y passe aussi, LogoutPlayer appelant BuildPlayerRepop.
+std::mutex PendingMutex;
+std::unordered_map<ObjectGuid, uint8> Pending;   // victime -> niveau du tueur (0 = inconnu)
+
+// Le verdict se prend ICI, a l'instant de la mort. PenaltyApplies teste le
+// champ de bataille, l'arene, la zone sans PvP et la carte : le rejouer au
+// relachement laisserait echapper celui qui meurt en plein champ et relache
+// depuis un sanctuaire.
+void Remember(Player* victim, uint8 killerLevel)
 {
+    if (!victim)
+        return;
     if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskDeathPenalty", true))
         return;
     if (!PenaltyApplies(victim))
+        return;
+    std::lock_guard<std::mutex> lock(PendingMutex);
+    Pending[victim->GetGUID()] = killerLevel;
+}
+
+bool Take(Player* victim, uint8& killerLevel)
+{
+    if (!victim)
+        return false;
+    std::lock_guard<std::mutex> lock(PendingMutex);
+    auto it = Pending.find(victim->GetGUID());
+    if (it == Pending.end())
+        return false;
+    killerLevel = it->second;
+    Pending.erase(it);
+    return true;
+}
+
+// Une dette jamais soldee (resurrection par un tiers avant relachement,
+// deconnexion brutale) ne doit pas survivre a la session. Indexee par
+// ObjectGuid et non par Player*, une entree perimee ne peut pas dereferencer
+// un objet detruit.
+void Forget(Player* victim)
+{
+    if (!victim)
+        return;
+    std::lock_guard<std::mutex> lock(PendingMutex);
+    Pending.erase(victim->GetGUID());
+}
+
+// Verdict deja rendu par Remember : on ne rejoue pas PenaltyApplies.
+void Settle(Player* victim, uint8 killerLevel)
+{
+    if (!victim || !victim->GetSession())
         return;
 
     uint32 gap = sConfigMgr->GetOption<uint32>("AscensionCompat.HighRiskDeathLevelGap", 4);
@@ -237,16 +296,31 @@ class ruleset_high_risk_death : public PlayerScript
 {
 public:
     ruleset_high_risk_death() : PlayerScript("ruleset_high_risk_death",
-        {PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE}) { }
+        {PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE,
+         PLAYERHOOK_ON_PLAYER_RELEASED_GHOST, PLAYERHOOK_ON_LOGOUT}) { }
 
     void OnPlayerPVPKill(Player* killer, Player* killed) override
     {
-        HighRisk::Apply(killed, killer ? killer->GetLevel() : 0);
+        // Rien ne doit toucher la victime ici : voir HighRisk::Remember.
+        HighRisk::Remember(killed, killer ? killer->GetLevel() : 0);
+    }
+
+    // Fin de BuildPlayerRepop : la mort est finalisee, le joueur est fantome.
+    void OnPlayerReleasedGhost(Player* player) override
+    {
+        uint8 killerLevel = 0;
+        if (HighRisk::Take(player, killerLevel))
+            HighRisk::Settle(player, killerLevel);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        HighRisk::Forget(player);
     }
 
     void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
     {
-        HighRisk::Apply(killed, killer ? killer->GetLevel() : 0);
+        HighRisk::Remember(killed, killer ? killer->GetLevel() : 0);
     }
 };
 
