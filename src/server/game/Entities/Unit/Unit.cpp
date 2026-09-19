@@ -1206,8 +1206,11 @@ uint32 Unit::DealDamage(Unit* attacker, Unit* victim, uint32 damage, CleanDamage
         if (!attacker || attacker->IsControlledByPlayer() || attacker->IsCreatedByPlayer())
         {
             uint32 unDamage = health < damage ? health : damage;
+            // A minion or guardian summoned by a player fights for that player, so its damage counts as the
+            // player's. Without it a creature killed only by such minions was never lootable or worth experience.
             bool damagedByPlayer = unDamage && attacker && (attacker->IsPlayer() || attacker->m_movedByPlayer != nullptr
-                || attacker->GetCharmerGUID().IsPlayer());
+                || attacker->GetCharmerGUID().IsPlayer()
+                || (attacker->IsControlledByPlayer() && attacker->GetOwnerGUID().IsPlayer()));
 
             uint8 attackerLevel = 0;
             if (damagedByPlayer)
