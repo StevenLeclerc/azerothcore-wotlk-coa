@@ -9,6 +9,9 @@
 #include "ScriptMgr.h"
 #include "SpellScript.h"
 
+#include <string>
+#include <vector>
+
 namespace
 {
 enum RulesetSpells : uint32
@@ -159,6 +162,18 @@ uint32 Premium(Player* player)
     return levels * perLevel;
 }
 
+// Copper rendered the way the client does it, dropping the units that are zero:
+// "6 silver", not "0 gold 6 silver 0 copper".
+std::string MoneyText(uint32 copper)
+{
+    uint32 g = copper / 10000, s = (copper % 10000) / 100, c = copper % 100;
+    std::string out;
+    if (g) out += std::to_string(g) + " gold";
+    if (s) out += (out.empty() ? "" : " ") + std::to_string(s) + " silver";
+    if (c || out.empty()) out += (out.empty() ? "" : " ") + std::to_string(c) + " copper";
+    return out;
+}
+
 void Apply(Player* victim, uint8 killerLevel)
 {
     if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskDeathPenalty", true))
@@ -183,8 +198,8 @@ void Apply(Player* victim, uint8 killerLevel)
     {
         victim->ModifyMoney(-int32(premium), false);
         ChatHandler(victim->GetSession()).PSendSysMessage(
-            "High Risk: your gear was insured. Premium paid: %u gold %u silver.",
-            premium / 10000, (premium % 10000) / 100);
+            "High Risk: your gear was insured. Premium paid: {}.",
+            MoneyText(premium));
         return;
     }
 
@@ -213,8 +228,8 @@ void Apply(Player* victim, uint8 killerLevel)
     // its own; this keeps the risk real without pretending to be that system.
     victim->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
     ChatHandler(victim->GetSession()).PSendSysMessage(
-        "High Risk: you could not cover the %u gold premium. You lost %s.",
-        premium / 10000, name.c_str());
+        "High Risk: you could not cover the {} premium. You lost {}.",
+        MoneyText(premium), name);
 }
 }
 
