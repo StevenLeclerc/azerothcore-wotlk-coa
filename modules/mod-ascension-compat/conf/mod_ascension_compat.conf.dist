@@ -118,3 +118,42 @@ AscensionCompat.LevelScalingMaxLift = 5
 #                     0 - (High Risk stays a cosmetic marker)
 
 AscensionCompat.HighRiskIsFFA = 1
+
+#
+#    AscensionCompat.HighRiskDeathPenalty
+#        Description: The price of High Risk. Its selection spell promises that
+#                     "any death while in the open world with High-Risk Mode
+#                     active will cause you to drop equipped gear, or Fel Com
+#                     gold if your gear is insured", and nothing enforced it:
+#                     High Risk was an advantage with no matching risk.
+#                     Insurance is automatic — the player pays if they can, and
+#                     loses a piece of equipment if they cannot. There is no
+#                     client frame to sell a policy from, and an opt-in nobody
+#                     can see is an opt-in nobody uses.
+#                     Battlegrounds, arenas, instances and sanctuaries are
+#                     exempt: the spell says open world.
+#        Default:     1 - (enabled)
+
+AscensionCompat.HighRiskDeathPenalty = 1
+
+#
+#    AscensionCompat.HighRiskDeathLevelGap
+#        Description: A level gap of this many levels or more costs nothing.
+#                     Being ganked by someone far above you, or squashing
+#                     someone far below you, is not the fight this mode is
+#                     about: this protects the newcomer and makes ganking
+#                     pointless in one rule. 0 disables the exemption.
+#        Default:     4
+
+AscensionCompat.HighRiskDeathLevelGap = 4
+
+#
+#    AscensionCompat.HighRiskPremiumPerItemLevel
+#        Description: Insurance premium in copper, per point of item level
+#                     summed over everything worn. Better gear, higher premium,
+#                     so the rule stays meaningful at 80 without being crushing
+#                     at 11. At the default, a character wearing ten pieces of
+#                     item level 15 pays 1 gold 50 silver per death.
+#        Default:     100 - (one silver per item level)
+
+AscensionCompat.HighRiskPremiumPerItemLevel = 100

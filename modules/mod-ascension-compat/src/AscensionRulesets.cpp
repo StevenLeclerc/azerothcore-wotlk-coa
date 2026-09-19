@@ -1,6 +1,10 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "Config.h"
+#include "Chat.h"
+#include "Item.h"
+#include "ItemTemplate.h"
+#include "Map.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellScript.h"
@@ -102,6 +106,135 @@ public:
 // Sanctuaries and friendly capital cities are spared without a line of code:
 // UpdateFFAPvPState refuses the flag wherever pvpInfo.IsInNoPvPArea is set, and
 // the core sets it for those areas.
+// The price of High Risk: dying in the open world costs you something.
+//
+// The selection spell promises it in as many words: "Any death while in the open
+// world with High-Risk Mode active will cause you to drop equipped gear, or Fel
+// Com gold if your gear is insured, and items from your bag." Nothing enforced
+// any of it, so until now High Risk was an advantage with no matching risk —
+// the opposite of what its name sells.
+//
+// Three rules, in this order:
+//
+//   * A level gap of HighRiskDeathLevelGap or more costs nothing. Being ganked
+//     by someone far above you, or squashing someone far below you, is not the
+//     fight the mode is about. This protects the newcomer and makes ganking
+//     pointless at the same time.
+//   * Insurance first. The player pays gold scaled to the item level of what
+//     they are wearing, and keeps every piece. Better gear, higher premium:
+//     the rule stays meaningful at 80 without being crushing at 11.
+//   * Uninsured — meaning unable to pay — loses equipment instead.
+//
+// The insurance is automatic rather than bought in advance. There is no client
+// frame to sell a policy from, and an opt-in the player cannot see is an opt-in
+// nobody uses. Paying when you can and bleeding when you cannot is the same
+// bargain, minus the interface we do not have.
+namespace HighRisk
+{
+bool PenaltyApplies(Player* player)
+{
+    if (!player || !player->IsInWorld() || player->IsGameMaster())
+        return false;
+    if (!player->HasAura(SPELL_HIGH_RISK))
+        return false;
+    // Open world only, as the spell says: no battlegrounds, no arenas, no
+    // instances, and nothing inside a sanctuary.
+    if (player->InBattleground() || player->InArena() || player->pvpInfo.IsInNoPvPArea)
+        return false;
+    Map const* map = player->GetMap();
+    return map && !map->IsDungeon() && !map->IsBattlegroundOrArena();
+}
+
+// Premium in copper, from the item level of everything worn. An empty set costs
+// nothing, which is the honest answer: there is nothing to insure.
+uint32 Premium(Player* player)
+{
+    uint32 levels = 0;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (Item const* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            if (ItemTemplate const* proto = item->GetTemplate())
+                levels += proto->ItemLevel;
+
+    uint32 perLevel = sConfigMgr->GetOption<uint32>("AscensionCompat.HighRiskPremiumPerItemLevel", 100);
+    return levels * perLevel;
+}
+
+void Apply(Player* victim, uint8 killerLevel)
+{
+    if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskDeathPenalty", true))
+        return;
+    if (!PenaltyApplies(victim))
+        return;
+
+    uint32 gap = sConfigMgr->GetOption<uint32>("AscensionCompat.HighRiskDeathLevelGap", 4);
+    if (gap && killerLevel)
+    {
+        int32 diff = int32(victim->GetLevel()) - int32(killerLevel);
+        if (uint32(std::abs(diff)) >= gap)
+        {
+            ChatHandler(victim->GetSession()).PSendSysMessage(
+                "High Risk: no loss, the level gap was too wide.");
+            return;
+        }
+    }
+
+    uint32 premium = Premium(victim);
+    if (premium && victim->GetMoney() >= premium)
+    {
+        victim->ModifyMoney(-int32(premium), false);
+        ChatHandler(victim->GetSession()).PSendSysMessage(
+            "High Risk: your gear was insured. Premium paid: %u gold %u silver.",
+            premium / 10000, (premium % 10000) / 100);
+        return;
+    }
+
+    // Cannot pay: equipment answers for it. One piece at random, so the loss is
+    // real without emptying a character in a single death.
+    std::vector<uint8> worn;
+    for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        if (victim->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+            worn.push_back(slot);
+
+    if (worn.empty())
+    {
+        ChatHandler(victim->GetSession()).PSendSysMessage(
+            "High Risk: nothing to insure and nothing to lose.");
+        return;
+    }
+
+    uint8 slot = worn[urand(0, worn.size() - 1)];
+    std::string name = "a piece of equipment";
+    if (Item const* item = victim->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+        if (ItemTemplate const* proto = item->GetTemplate())
+            name = proto->Name1;
+
+    // KNOWN LIMITATION: the piece is destroyed, not handed to the killer.
+    // Moving it onto the corpse needs the corpse loot path, which is a system of
+    // its own; this keeps the risk real without pretending to be that system.
+    victim->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+    ChatHandler(victim->GetSession()).PSendSysMessage(
+        "High Risk: you could not cover the %u gold premium. You lost %s.",
+        premium / 10000, name.c_str());
+}
+}
+
+class ruleset_high_risk_death : public PlayerScript
+{
+public:
+    ruleset_high_risk_death() : PlayerScript("ruleset_high_risk_death",
+        {PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_PLAYER_KILLED_BY_CREATURE}) { }
+
+    void OnPlayerPVPKill(Player* killer, Player* killed) override
+    {
+        HighRisk::Apply(killed, killer ? killer->GetLevel() : 0);
+    }
+
+    void OnPlayerKilledByCreature(Creature* killer, Player* killed) override
+    {
+        HighRisk::Apply(killed, killer ? killer->GetLevel() : 0);
+    }
+};
+
 class ruleset_high_risk_ffa : public PlayerScript
 {
 public:
@@ -166,4 +299,5 @@ void AddSC_AscensionRulesets()
     new ruleset_aura_metadata();
     new ruleset_player_spells();
     new ruleset_high_risk_ffa();
+    new ruleset_high_risk_death();
 }
