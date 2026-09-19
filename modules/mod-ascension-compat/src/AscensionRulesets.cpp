@@ -81,6 +81,52 @@ public:
     }
 };
 
+// Makes the High Risk ruleset mean something on the server.
+//
+// The three rulesets are a player-facing choice already: War Mode, High Risk
+// and PvE, picked from the client's frame in a rested area. Until now their
+// auras were pure markers — the character selection screen reads 1004019 to
+// draw the flag, and nothing else in the server looks at any of them.
+//
+// High Risk now carries the FFA flag. Between two player-controlled units the
+// core only allows an attack when the target is PvP flagged, or when both are
+// FFA (Unit::_IsValidAttackTarget), and Unit::GetReactionTo returns REP_HOSTILE
+// for two FFA units. So a High Risk character can be fought by anyone else in
+// High Risk, of either faction, which is what the ruleset name promises.
+//
+// The flag is re-asserted on the player tick rather than set once, because
+// Player::UpdateArea recomputes it from area flags on every zone change and the
+// OnPlayerUpdateArea hook fires *before* that recomputation. Crossing an area
+// boundary therefore drops the flag for one tick.
+//
+// Sanctuaries and friendly capital cities are spared without a line of code:
+// UpdateFFAPvPState refuses the flag wherever pvpInfo.IsInNoPvPArea is set, and
+// the core sets it for those areas.
+class ruleset_high_risk_ffa : public PlayerScript
+{
+public:
+    ruleset_high_risk_ffa() : PlayerScript("ruleset_high_risk_ffa", {PLAYERHOOK_ON_UPDATE}) { }
+
+    void OnPlayerUpdate(Player* player, uint32 /*diff*/) override
+    {
+        if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskIsFFA", true))
+            return;
+        if (!player || !player->IsInWorld() || player->IsGameMaster())
+            return;
+
+        bool highRisk = player->HasAura(SPELL_HIGH_RISK);
+        if (highRisk == player->pvpInfo.IsInFFAPvPArea)
+            return;
+
+        // Setting IsInFFAPvPArea is a deliberate abuse of that field, and it is
+        // contained: the core reads it only in UpdateFFAPvPState and
+        // SetFFAPvPTimer. Holding it true also keeps the 30 second unflag timer
+        // from starting, which is what a standing ruleset needs.
+        player->pvpInfo.IsInFFAPvPArea = highRisk;
+        player->UpdateFFAPvPState(false);
+    }
+};
+
 class ruleset_player_spells : public PlayerScript
 {
 public:
@@ -119,4 +165,5 @@ void AddSC_AscensionRulesets()
     RegisterSpellScript(spell_ascension_ruleset_select);
     new ruleset_aura_metadata();
     new ruleset_player_spells();
+    new ruleset_high_risk_ffa();
 }

@@ -103,3 +103,18 @@ Ascension.Manastorm.Enable = 0
 #        Default:     5
 
 AscensionCompat.LevelScalingMaxLift = 5
+#    AscensionCompat.HighRiskIsFFA
+#        Description: Give the High Risk ruleset an effect on the server.
+#                     The three rulesets — War Mode, High Risk and PvE — are
+#                     already a player-facing choice, picked from the client's
+#                     frame in a rested area, but their auras were pure markers:
+#                     only the character selection screen ever read one.
+#                     With this enabled, a High Risk character carries the FFA
+#                     flag and can be fought by anyone else in High Risk, of
+#                     either faction, which is what the ruleset name promises.
+#                     Sanctuaries and friendly capital cities are spared by the
+#                     core itself.
+#        Default:     1 - (enabled)
+#                     0 - (High Risk stays a cosmetic marker)
+
+AscensionCompat.HighRiskIsFFA = 1
