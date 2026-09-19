@@ -3601,8 +3601,14 @@ public:
         bool const unlockAll = ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::UNLOCK_ALL_VANITY);
         for (auto const& [itemId, vanity] : _vanityItems)
         {
-            if (!(vanity.CategoryMask & (VANITY_CATEGORY_MOUNTS | VANITY_CATEGORY_COMPANIONS)) ||
-                (!unlockAll && !state.OwnedVanityItems.contains(itemId)) ||
+            // Some companions are filed under another catalogue category (the Wondrous Wisdomball and the
+            // Fix-o-Tron 5000 sit under utility), so the item's own class is checked as well.
+            ItemTemplate const* item = sObjectMgr->GetItemTemplate(itemId);
+            bool const companionItem = item && item->Class == ITEM_CLASS_MISC &&
+                item->SubClass == ITEM_SUBCLASS_JUNK_PET;
+            if (!(vanity.CategoryMask & (VANITY_CATEGORY_MOUNTS | VANITY_CATEGORY_COMPANIONS)) && !companionItem)
+                continue;
+            if ((!unlockAll && !state.OwnedVanityItems.contains(itemId)) ||
                 std::binary_search(AscensionCollectibles::SigilSpells.begin(),
                     AscensionCollectibles::SigilSpells.end(), vanity.LearnedSpell) ||
                 !vanity.LearnedSpell || player->HasSpell(vanity.LearnedSpell) ||
