@@ -5960,6 +5960,30 @@ void ApplyAscensionExperienceContracts(SpellInfo* info)
     if (!info)
         return;
 
+    // Adventure Mode (challenges 211 and 425) carries one aura per tier, named
+    // "Adventure Mode N!", ids 302053 to 302882. Its first effect holds the quest
+    // XP bonus the tooltip promises, tagged with the quest source bit (2); the
+    // second holds the kill and profession malus (1 and 4).
+    //
+    // Native aura 200 only ever reaches kill XP (PlayerQuest.cpp reads 291 for
+    // quests), so without this conversion the promised bonus never arrives, and
+    // the malus applies unopposed: measured at tier 1, quest XP unchanged and
+    // kill XP (1 + 1.00) * (1 - 0.50) = 1.00, so unchanged too.
+    //
+    // The range is exact and self-limiting, measured against Spell.dbc: 100 spells
+    // carry aura 200 in it, 100 effects are convertible, and no spell outside the
+    // Adventure Mode family falls in the range.
+    //
+    // The test is `MiscValue & 2`, not `== 2`: tier 1 carries 18.
+    if (info->Id >= 302053 && info->Id <= 302882)
+    {
+        for (SpellEffectInfo& effect : info->Effects)
+            if (effect.ApplyAuraName == SPELL_AURA_MOD_XP_PCT &&
+                (effect.MiscValue & 2) && !(effect.MiscValue & 1))
+                effect.ApplyAuraName = SPELL_AURA_MOD_XP_QUEST_PCT;
+        return;
+    }
+
     switch (info->Id)
     {
         case 57353: // Heirloom Experience Bonus +10%
