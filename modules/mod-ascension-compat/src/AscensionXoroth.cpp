@@ -66,9 +66,22 @@ void Reduce(Player* player, uint32 root, int32 milliseconds)
 }
 void Replace(Player* player, uint32 root, uint32 replacement)
 {
+    // Player::SetTemporarySpellReplacement returns silently when the player does not know
+    // the replacement, and nothing else in the project teaches these helper spells (P-044).
+    // Teach it here, before walking the spell map, and drop the one it supersedes after.
+    uint32 previous = 0;
+    for (auto const& pair : player->GetSpellMap())
+        if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
+            if (uint32 current = player->GetTemporarySpellReplacement(pair.first); current != pair.first)
+                previous = current;
+    if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+        player->learnSpell(replacement, true);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             player->SetTemporarySpellReplacement(pair.first, replacement);
+    // onlyTemporary: an independently owned permanent copy is left alone.
+    if (previous && previous != replacement)
+        player->removeSpell(previous, SPEC_MASK_ALL, true);
 }
 
 bool Spender(SpellInfo const* info)
@@ -189,19 +202,21 @@ void Refresh(Player* player)
         effect->ChangeAmount(Amount(704186) + 10 * Count(player, 500906));
 
     scale(573075, player->HasAura(573035) ? player->GetUInt32Value(PLAYER_FIELD_COMBAT_RATING_1 + CR_BLOCK) / 2 : 0);
-    for (auto const& replacement : {std::array<uint32, 3>{301302, 801016, 804353},
-                                    {800710, 500904, 520005},
-                                    {570727, 801059, 802581},
-                                    {807587, 801059, 520292},
-                                    {706755, 804883, 707666}})
-    {
-        uint32 talent = replacement[0];
-        if (talent == 570727 && player->HasAura(807587))
-            continue;
-        if (talent == 807587 && player->HasAura(570727) && !player->HasAura(807587))
-            continue;
-        Replace(player, replacement[1], player->HasAura(talent) ? replacement[2] : 0);
-    }
+    // The four permanent talent replacements that used to live here (Shieldgore,
+    // Brimstone Bludgeon, Warbringer, Hellfire Bellows) moved to
+    // AscensionTalentReplacementData.h, the only path that also teaches the target
+    // spell and that handles rank gates, spec changes and forgetting the talent
+    // (P-044). Warbringer was already declared there, so this loop was a duplicate.
+    // The fifth entry, Impcaller {706755, 804883, 707666}, was a mistake and is not
+    // ported: 707666 is an aura, not a button. It has no power cost, no cooldown, no
+    // cast time and no active effect - only SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS
+    // (+29% imp health) and a SPELL_AURA_DUMMY carrier - and it is flagged
+    // SPELL_ATTR0_NO_AURA_CANCEL. AscensionXorothAbilities.cpp:457 and
+    // AscensionXorothSummons.cpp:36 read it with HasAura(707666), never as a spell.
+    // Replacing Call: Hellfire Imp with it would have removed the summon button.
+    // Open defect, deliberately not fixed here: nothing applies aura 707666 (no caster
+    // in the module, no numeric reference in the 209 510 rows of Spell.dbc), so both
+    // HasAura(707666) tests are dead today.
     bool impTalent = player->HasAura(92101) || player->HasAura(704993);
     if (impTalent && !player->HasSpell(520661))
         player->learnSpell(520661);

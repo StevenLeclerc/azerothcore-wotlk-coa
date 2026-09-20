@@ -130,9 +130,23 @@ void ReduceLibrams(Player* player, int32 milliseconds)
 }
 void Replacement(Player* player, uint32 root, uint32 replacement)
 {
+    // Player::SetTemporarySpellReplacement returns silently when the player does not know
+    // the replacement. Scarlet Hammer (807035) and Divine Fury (500689) are taught by no
+    // table, no trainer and no LEARN_SPELL effect: every call here was a silent no-op (P-044).
+    // Teach the target before walking the spell map, drop the superseded one after.
+    uint32 previous = 0;
+    for (auto const& pair : player->GetSpellMap())
+        if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
+            if (uint32 current = player->GetTemporarySpellReplacement(pair.first); current != pair.first)
+                previous = current;
+    if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+        player->learnSpell(replacement, true);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             player->SetTemporarySpellReplacement(pair.first, replacement);
+    // onlyTemporary: an independently owned permanent copy is left alone.
+    if (previous && previous != replacement)
+        player->removeSpell(previous, SPEC_MASK_ALL, true);
 }
 void ClearOaths(Player* player)
 {

@@ -237,9 +237,23 @@ void Reduce(Player* player, uint32 root, int32 milliseconds)
 }
 void Replace(Player* player, uint32 root, uint32 replacement)
 {
+    // Player::SetTemporarySpellReplacement returns silently when the player does not know
+    // the replacement. Fel Torpedo (500610) is taught by no table, no trainer and no
+    // LEARN_SPELL effect, so every call here used to be a silent no-op (P-044).
+    // Teach the target before walking the spell map, drop the superseded one after.
+    uint32 previous = 0;
+    for (auto const& pair : player->GetSpellMap())
+        if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
+            if (uint32 current = player->GetTemporarySpellReplacement(pair.first); current != pair.first)
+                previous = current;
+    if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+        player->learnSpell(replacement, true);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             player->SetTemporarySpellReplacement(pair.first, replacement);
+    // onlyTemporary: an independently owned permanent copy is left alone.
+    if (previous && previous != replacement)
+        player->removeSpell(previous, SPEC_MASK_ALL, true);
 }
 void Refresh(Player* player)
 {
