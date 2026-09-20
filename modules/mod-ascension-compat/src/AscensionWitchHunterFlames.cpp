@@ -274,8 +274,13 @@ void ApplyAscensionWitchHunterFlameContracts(SpellInfo* spellInfo)
     }
     else if (spellInfo->Id == SPELL_FLAMES_DAMAGE && spellInfo->SpellFamilyFlags == flag96(0, 0, 16384) &&
         spellInfo->Effects[EFFECT_0].Effect == SPELL_EFFECT_SCHOOL_DAMAGE && spellInfo->Effects[EFFECT_0].DieSides == 1 &&
-        !spellInfo->Effects[EFFECT_0].RealPointsPerLevel && spellInfo->Effects[EFFECT_0].BonusMultiplier == 0.25f)
+        !spellInfo->Effects[EFFECT_0].RealPointsPerLevel)
     {
+        // ascension_stock_coefficients is registered first in MP_loader.cpp and clears every
+        // EffectBonusMultiplier of this record, so the shipped 0.25 is already gone by the time this
+        // pass runs: keying the guard on it silently skipped the whole branch, SPELL_ATTR2_CANT_CRIT
+        // was never set, and Validate() dropped spell_ascension_witch_hunter_flame_damage. The three
+        // assignments below are idempotent, so re-matching an already patched record is harmless.
         spellInfo->Effects[EFFECT_0].BonusMultiplier = 0.0f;
         spellInfo->Effects[EFFECT_0].ChainTarget = 1;
         spellInfo->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;

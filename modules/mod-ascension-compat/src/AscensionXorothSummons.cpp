@@ -204,8 +204,10 @@ class spell_ascension_xoroth_sacrificial_circle : public SpellScript
     void Register() override
     {
         OnCheckCast += SpellCheckCastFn(spell_ascension_xoroth_sacrificial_circle::CheckImps);
+        // Spell.dbc declares EFFECT_0 as TargetA 22 (TARGET_SRC_CASTER) / TargetB 30
+        // (TARGET_UNIT_SRC_AREA_ALLY); the hook only binds when it names a target the record carries.
         OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_ascension_xoroth_sacrificial_circle::SelectImps,
-                                                                  EFFECT_0, TARGET_UNIT_DEST_AREA_ALLY);
+                                                                  EFFECT_0, TARGET_UNIT_SRC_AREA_ALLY);
         OnEffectHitTarget += SpellEffectFn(spell_ascension_xoroth_sacrificial_circle::Sacrifice, EFFECT_0,
                                            SPELL_EFFECT_TRIGGER_SPELL);
     }

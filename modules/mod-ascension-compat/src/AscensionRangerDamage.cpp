@@ -169,16 +169,23 @@ void ApplyAscensionRangerDamageContracts(SpellInfo* spellInfo)
         return;
 
     SpellEffectInfo& effect = spellInfo->Effects[EFFECT_1];
+    // The 2026-09-19 client Spell.dbc already records the changelog share (MiscValueB 20, where the
+    // previous file said 10) and no longer sets AttributesEx3, so the older exact-match guard stopped
+    // firing: the absorb slot stayed a school absorb and Validate() dropped the script.
     if (spellInfo->Effects[EFFECT_0].IsAura(SPELL_AURA_DUMMY) &&
         spellInfo->Effects[EFFECT_0].TriggerSpell == SPELL_RANGER_RUSTY_SHIV_DAMAGE &&
         effect.IsAura(SPELL_AURA_SCHOOL_ABSORB) && effect.BasePoints == 0 &&
-        effect.DieSides == 1 && effect.MiscValue == SPELL_SCHOOL_MASK_ALL && effect.MiscValueB == 10)
+        effect.DieSides == 1 && effect.MiscValue == SPELL_SCHOOL_MASK_ALL &&
+        (effect.MiscValueB == 10 || effect.MiscValueB == 20))
     {
         // The copied absorb slot belongs to the private accumulator, not to an
         // enemy shield. Two dummy amounts hold the stored damage and fraction.
         effect.ApplyAuraName = SPELL_AURA_DUMMY;
         effect.BasePoints = -1;
         effect.MiscValueB = 20;
+        // Every Ranger needs his own window on the same victim. Aura::CanStackWith only keeps a second
+        // caster's copy alive when this attribute is set, and the current file no longer carries it.
+        spellInfo->AttributesEx3 |= SPELL_ATTR3_DOT_STACKING_RULE;
     }
 
     // A damaging debuff leaves Elude on its successful cast, just like Toxic
