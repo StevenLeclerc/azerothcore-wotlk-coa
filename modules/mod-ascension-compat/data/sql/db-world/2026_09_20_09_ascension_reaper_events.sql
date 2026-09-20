@@ -9,13 +9,15 @@
 -- Prise d'effet :
 --   * les lignes `spell_proc`         : a chaud, `.reload spell_proc`.
 --   * les lignes `spell_script_names` : REDEMARRAGE OBLIGATOIRE. ObjectMgr::
---     LoadSpellScriptNames() n'a qu'un appelant (World.cpp:871) et l'accrochage
---     (World.cpp:883) ne tourne qu'une fois ; il n'existe pas de
---     `.reload spell_script_names`.
+--     LoadSpellScriptNames() n'a qu'un appelant (World.cpp:871) et la validation /
+--     accrochage (World.cpp:886, ObjectMgr::ValidateSpellScripts) ne tourne qu'une fois ;
+--     il n'existe pas de `.reload spell_script_names`. World.cpp:883 est
+--     sScriptMgr->LoadDatabase(), qui ne concerne pas les scripts de sort.
 --
--- DEUX PREALABLES AU REDEMARRAGE, sans lesquels les trois lignes `spell_script_names`
+-- DEUX PREALABLES AU REDEMARRAGE, sans lesquels les DEUX lignes `spell_script_names`
 -- ci-dessous designeront des scripts INEXISTANTS (P-051 a l'envers : la ligne SQL existe,
--- le script non) :
+-- le script non). La troisieme, celle de 92146, est volontairement absente : blocage
+-- documente en (3) :
 --   1. relancer `cmake` sur /opt/coa/build-main AVANT de compiler. Les sources du module
 --      sont ramassees par file(GLOB) au moment de la configuration
 --      (src/cmake/macros/AutoCollect.cmake:28) et le module n'a pas de CMakeLists.txt
@@ -62,8 +64,18 @@
 --   Murder 500376, 502679-502684, 504622 = 1 (MAGIC)
 --
 -- Consequence par ligne :
---   705403 « Soulstorm »  : 256 -> 16. Le reste de la ligne est juste et n'est pas touche
+--   705403 « Soulstorm »  : 256 -> 16. Le reste de la ligne n'est pas touche
 --                           (masque (256,8192,0), phase 1 CAST, ProcChance DBC 40).
+--                           RESERVE, mesuree : seul l'EFFET 1 de 705403 est une aura. Son
+--                           effet 0 est Effect=3 SPELL_EFFECT_DUMMY avec ApplyAuraName 42
+--                           et TriggerSpell 500363 ; SpellEffectInfo::IsAura()
+--                           (SpellInfo.cpp:416-419) exige IsUnitOwnedAuraEffect(), donc
+--                           APPLY_AURA ou une aura de zone (SpellInfo.cpp:431-461) : un
+--                           DUMMY n'en est pas une. Cet effet 0 ne produit AUCUN
+--                           AuraEffect et reste mort quel que soit le ProcFlags. Le
+--                           correctif rend vivante la moitie « effet 1 -> 680338 », pas
+--                           le gain d'ame de l'effet 0 : cette moitie-la se repare
+--                           ailleurs (spell_dbc ou C++), et n'est pas traitee ici.
 --   804004 « Soulbender » : 256 -> 16. Le masque (4,0,0) de la ligne corrigeait deja le
 --                           vrai bug du DBC — l'EffectSpellClassMask de l'aura vaut
 --                           (0,0,64) la ou Deathchaser porte SpellFamilyFlags (4,0,0) —
@@ -74,6 +86,11 @@
 --                           = 0x10000 = 65536 (Spell.cpp:4024 et 2760). Le talent est donc
 --                           aujourd'hui a moitie vivant ; 65552 = 0x10 | 0x10000 lui rend
 --                           sa seconde moitie.
+--                           MEME RESERVE que 705403 : l'effet 0 de 706792 est lui aussi un
+--                           Effect=3 SPELL_EFFECT_DUMMY (ApplyAuraName 108
+--                           ADD_PCT_MODIFIER, masque (256,0,0)). Il ne produit aucun
+--                           AuraEffect ; seul l'effet 1 (APPLY_AURA, aura 42 -> 706794)
+--                           est reveille par le correctif de ProcFlags.
 -- Note sur l'EffectSpellClassMask : ses indices dans Spell.dbc sont 122 + 3*e + k
 -- (e = effet, k = 0..2), pas 123+e / 126+e / 129+e. Verifie par temoins — Improved
 -- Fireball 11069 porte 1 en [122] (Fireball = (1,0,8)), Improved Overpower 12290 porte 4
@@ -144,6 +161,17 @@
 --   Pas de ligne `spell_proc` pour 500363 : le script s'accroche a AfterEffectApply, pas
 --   a un proc.
 --
+--   AVERTISSEMENT — DOUBLON DECLARATIF SUR 301986 « Spirit Culling ».
+--   NE JAMAIS poser de ligne `spell_proc` sur 301986 sans DisableEffectsMask 4 : son
+--   effet 2 est deja un APPLY_AURA / aura 42 PROC_TRIGGER_SPELL -> 500576, c'est-a-dire
+--   exactement ce que fait le script aura_ascension_reaper_soul_events en C++, et la faux
+--   serait invoquee DEUX fois. Il est inerte aujourd'hui pour la seule raison que son
+--   ProcFlags DBC (champ 34) vaut 0 et qu'aucune ligne `spell_proc` n'existe :
+--   SpellMgr.cpp:2248-2250 « Skip if no proc flags in DBC / if (!spellInfo->ProcFlags)
+--   continue; » saute la generation par defaut (P-045). Ce fichier ajoute justement des
+--   lignes `spell_proc` a quatre talents Faucheur voisins ; le piege est a portee de main.
+--   Consigne aussi dans INCIDENTS.md.
+--
 -- aura_ascension_reaper_soul_infusion -> 803031 « Soul Infusion »
 --   Sert 803999 « Dominion » : « Gaining Soul Infusion now increases your Armor ».
 --   803031 est une aura, pas un evenement de combat : le crochet est sa pose.
@@ -168,9 +196,31 @@
 --   sur le 4 du DBC, ce qui evite le LOG_ERROR « doesn't have ProcFlags value defined ».
 --   SpellPhaseMask reste 0, correct : 4 n'appartient pas a REQ_SPELL_PHASE_PROC_FLAG_MASK.
 --
--- aura_ascension_weakened_souls       -> 92146 « Weakened Souls »
+-- aura_ascension_weakened_souls       -> 92146 « Weakened Souls »   NON LIVRE, BLOQUE
 --   « Your Soulrend now also applies Weakened Soul. »
---   Ligne `spell_proc` necessaire, ci-dessous. Masque (0,8192,0) : Soulrend porte
+--
+--   BLOCAGE ASSUME : ni la ligne `spell_proc` sur 92146 ni la ligne `spell_script_names`
+--   ne sont posees par ce fichier. Le script existe et compile, il n'est pas accroche.
+--   Motif : le debuff qu'il poserait, 803433, est inlivrable en l'etat, et RIEN ne
+--   l'appliquait en jeu avant ce lot (`SELECT Id FROM spell_dbc WHERE Id = 803433` :
+--   0 ligne ; aucun autre appelant). L'accrocher, c'est donc CE travail qui introduirait
+--   en jeu un debuff permanent de +10 % de degats subis, non cadre. Les deux ecarts sont
+--   detailles plus bas ; les reparer demande une DECISION (quelle duree ? quel cadrage ?)
+--   qu'aucune infobulle n'ecrit — ni celle de 92146 ni celle de 803433 — et qu'on
+--   n'invente pas.
+--   POUR LIVRER, dans l'ordre : (1) decider la duree et le cadrage de 803433 ; (2) poser
+--   une ligne `spell_dbc` sur 803433 (DurationIndex, et EffectSpellClassMask de l'effet
+--   0) ; (3) seulement alors ajouter ici la ligne `spell_proc` 92146 et la ligne
+--   `spell_script_names` (92146, 'aura_ascension_weakened_souls'). Les deux DELETE
+--   ci-dessous couvrent 92146 : reappliquer ce fichier retire donc un accrochage pose par
+--   une version anterieure.
+--   Tant que ce n'est pas fait, le demarrage journalise une fois
+--   « Script named 'aura_ascension_weakened_souls' is not assigned in the database. »
+--   (ScriptMgr.h:921-926). C'est le marqueur du blocage, pas une panne.
+--
+--   LA LIGNE QUI SERA NECESSAIRE, ecrite ici pour ne pas la reconstruire :
+--     (92146, 0, 36, 0, 8192, 0, 16, 1, 2, 0, 0, 2, 0, 0, 0, 0)
+--   Masque (0,8192,0) : Soulrend porte
 --   SpellFamilyFlags (0,8192,0) sur ses 9 entrees, bit exclusif dans la famille 36
 --   (l'entree 573320 « Soulrend / aura » porte (0,1024,0) et reste donc dehors).
 --   ProcFlags 16 (MELEE), SpellTypeMask 1 (degats), SpellPhaseMask 2 (HIT) : « applies »
@@ -180,13 +230,12 @@
 --   reveiller n'apporterait rien et brouillerait l'effet 0 (P-052). Le script s'accroche
 --   a EFFECT_0 / SPELL_AURA_DUMMY, ce que le DBC donne bien a 92146.
 --   ProcChance DBC = 100.
---   DEUX RESERVES SUR LE DEBUFF POSE, 803433, mesurees et detaillees en commentaire dans
---   AscensionReaperEvents.cpp au-dessus du cast. Elles concernent 803433, sort HORS du
---   perimetre de ce fichier : rien ici ne les repare, elles sont signalees.
+--   LES DEUX ECARTS QUI BLOQUENT LA LIVRAISON, mesures, et repris en commentaire dans
+--   AscensionReaperEvents.cpp au-dessus du cast :
 --     a) duree INFINIE : DurationIndex 21, et la ligne 21 de SpellDuration.dbc vaut
 --        (-1, 0, -1). Aucune source n'ecrit de duree pour ce debuff — ni l'infobulle de
 --        92146, ni celle de 803433 — donc aucune n'est inventee. La poser demanderait une
---        ligne `spell_dbc` sur 803433.
+--        ligne `spell_dbc` sur 803433, avec une duree que PERSONNE n'a encore ecrite.
 --     b) PAS restreint a Ombre et Givre : l'effet 0 est une aura 271
 --        SPELL_AURA_MOD_DAMAGE_FROM_CASTER, qui est cadree par SpellFamilyName +
 --        EffectSpellClassMask (Unit.cpp:9365-9370 et 10869-10872 -> IsAffectedOnSpell ->
@@ -196,7 +245,11 @@
 --        drapeaux sur un masque nul : les 10 % valent pour TOUT sort de famille 36 du
 --        lanceur, Reap physique compris. Les coups d'arme automatiques restent dehors,
 --        les deux sites exigeant un spellProto. Restreindre demanderait une ligne
---        `spell_dbc` donnant un EffectSpellClassMask a l'effet 0 de 803433.
+--        `spell_dbc` donnant un EffectSpellClassMask a l'effet 0 de 803433. La seule
+--        valeur disponible sans rien inventer est (0,8192,0), les SpellFamilyFlags LUS de
+--        Soulrend : elle cadrerait le debuff sur la seule Soulrend, ce qui n'est pas
+--        « Ombre et Givre ». C'est un choix de conception, pas une lecture : il n'est pas
+--        fait ici.
 -- =====================================================================================
 
 -- -------------------------------------------------------------------------------------
@@ -216,8 +269,8 @@ INSERT INTO `spell_proc`
      `SpellFamilyMask2`, `ProcFlags`, `SpellTypeMask`, `SpellPhaseMask`, `HitMask`,
      `AttributesMask`, `DisableEffectsMask`, `ProcsPerMinute`, `Chance`, `Cooldown`, `Charges`)
 VALUES
--- 92146  « Weakened Souls »     — Soulrend, degats, phase HIT
-( 92146, 0, 36, 0, 8192, 0,    16, 1, 2, 0, 0, 2, 0, 0, 0, 0),
+-- 92146 « Weakened Souls » : VOLONTAIREMENT ABSENT (voir le blocage en tete de fichier).
+--   Le DELETE ci-dessus le couvre, ce qui defait une application anterieure.
 -- 524735 « Redshade »           — Reap, phase CAST
 (524735, 0, 36, 0,    1, 0,    16, 0, 1, 0, 0, 1, 0, 0, 0, 0),
 -- 707116 « Warden of the Lost » — degats des invocations, phase HIT
@@ -227,9 +280,12 @@ VALUES
 (803999, 0,  0, 0,    0, 0,     0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
 
 -- -------------------------------------------------------------------------------------
--- (3) accrochage des trois scripts. ABS() sur spell_id : une ligne negative laissee par
---     une version anterieure designerait le meme sort et accrocherait le script une
---     SECONDE fois (les liaisons sont stockees dans un multimap).
+-- (3) accrochage des scripts : DEUX sur trois. aura_ascension_weakened_souls n'est pas
+--     accroche, blocage documente en tete de fichier ; le DELETE le couvre quand meme,
+--     pour defaire une application anterieure de ce fichier.
+--     ABS() sur spell_id : une ligne negative laissee par une version anterieure
+--     designerait le meme sort et accrocherait le script une SECONDE fois (les liaisons
+--     sont stockees dans un multimap).
 -- -------------------------------------------------------------------------------------
 DELETE FROM `spell_script_names`
     WHERE ABS(`spell_id`) IN (500363, 803031, 92146)
@@ -238,5 +294,5 @@ DELETE FROM `spell_script_names`
                            'aura_ascension_weakened_souls');
 INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 (500363, 'aura_ascension_reaper_soul_events'),
-(803031, 'aura_ascension_reaper_soul_infusion'),
-( 92146, 'aura_ascension_weakened_souls');
+(803031, 'aura_ascension_reaper_soul_infusion');
+-- ( 92146, 'aura_ascension_weakened_souls');  -- BLOQUE : voir le blocage en tete de fichier.

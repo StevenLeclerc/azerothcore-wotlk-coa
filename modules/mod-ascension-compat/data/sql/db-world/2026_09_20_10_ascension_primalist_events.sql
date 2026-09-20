@@ -35,19 +35,25 @@
 -- 1. spell_script_names
 --
 -- `RegisterSpellScript` ne dit jamais sur quels sorts un script s'applique (P-051) : sans
--- ces lignes, les cinq scripts du fichier C++ ne tournent JAMAIS et le cœur se contente
+-- ces lignes, les scripts du fichier C++ ne tournent JAMAIS et le cœur se contente
 -- d'un « Script named '…' is not assigned in the database. » au démarrage.
 --
 -- Le DELETE porte sur `ScriptName`, PAS sur le spell_id : c'est ce qui emporte aussi une
 -- éventuelle ligne à spell_id négatif laissée par une version antérieure, qui désignerait
 -- le même sort et accrocherait le script une SECONDE fois (les liaisons sont stockées dans
 -- un multimap ; le handler tournerait deux fois).
+--
+-- `spell_ascension_primalist_bring_me_their_bones` reste dans le DELETE et n'est PLUS
+-- inséré : ce script a été supprimé du C++ (la chaîne authoriale pose déjà 806378 sur le
+-- familier, voir le bloc 806378 plus bas), et la ligne du DELETE sert à purger une
+-- éventuelle ligne laissée par une version antérieure de ce fichier.
 -- -------------------------------------------------------------------------------------
 
 DELETE FROM `spell_script_names` WHERE `ScriptName` IN
     ('aura_ascension_primalist_rupturer',
      'spell_ascension_primalist_fury_of_the_wild',
      'aura_ascension_primalist_bestial_wrath',
+     'aura_ascension_primalist_fury_of_the_wild_talent',
      'spell_ascension_primalist_bring_me_their_bones',
      'aura_ascension_primalist_bones_stacker');
 
@@ -77,8 +83,8 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 --     504856 Lion    TROIS auras 117 = 40 (mécaniques 1, 5, 10)
 --       -> 505218    DEUX auras 117 = 20 (mécaniques 1, 5) ; la troisième a DISPARU
 --     800137 Wolf    aura 31 = 25, aura 49 = 8
---       -> 802726    aura 31 = 13, aura 49 = 5 ; AUCUN effet APPLY_AURA, donc le joueur
---                    ne porte aucune application de celle-ci, seuls les invoqués l'ont
+--       -> 802726    aura 31 = 13, aura 49 = 5, plus le même dummy inerte que les quatre
+--                    autres : Effect = [190, 190, 6], ApplyAuraName = [31, 49, 4] (relu)
 --   Trois copies sur cinq perdent donc un effet au passage, et celle de Turtle n'est pas
 --   affaiblie. C'est la donnée telle qu'elle est écrite ; rien ici ne la compense.
 --
@@ -90,18 +96,36 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 --   entrante et l'aura existante sans distinguer laquelle est la copie, si bien que la
 --   copie retirerait le Boon du joueur qui vient de la lancer. C'est le SpellScript qui
 --   retire les quatre autres copies avant de poser la nouvelle.
---   Chaque copie est bâtie d'effets SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS, plus au
---   plus UN SPELL_AURA_DUMMY inerte qui est la seule chose que le joueur garde (802726
---   n'en a même pas : le joueur ne porte alors aucune application). UnitAura::FillTargetMap,
+--   Chaque copie est bâtie d'effets SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS plus UN
+--   SPELL_AURA_DUMMY inerte, qui est la seule chose que le joueur garde — les CINQ en ont
+--   un, 802726 compris (relu dans Spell.dbc). UnitAura::FillTargetMap,
 --   SpellAuras.cpp:2827-2905 : l'effet 190 ne pousse que owner->m_Controlled, jamais le
 --   porteur — pas de double buff possible.
 --   Boon of the Eagle (504773), Boon of the Tiger, Boon of the Elements et les Empowered
 --   Boons n'ont AUCUNE copie « (Pet) » dans Spell.dbc : ils restent hors du talent.
+--
+--   DURÉE DE VIE DES COPIES — les cinq copies sont PERMANENTES et rien dans la donnée ne
+--   les retire. Lancer un autre Boon scripté ne suffit donc pas : basculer sur Boon of the
+--   Eagle, du Tigre, des Éléments ou un Empowered Boon (aucune copie « (Pet) », aucun
+--   script) laisserait la dernière copie sur le joueur indéfiniment, ses invoqués buffés
+--   par un Boon qu'il n'a plus. Deux AuraScripts ferment ce trou :
+--     * `aura_ascension_primalist_fury_of_the_wild_boon` porte le MÊME nom de script que
+--       le SpellScript ci-dessus (RegisterSpellAndAuraScriptPair) : il tourne sur les cinq
+--       mêmes lignes, sans ligne supplémentaire, et retire la copie du Boon qui s'en va ;
+--     * `aura_ascension_primalist_fury_of_the_wild_talent` (ligne 801234 ci-dessous) retire
+--       les cinq copies quand le talent lui-même disparaît (respec, désapprentissage).
+--   Le SpellScript retire en outre les cinq copies quand un Boon est lancé sans le talent.
 (500935, 'spell_ascension_primalist_fury_of_the_wild'),
 (500939, 'spell_ascension_primalist_fury_of_the_wild'),
 (500943, 'spell_ascension_primalist_fury_of_the_wild'),
 (504856, 'spell_ascension_primalist_fury_of_the_wild'),
 (800137, 'spell_ascension_primalist_fury_of_the_wild'),
+
+-- 801234 « Fury of the Wild » — le talent lui-même, UNIQUEMENT pour la durée de vie des
+--   copies. Son effet 0 est un APPLY_AURA / SPELL_AURA_DUMMY (relu dans Spell.dbc) :
+--   l'AuraScript n'accroche que AfterEffectRemove sur cet effet et retire les cinq copies
+--   « (Pet) ». Il n'ajoute aucun effet au talent.
+(801234, 'aura_ascension_primalist_fury_of_the_wild_talent'),
 
 -- 803347 « Bestial Wrath » — seconde phrase de l'infobulle.
 --   La ligne spell_proc de la passe 01 couvre la première phrase (vos critiques rendent du
@@ -119,17 +143,23 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 --   l'effet 1 — les deux masques de proc sont disjoints, donc pas de piège P-052.
 (803347, 'aura_ascension_primalist_bestial_wrath'),
 
--- 806552 / 806378 « Bring Me Their Bones ».
+-- 806378 « Bring Me Their Bones » — AUCUN script sur 806552, et c'est délibéré.
 --   806552 effet 1 déclenche 806554 « Mark » (5 piles) sur l'ennemi, effet 2 déclenche
 --   806378 « Stacker Passive on Pet » (aura 42 -> 806589) sur le familier.
---   Le SpellScript sur 806552 est un FILET : il ne pose 806378 que si le familier ne le
---   porte pas déjà du même lanceur, donc il ne peut pas doubler l'effet 2 natif.
+--   CETTE PARTIE-LÀ DE LA CHAÎNE MARCHE : l'effet 0 de 806378 a ImplicitTargetA 5 =
+--   TARGET_UNIT_PET (SharedDefines.h:1507), résolu sur le LANCEUR
+--   (Spell.cpp:1824, `m_caster->GetGuardianPet()`), et le lanceur du déclenchement est le
+--   joueur. La branche LAUNCH de Spell::EffectTriggerSpell (SpellEffects.cpp:1222-1233) ne
+--   renonce que si NeedsToBeTriggeredByCaster est vrai, ce qu'il n'est pas ici
+--   (SpellInfo.cpp:1160-1202 : 806378 n'exige pas de cible explicite, 806552 n'est pas
+--   canalisé et le TargetA de son effet 2 est TARGET_CHECK_ENEMY). Une version antérieure
+--   de ce fichier annonçait un « filet » sur 806552 : il n'y en a pas, parce qu'il n'y a
+--   rien à rattraper.
 --   L'AuraScript sur 806378 remplace toute la chaîne 806589, cassée deux fois dans la
 --   donnée : son effet 0 (SPELL_EFFECT_ASCENSION_MODIFY_AURA_STACKS) a MiscValue = 0 et
 --   ModifyAscensionAuraStacks (SpellEffects.cpp:330-333) sort immédiatement sur un delta
 --   nul ; son effet 1 lance 806553 à CHAQUE coup au lieu du cinquième. Le script appelle
 --   donc PreventDefaultAction.
-(806552, 'spell_ascension_primalist_bring_me_their_bones'),
 (806378, 'aura_ascension_primalist_bones_stacker');
 
 -- -------------------------------------------------------------------------------------
@@ -164,6 +194,11 @@ INSERT INTO `spell_proc`
 --     | DONE_SPELL_NONE_DMG_CLASS_NEG | DONE_SPELL_MAGIC_DMG_CLASS_NEG.
 --     0x4 DONE_MELEE_AUTO_ATTACK est VOLONTAIREMENT exclu : l'infobulle dit
 --     « your pet's abilities », pas ses attaques blanches.
+--     0x40000 PROC_FLAG_DONE_PERIODIC (SpellMgr.h:137) est exclu AUSSI, et tout aussi
+--     volontairement : un DoT de familier ajouterait une pile par tic, alors que
+--     l'infobulle de 806554 compte des « pet attacks » et que la marque ne vit que 15 s.
+--     Aucune donnée authoriale ne dit que les périodiques doivent compter. Si l'arbitrage
+--     change, c'est une seule valeur à corriger ici : ProcFlags 331472 = 69904 | 0x40000.
 --   SpellTypeMask 1 = DAMAGE. SpellPhaseMask 2 = HIT, obligatoire pour ces quatre drapeaux.
 --   AUCUN masque de famille, et c'est voulu : les capacités d'un familier appartiennent à
 --     toutes les familles ; le tri est fait par le script, qui n'agit que si la victime

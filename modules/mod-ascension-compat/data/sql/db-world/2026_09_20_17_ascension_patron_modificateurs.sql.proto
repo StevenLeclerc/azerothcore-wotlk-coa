@@ -1,0 +1,278 @@
+-- =====================================================================================
+-- mod-ascension-compat — PATRON « MODIFICATEUR DE SORT » : prototype sur TROIS talents.
+--
+-- NE PAS APPLIQUER TEL QUEL. Ce fichier est un prototype de conception, écrit le
+-- 2026-09-20 en lecture seule. Aucune de ses lignes n'a été exécutée, ni en base de
+-- test, ni ailleurs. Il accompagne docs/CONCEPTION-patron-modificateurs.md, qui porte
+-- la mesure complète, l'arbitrage donnée-contre-C++ et la marche à suivre.
+--
+-- POURQUOI L'EXTENSION EST `.sql.proto` ET NON `.sql` — corrigé le 2026-09-20 après
+-- relecture adverse. Tant qu'il portait `.sql`, ce fichier était posé dans le répertoire
+-- que `coa-project/exploitation/appliquer-sql-module.sh` applique EN BLOC : sa boucle est
+-- `for f in "$SQLDIR"/*.sql`, elle ne saute que les fichiers déjà inscrits dans `updates`,
+-- et son unique garde-fou est que les ScriptName 'aura_ascension_*' / 'spell_ascension_*'
+-- insérés existent dans le binaire. Ce fichier n'en insère AUCUN (0 occurrence du motif) :
+-- il aurait donc été classé « PRET (aucun script nomme) », appliqué par
+-- `sudo mysql acore_world < "$f"`, inscrit dans `updates`, puis suivi d'un redémarrage de
+-- `coa-world-bots` — et c'est le redémarrage, précisément, qui rend `spell_dbc` effectif.
+-- Mesuré le 2026-09-20 : `SELECT COUNT(*) FROM updates WHERE name LIKE '2026_09_20_1%'`
+-- vaut 0, donc les fichiers 08 à 17 étaient tous en attente et seraient partis ensemble au
+-- prochain `--appliquer`. Or le débordement sur les trois autres « Gaze » (bloc 1) et le
+-- sort du bit w0.b15 (bloc 2) demandent un arbitrage humain AVANT toute application.
+-- (Le chargeur automatique d'AzerothCore, UpdateFetcher.cpp, balaye le même répertoire ;
+-- il est neutralisé ici par `Updates.EnableDatabases = 0` dans worldserver.conf — c'est le
+-- script d'exploitation, pas le cœur, qui constituait le risque.)
+-- POUR L'ARMER, une fois l'arbitrage rendu : renommer en `.sql`. Rien d'autre à changer.
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUE FAIT LE LEVIER `spell_dbc`, ET CE QU'IL COÛTE — lu dans le cœur, pas supposé
+--
+--   src/server/shared/DataStores/DBCDatabaseLoader.cpp, DBCDatabaseLoader::Load :
+--     * la requête est `SELECT * FROM spell_dbc ORDER BY ID DESC` ; il n'y a AUCUNE
+--       fusion avec le fichier : la ligne SQL REMPLACE l'entrée du DBC en entier
+--       (commentaire du cœur : « If exist in DBC file override from DB ») ;
+--     * la boucle parcourt les 234 caractères de SpellEntryfmt (DBCfmt.h) et avance
+--       d'une colonne SQL à CHAQUE caractère, y compris les 'x' ignorés, puis
+--       `ASSERT(sqlColumnNumber == result->GetFieldCount())`. La table doit donc avoir
+--       EXACTEMENT 234 colonnes, dans l'ordre du format — vérifié : elle les a, et le
+--       type de chacune concorde avec son caractère de format (contrôle mécanique) ;
+--     * une colonne omise dans l'INSERT prend son DEFAULT (0) et ÉCRASE la valeur du
+--       fichier DBC. D'où les lignes complètes ci-dessous : il n'y a pas d'INSERT partiel ;
+--     * seule exception, FT_STRING : « not override string if new string is empty ».
+--       Les 32 vraies colonnes de chaînes (Name_Lang_*, NameSubtext_Lang_*) sont donc
+--       écrites à '' et le cœur conserve le pointeur du fichier DBC. Les 32 autres
+--       colonnes textuelles (Description_Lang_*, AuraDescription_Lang_*) sont des 'x' :
+--       le serveur ne les lit pas du tout, elles sont écrites à '' aussi — y recopier
+--       l'entier du DBC n'aurait aucun sens, c'est un décalage dans le bloc de chaînes.
+--       L'infobulle que voit le joueur vient du Spell.dbc du CLIENT : ce fichier ne la
+--       change pas, et aucune réparation par la donnée ne peut corriger un texte ;
+--     * les valeurs négatives passent : Field::GetData<uint32> (Field.cpp) a un cas
+--       spécial pour les tables dont le nom finit par `_dbc` et retourne alors l'int32.
+--       Vérifié aussi en pratique : les 119 lignes en service portent déjà des négatifs
+--       (EquippedItemClass = -1, EffectBasePoints_2 = -276) ;
+--     * la table N'EST LUE QU'AU DÉMARRAGE. Il n'existe pas de `.reload spell_dbc` :
+--       contrairement à `spell_proc`, il faut redémarrer le worldserver.
+--
+--   CE QUE CE LEVIER COÛTE FACE À L'AMONT — P-047, ajouté après relecture adverse.
+--   Une ligne `spell_dbc` recopie 234 colonnes : elle FIGE le sort ENTIER à l'instantané
+--   du 2026-09-20. L'import du DBC client du 2026-09-19 a désarmé des contrats du module
+--   en silence (P-047) : c'est une mise à jour de CONTENU amont, elle recommencera. Après
+--   un tel import, les 233 colonnes que cette ligne ne voulait pas changer continueront
+--   d'écraser le fichier avec les valeurs d'hier, sans le moindre signal. Le fichier frère
+--   2026_09_20_15_ascension_runemasterfrigid.sql conclut d'ailleurs l'inverse pour la même
+--   raison (« elle figerait le sort contre le prochain import de DBC client (P-047) »).
+--   Quand le seul champ à changer est un EffectAura ou un mot de masque — c'est le cas des
+--   TROIS blocs ci-dessous — un patch C++ dans le crochet `OnLoadSpellCustomAttr`
+--   (GlobalScript, GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR ; le module en fait déjà, cf.
+--   AscensionBarbarianCompletion.cpp:68 `info->Effects[EFFECT_0].ApplyAuraName =
+--   SPELL_AURA_ADD_PCT_MODIFIER`) ne gèle QU'UN champ et survit à l'import. Ce fichier
+--   reste un prototype du levier `spell_dbc` ; il ne prétend plus être la bonne voie.
+--
+--   Coût réel d'une ligne : 234 colonnes recopiées à l'identique pour n'en changer une.
+--   Une seule erreur de recopie modifie le sort en silence. Les lignes ci-dessous ont
+--   été produites par un générateur qui relit Spell.dbc et se contrôle lui-même
+--   (coa-project/outils/gen-ligne-spell-dbc.py : il compare champ à champ ce qu'il écrit à ce
+--   qu'il a lu, et lève une assertion à la moindre divergence).
+--
+-- -------------------------------------------------------------------------------------
+-- LE PIÈGE À CONNAÎTRE AVANT DE POSER UN MASQUE
+--
+--   SpellInfo::IsAffected (SpellInfo.cpp:1422) :
+--       if (!familyName)                       return true;
+--       if (familyName != SpellFamilyName)     return false;
+--       if (familyFlags && !(familyFlags & SpellFamilyFlags)) return false;
+--       return true;
+--
+--   La troisième ligne ne s'exécute QUE si familyFlags est non nul. Un modificateur
+--   porté par un sort de famille non nulle et dont l'EffectSpellClassMask est VIDE
+--   n'est donc pas un modificateur qui rate sa cible : c'est un modificateur qui touche
+--   TOUTE LA CLASSE. Ce n'est pas une hypothèse — il y a 12 cas vivants dans le DBC en
+--   service (§ 4 du document de conception), dont le troisième prototype ci-dessous.
+--
+--   Corollaire : chaque bit d'un masque doit être confronté à TOUS les sorts de la même
+--   famille, parce que le cœur teste `mask & SpellFamilyFlags != 0` — un bit partagé
+--   élargit le modificateur en silence. L'outil qui fait cette confrontation est
+--   coa-project/outils/sonde-masque-famille.py ; sa sortie est recopiée sous chaque
+--   ligne, exhaustivement.
+--
+--   Rappel d'index, vérifié contre des témoins et contre DBCStructure.h :
+--   EffectSpellClassMask est un `std::array<flag96, 3>` aux champs 122-130, donc
+--   l'effet e occupe 122+3e, 123+3e, 124+3e — et NON 123+e / 126+e / 129+e.
+--   En colonnes SQL : MaskA_1/2/3 = effet 1 mots 1/2/3, MaskB_* = effet 2, MaskC_* = effet 3.
+--   Vérification : Arcane Power 12042 porte son aura 108 à l'effet 3 et son seul mot de
+--   masque non nul est le champ 128 (= MaskC_1). Statistique sur tout le DBC : les sorts
+--   à un seul effet modificateur d'index 0 n'ont de bits qu'aux champs 122-124, ceux
+--   d'index 1 qu'aux champs 125-127, ceux d'index 2 qu'aux champs 128-130.
+--
+-- -------------------------------------------------------------------------------------
+-- LES TROIS PROTOTYPES — trois sous-patrons, trois classes
+--
+--   1. 706188 Eyes of Eternity   Cultist       P1 cooldown   EffectAura_2 : 4 -> 107
+--   2. 504269 The Grim Reaper    Reaper        P6 critique   EffectAura_1 : 4 -> 108
+--   3. 681493 Guardbreaker       Witch Hunter  P7 dégâts     EffectSpellClassMaskC_3 : 0 -> 33554432
+--
+--   Aucun des trois n'est touché par du C++ ni par une table : vérifié par `grep` sur
+--   /opt/coa/core-main/modules/mod-ascension-compat/src et src/server (706188 n'apparaît
+--   que dans un `HasAura` de AscensionCultistAbilities.cpp:219, qui concerne son autre
+--   moitié ; 504269 n'apparaît que dans AscensionTalentReplacementData.h ; 681493
+--   n'apparaît nulle part), et par `SELECT` sur spell_script_names, spell_proc et
+--   spell_linked_spell : zéro ligne pour les trois.
+--   Aucun des trois n'est déjà dans `spell_dbc` (119 lignes relevées, ids disjoints).
+-- =====================================================================================
+
+
+-- -------------------------------------------------------------------------------------
+-- 1) 706188  « Eyes of Eternity »  —  Cultist, famille 31  —  P1 : cooldown
+--
+-- État lu dans Spell.dbc :
+--   e1 : Effect=6 APPLY_AURA, EffectAura=4 SPELL_AURA_DUMMY, MiscValue=11,
+--        BasePoints=-5001 (+DieSides 1 => montant -5000), masque (4,0,0)
+--   e0 : Effect=3 DUMMY, aura 108, MiscValue=15  -> effet non porteur d'aura, inerte
+--   e2 : Effect=6, aura 4, MiscValue=37          -> 37 hors de [0,32), sans emploi
+--
+-- Ce que dit la donnée : l'infobulle d'aura (champ 187) est
+--   « Reduces the cooldown of Gaze of C'Thun by $/1000;s2 sec »
+-- $s2 désigne l'effet 2, c'est-à-dire l'indice 1 : exactement l'effet ci-dessus.
+-- MiscValue 11 est SPELLMOD_COOLDOWN (SpellDefines.h:71). -5000 / 1000 = -5 s.
+-- Promesse écrite, opérande écrit, valeur écrite, masque écrit : il ne manque que
+-- l'aura. Une aura 4 DUMMY ne crée aucun SpellModifier — AuraEffect::CalculateSpellMod
+-- (SpellAuraEffects.cpp:768) ne s'exécute que pour 107 et 108.
+-- FLAT et non PCT : la valeur est en millisecondes, et l'infobulle la divise par 1000.
+--
+-- CONFRONTATION DU MASQUE (4,0,0) À LA FAMILLE 31 — 1212 sorts examinés, un seul bit :
+--   w0 bit 2 (=4) : 13 sorts de la famille le portent
+--       500110 Gaze of C'Thun        Rank 1      <- la cible annoncée
+--       502135..502143 Gaze of C'Thun Rank 2..10 <- ses neuf autres rangs
+--       500640 Gaze of N'Zoth        Rank 1      <- SPILLOVER
+--       500641 Gaze of Y'shaarj      Rank 1      <- SPILLOVER
+--       500642 Gaze of Yogg-Saron    Rank 1      <- SPILLOVER
+--   Les dix rangs de Gaze of C'Thun sont voulus. Les trois autres « Gaze » ne le sont
+--   pas : l'infobulle ne nomme que C'Thun. Aucun bit plus fin n'existe — les quatre
+--   sorts portent exactement le même SpellFamilyFlags (4,0,0). La donnée ne sait donc
+--   PAS les séparer : soit on accepte que les trois autres Gaze voient aussi leur
+--   cooldown baisser de 5 s, soit il faut du C++. Le prototype accepte le débordement
+--   et le déclare ; c'est au concepteur de trancher avant d'appliquer.
+-- -------------------------------------------------------------------------------------
+DELETE FROM `spell_dbc` WHERE `ID` = 706188;
+INSERT INTO `spell_dbc`
+(`ID`, `Category`, `DispelType`, `Mechanic`, `Attributes`, `AttributesEx`, `AttributesEx2`, `AttributesEx3`, `AttributesEx4`, `AttributesEx5`, `AttributesEx6`, `AttributesEx7`, `ShapeshiftMask`, `unk_320_2`, `ShapeshiftExclude`, `unk_320_3`, `Targets`, `TargetCreatureType`, `RequiresSpellFocus`, `FacingCasterFlags`, `CasterAuraState`, `TargetAuraState`, `ExcludeCasterAuraState`, `ExcludeTargetAuraState`, `CasterAuraSpell`, `TargetAuraSpell`, `ExcludeCasterAuraSpell`, `ExcludeTargetAuraSpell`, `CastingTimeIndex`, `RecoveryTime`, `CategoryRecoveryTime`, `InterruptFlags`, `AuraInterruptFlags`, `ChannelInterruptFlags`, `ProcTypeMask`, `ProcChance`, `ProcCharges`, `MaxLevel`, `BaseLevel`, `SpellLevel`, `DurationIndex`, `PowerType`, `ManaCost`, `ManaCostPerLevel`, `ManaPerSecond`, `ManaPerSecondPerLevel`, `RangeIndex`, `Speed`, `ModalNextSpell`, `CumulativeAura`, `Totem_1`, `Totem_2`, `Reagent_1`, `Reagent_2`, `Reagent_3`, `Reagent_4`, `Reagent_5`, `Reagent_6`, `Reagent_7`, `Reagent_8`, `ReagentCount_1`, `ReagentCount_2`, `ReagentCount_3`, `ReagentCount_4`, `ReagentCount_5`, `ReagentCount_6`, `ReagentCount_7`, `ReagentCount_8`, `EquippedItemClass`, `EquippedItemSubclass`, `EquippedItemInvTypes`, `Effect_1`, `Effect_2`, `Effect_3`, `EffectDieSides_1`, `EffectDieSides_2`, `EffectDieSides_3`, `EffectRealPointsPerLevel_1`, `EffectRealPointsPerLevel_2`, `EffectRealPointsPerLevel_3`, `EffectBasePoints_1`, `EffectBasePoints_2`, `EffectBasePoints_3`, `EffectMechanic_1`, `EffectMechanic_2`, `EffectMechanic_3`, `ImplicitTargetA_1`, `ImplicitTargetA_2`, `ImplicitTargetA_3`, `ImplicitTargetB_1`, `ImplicitTargetB_2`, `ImplicitTargetB_3`, `EffectRadiusIndex_1`, `EffectRadiusIndex_2`, `EffectRadiusIndex_3`, `EffectAura_1`, `EffectAura_2`, `EffectAura_3`, `EffectAuraPeriod_1`, `EffectAuraPeriod_2`, `EffectAuraPeriod_3`, `EffectMultipleValue_1`, `EffectMultipleValue_2`, `EffectMultipleValue_3`, `EffectChainTargets_1`, `EffectChainTargets_2`, `EffectChainTargets_3`, `EffectItemType_1`, `EffectItemType_2`, `EffectItemType_3`, `EffectMiscValue_1`, `EffectMiscValue_2`, `EffectMiscValue_3`, `EffectMiscValueB_1`, `EffectMiscValueB_2`, `EffectMiscValueB_3`, `EffectTriggerSpell_1`, `EffectTriggerSpell_2`, `EffectTriggerSpell_3`, `EffectPointsPerCombo_1`, `EffectPointsPerCombo_2`, `EffectPointsPerCombo_3`, `EffectSpellClassMaskA_1`, `EffectSpellClassMaskA_2`, `EffectSpellClassMaskA_3`, `EffectSpellClassMaskB_1`, `EffectSpellClassMaskB_2`, `EffectSpellClassMaskB_3`, `EffectSpellClassMaskC_1`, `EffectSpellClassMaskC_2`, `EffectSpellClassMaskC_3`, `SpellVisualID_1`, `SpellVisualID_2`, `SpellIconID`, `ActiveIconID`, `SpellPriority`, `Name_Lang_enUS`, `Name_Lang_enGB`, `Name_Lang_koKR`, `Name_Lang_frFR`, `Name_Lang_deDE`, `Name_Lang_enCN`, `Name_Lang_zhCN`, `Name_Lang_enTW`, `Name_Lang_zhTW`, `Name_Lang_esES`, `Name_Lang_esMX`, `Name_Lang_ruRU`, `Name_Lang_ptPT`, `Name_Lang_ptBR`, `Name_Lang_itIT`, `Name_Lang_Unk`, `Name_Lang_Mask`, `NameSubtext_Lang_enUS`, `NameSubtext_Lang_enGB`, `NameSubtext_Lang_koKR`, `NameSubtext_Lang_frFR`, `NameSubtext_Lang_deDE`, `NameSubtext_Lang_enCN`, `NameSubtext_Lang_zhCN`, `NameSubtext_Lang_enTW`, `NameSubtext_Lang_zhTW`, `NameSubtext_Lang_esES`, `NameSubtext_Lang_esMX`, `NameSubtext_Lang_ruRU`, `NameSubtext_Lang_ptPT`, `NameSubtext_Lang_ptBR`, `NameSubtext_Lang_itIT`, `NameSubtext_Lang_Unk`, `NameSubtext_Lang_Mask`, `Description_Lang_enUS`, `Description_Lang_enGB`, `Description_Lang_koKR`, `Description_Lang_frFR`, `Description_Lang_deDE`, `Description_Lang_enCN`, `Description_Lang_zhCN`, `Description_Lang_enTW`, `Description_Lang_zhTW`, `Description_Lang_esES`, `Description_Lang_esMX`, `Description_Lang_ruRU`, `Description_Lang_ptPT`, `Description_Lang_ptBR`, `Description_Lang_itIT`, `Description_Lang_Unk`, `Description_Lang_Mask`, `AuraDescription_Lang_enUS`, `AuraDescription_Lang_enGB`, `AuraDescription_Lang_koKR`, `AuraDescription_Lang_frFR`, `AuraDescription_Lang_deDE`, `AuraDescription_Lang_enCN`, `AuraDescription_Lang_zhCN`, `AuraDescription_Lang_enTW`, `AuraDescription_Lang_zhTW`, `AuraDescription_Lang_esES`, `AuraDescription_Lang_esMX`, `AuraDescription_Lang_ruRU`, `AuraDescription_Lang_ptPT`, `AuraDescription_Lang_ptBR`, `AuraDescription_Lang_itIT`, `AuraDescription_Lang_Unk`, `AuraDescription_Lang_Mask`, `ManaCostPct`, `StartRecoveryCategory`, `StartRecoveryTime`, `MaxTargetLevel`, `SpellClassSet`, `SpellClassMask_1`, `SpellClassMask_2`, `SpellClassMask_3`, `MaxTargets`, `DefenseType`, `PreventionType`, `StanceBarOrder`, `EffectChainAmplitude_1`, `EffectChainAmplitude_2`, `EffectChainAmplitude_3`, `MinFactionID`, `MinReputation`, `RequiredAuraVision`, `RequiredTotemCategoryID_1`, `RequiredTotemCategoryID_2`, `RequiredAreasID`, `SchoolMask`, `RuneCostID`, `SpellMissileID`, `PowerDisplayID`, `EffectBonusMultiplier_1`, `EffectBonusMultiplier_2`, `EffectBonusMultiplier_3`, `SpellDescriptionVariableID`, `SpellDifficultyID`)
+VALUES
+(706188, 0, 0, 0, 448, 268435456, 1073741824, 67109376, 0, 0, 128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 132450, 0, 3, 6, 6, 1, 1, 1, 0, 0, 0, 9, -5001, 9, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 108, 107, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 11, 37, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1073741824, 4, 0, 0, 0, 0, 1073741824, 0, 0, 70383, 0, 50, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 0, 0, 0, 0, 31, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0);
+
+-- -------------------------------------------------------------------------------------
+-- 2) 504269  « The Grim Reaper »  —  Reaper, famille 36  —  P6 : dégâts de critique
+--
+-- État lu dans Spell.dbc :
+--   e0 : Effect=6 APPLY_AURA, EffectAura=4 SPELL_AURA_DUMMY, MiscValue=15,
+--        BasePoints=14 (+1 => montant 15), masque (32768, 33554432, 0)
+--   e1, e2 : vides.
+--
+-- Ce que dit la donnée : l'infobulle d'aura est
+--   « Increases the critical damage of Slaughter by ${$w1}% »
+-- $w1 = la valeur de l'effet 1 = 15. MiscValue 15 est SPELLMOD_CRIT_DAMAGE_BONUS.
+-- PCT et non FLAT : l'infobulle écrit un pourcentage, et 15 points plats de bonus de
+-- dégâts critiques n'aurait aucun sens sur cet opérande.
+--
+-- CONFRONTATION DU MASQUE (32768, 33554432, 0) À LA FAMILLE 36 — 1018 sorts, deux bits :
+--   w1 bit 25 (=33554432) : 7 sorts
+--       500373 Slaughter Rank 1  +  500429..500434 Slaughter Rank 2..7
+--       -> exactement la cible annoncée, ses sept rangs, rien d'autre. Bit RETENU.
+--   w0 bit 15 (=32768)    : 1 sort
+--       520533 Painbringer, rank « Trigger1 », Effect[0] = 178
+--       -> l'effet 178 est branché sur &Spell::EffectNULL dans SpellEffects.cpp:250
+--          (« unknown Ascension effect ») : ce sort n'exécute rien, il n'inflige aucun
+--          dégât, et un modificateur de dégâts critiques posé sur lui est sans portée.
+--          Le bit est donc conservé tel qu'il est écrit dans le DBC — le débordement
+--          est prouvé inoffensif.
+--
+--   LE JUMEAU 504028 TRANCHE LES DEUX QUESTIONS — lu après coup, relecture adverse.
+--   Il existe un second sort « The Grim Reaper », 504028, rank vide, MÊME famille 36,
+--   MÊME infobulle (« Increases the critical damage of Slaughter by $s1% »), déjà encodé :
+--       e1 = Effect 6 APPLY_AURA, aura 107 ADD_FLAT_MODIFIER, MiscValue 15,
+--            BasePoints 19 / DieSides 1 => montant 20, masque (0, 33554432, 0).
+--   Deux enseignements, et un piège :
+--     * son masque OMET w0.b15 : confronté à la famille 36 il rend Slaughter x7 et rien
+--       d'autre. C'est la seule écriture disponible sur le sort de ce bit, et elle dit
+--       de le retirer. Le retirer (MaskA_1 = 0) est donc mieux étayé que le conserver.
+--     * son aura est FLAT, pas PCT — et c'est 504028 qui a tort, pas ce prototype :
+--       Unit.cpp:9885 applique SPELLMOD_CRIT_DAMAGE_BONUS à `crit_bonus`, un MONTANT de
+--       dégâts ; un +20 plat n'a aucun sens pour une infobulle écrite en %.
+--     * 504028 est ABSENT de la population des 3 928 sorts de talent (sonde-talents/
+--       final.json, vérifié) : ce n'est pas un talent appris, il n'y a donc pas de
+--       double comptage avec 504269. C'est un doublon amont, pas une lecture à suivre.
+-- -------------------------------------------------------------------------------------
+DELETE FROM `spell_dbc` WHERE `ID` = 504269;
+INSERT INTO `spell_dbc`
+(`ID`, `Category`, `DispelType`, `Mechanic`, `Attributes`, `AttributesEx`, `AttributesEx2`, `AttributesEx3`, `AttributesEx4`, `AttributesEx5`, `AttributesEx6`, `AttributesEx7`, `ShapeshiftMask`, `unk_320_2`, `ShapeshiftExclude`, `unk_320_3`, `Targets`, `TargetCreatureType`, `RequiresSpellFocus`, `FacingCasterFlags`, `CasterAuraState`, `TargetAuraState`, `ExcludeCasterAuraState`, `ExcludeTargetAuraState`, `CasterAuraSpell`, `TargetAuraSpell`, `ExcludeCasterAuraSpell`, `ExcludeTargetAuraSpell`, `CastingTimeIndex`, `RecoveryTime`, `CategoryRecoveryTime`, `InterruptFlags`, `AuraInterruptFlags`, `ChannelInterruptFlags`, `ProcTypeMask`, `ProcChance`, `ProcCharges`, `MaxLevel`, `BaseLevel`, `SpellLevel`, `DurationIndex`, `PowerType`, `ManaCost`, `ManaCostPerLevel`, `ManaPerSecond`, `ManaPerSecondPerLevel`, `RangeIndex`, `Speed`, `ModalNextSpell`, `CumulativeAura`, `Totem_1`, `Totem_2`, `Reagent_1`, `Reagent_2`, `Reagent_3`, `Reagent_4`, `Reagent_5`, `Reagent_6`, `Reagent_7`, `Reagent_8`, `ReagentCount_1`, `ReagentCount_2`, `ReagentCount_3`, `ReagentCount_4`, `ReagentCount_5`, `ReagentCount_6`, `ReagentCount_7`, `ReagentCount_8`, `EquippedItemClass`, `EquippedItemSubclass`, `EquippedItemInvTypes`, `Effect_1`, `Effect_2`, `Effect_3`, `EffectDieSides_1`, `EffectDieSides_2`, `EffectDieSides_3`, `EffectRealPointsPerLevel_1`, `EffectRealPointsPerLevel_2`, `EffectRealPointsPerLevel_3`, `EffectBasePoints_1`, `EffectBasePoints_2`, `EffectBasePoints_3`, `EffectMechanic_1`, `EffectMechanic_2`, `EffectMechanic_3`, `ImplicitTargetA_1`, `ImplicitTargetA_2`, `ImplicitTargetA_3`, `ImplicitTargetB_1`, `ImplicitTargetB_2`, `ImplicitTargetB_3`, `EffectRadiusIndex_1`, `EffectRadiusIndex_2`, `EffectRadiusIndex_3`, `EffectAura_1`, `EffectAura_2`, `EffectAura_3`, `EffectAuraPeriod_1`, `EffectAuraPeriod_2`, `EffectAuraPeriod_3`, `EffectMultipleValue_1`, `EffectMultipleValue_2`, `EffectMultipleValue_3`, `EffectChainTargets_1`, `EffectChainTargets_2`, `EffectChainTargets_3`, `EffectItemType_1`, `EffectItemType_2`, `EffectItemType_3`, `EffectMiscValue_1`, `EffectMiscValue_2`, `EffectMiscValue_3`, `EffectMiscValueB_1`, `EffectMiscValueB_2`, `EffectMiscValueB_3`, `EffectTriggerSpell_1`, `EffectTriggerSpell_2`, `EffectTriggerSpell_3`, `EffectPointsPerCombo_1`, `EffectPointsPerCombo_2`, `EffectPointsPerCombo_3`, `EffectSpellClassMaskA_1`, `EffectSpellClassMaskA_2`, `EffectSpellClassMaskA_3`, `EffectSpellClassMaskB_1`, `EffectSpellClassMaskB_2`, `EffectSpellClassMaskB_3`, `EffectSpellClassMaskC_1`, `EffectSpellClassMaskC_2`, `EffectSpellClassMaskC_3`, `SpellVisualID_1`, `SpellVisualID_2`, `SpellIconID`, `ActiveIconID`, `SpellPriority`, `Name_Lang_enUS`, `Name_Lang_enGB`, `Name_Lang_koKR`, `Name_Lang_frFR`, `Name_Lang_deDE`, `Name_Lang_enCN`, `Name_Lang_zhCN`, `Name_Lang_enTW`, `Name_Lang_zhTW`, `Name_Lang_esES`, `Name_Lang_esMX`, `Name_Lang_ruRU`, `Name_Lang_ptPT`, `Name_Lang_ptBR`, `Name_Lang_itIT`, `Name_Lang_Unk`, `Name_Lang_Mask`, `NameSubtext_Lang_enUS`, `NameSubtext_Lang_enGB`, `NameSubtext_Lang_koKR`, `NameSubtext_Lang_frFR`, `NameSubtext_Lang_deDE`, `NameSubtext_Lang_enCN`, `NameSubtext_Lang_zhCN`, `NameSubtext_Lang_enTW`, `NameSubtext_Lang_zhTW`, `NameSubtext_Lang_esES`, `NameSubtext_Lang_esMX`, `NameSubtext_Lang_ruRU`, `NameSubtext_Lang_ptPT`, `NameSubtext_Lang_ptBR`, `NameSubtext_Lang_itIT`, `NameSubtext_Lang_Unk`, `NameSubtext_Lang_Mask`, `Description_Lang_enUS`, `Description_Lang_enGB`, `Description_Lang_koKR`, `Description_Lang_frFR`, `Description_Lang_deDE`, `Description_Lang_enCN`, `Description_Lang_zhCN`, `Description_Lang_enTW`, `Description_Lang_zhTW`, `Description_Lang_esES`, `Description_Lang_esMX`, `Description_Lang_ruRU`, `Description_Lang_ptPT`, `Description_Lang_ptBR`, `Description_Lang_itIT`, `Description_Lang_Unk`, `Description_Lang_Mask`, `AuraDescription_Lang_enUS`, `AuraDescription_Lang_enGB`, `AuraDescription_Lang_koKR`, `AuraDescription_Lang_frFR`, `AuraDescription_Lang_deDE`, `AuraDescription_Lang_enCN`, `AuraDescription_Lang_zhCN`, `AuraDescription_Lang_enTW`, `AuraDescription_Lang_zhTW`, `AuraDescription_Lang_esES`, `AuraDescription_Lang_esMX`, `AuraDescription_Lang_ruRU`, `AuraDescription_Lang_ptPT`, `AuraDescription_Lang_ptBR`, `AuraDescription_Lang_itIT`, `AuraDescription_Lang_Unk`, `AuraDescription_Lang_Mask`, `ManaCostPct`, `StartRecoveryCategory`, `StartRecoveryTime`, `MaxTargetLevel`, `SpellClassSet`, `SpellClassMask_1`, `SpellClassMask_2`, `SpellClassMask_3`, `MaxTargets`, `DefenseType`, `PreventionType`, `StanceBarOrder`, `EffectChainAmplitude_1`, `EffectChainAmplitude_2`, `EffectChainAmplitude_3`, `MinFactionID`, `MinReputation`, `RequiredAuraVision`, `RequiredTotemCategoryID_1`, `RequiredTotemCategoryID_2`, `RequiredAreasID`, `SchoolMask`, `RuneCostID`, `SpellMissileID`, `PowerDisplayID`, `EffectBonusMultiplier_1`, `EffectBonusMultiplier_2`, `EffectBonusMultiplier_3`, `SpellDescriptionVariableID`, `SpellDifficultyID`)
+VALUES
+(504269, 0, 0, 0, 448, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 6, 0, 0, 1, 1, 1, 0, 0, 0, 14, -1, -1, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32768, 33554432, 0, 0, 0, 0, 0, 0, 0, 0, 0, 63758, 0, 0, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 0, 0, 0, 0, 36, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+
+-- -------------------------------------------------------------------------------------
+-- 3) 681493  « Guardbreaker »  —  Witch Hunter, famille 21  —  P7 : dégâts
+--
+-- CE PROTOTYPE NE RÉPARE PAS UN SILENCE : IL ÉTEINT UN INCENDIE.
+--
+-- État lu dans Spell.dbc :
+--   e0 : Effect=6, aura 107, MiscValue=17 SPELLMOD_JUMP_TARGETS, montant 3,
+--        masque (0, 0, 33554432)
+--   e1 : Effect=6, aura 42 PROC_TRIGGER_SPELL -> EffectTriggerSpell_2 = 582588
+--        « Pommel Smash » rank « Aura » (aura 87 MOD_DAMAGE_TAKEN MiscValue 126, +
+--        aura 271). Ce proc est inerte, mais pour une autre raison : ProcFlags DBC
+--        (champ 34) = 0 et aucune ligne `spell_proc` — P-045. Le patron n'y touche pas.
+--        (Une première rédaction de ce commentaire disait « sans sort déclenché » :
+--         c'était faux, et la valeur 582588 figure dans l'INSERT ci-dessous.)
+--   e2 : Effect=6, aura 108 ADD_PCT_MODIFIER, MiscValue=0 SPELLMOD_DAMAGE,
+--        BasePoints=49 (+1 => +50 %), masque (0, 0, 0)   <-- VIDE
+--
+-- L'infobulle dit « Increases the damage of Pommel Smash by $s3% and it now strikes
+-- 2 additional nearby enemies ». Les deux moitiés sont dans le DBC, mais seule la
+-- première porte son masque. La seconde, avec un masque vide et une famille non nulle,
+-- tombe dans la première branche de IsAffected et rend true pour TOUT : aujourd'hui,
+-- ce talent donne +50 % de dégâts à l'intégralité des sorts de famille 21 du
+-- Witch Hunter, pas au seul Pommel Smash.
+--
+-- Le masque juste n'est pas à deviner. Deux écritures le donnent, et la seconde est la
+-- plus forte :
+--   (a) il est écrit six champs plus haut, sur l'effet 1 du MÊME sort, qui vise la même
+--       capacité ;
+--   (b) LE RANG 1 DE CE TALENT EST SAIN. 681097 « Guardbreaker » Rank 1, même famille 21 :
+--         e1 = aura 107, MiscValue 17 JUMP_TARGETS, montant 2, masque (0,0,33554432)
+--         e2 = aura 108 ADD_PCT_MODIFIER, MiscValue 0 SPELLMOD_DAMAGE, montant 25,
+--              masque (0,0,33554432)   <-- exactement ce que le rang 2 a perdu
+--       Le rang 2 n'a donc pas « oublié » un masque à l'origine : il l'a PERDU. C'est une
+--       régression de saisie amont, reproductible — comparer systématiquement les rangs
+--       d'un même talent est un contrôle qui vaut d'être fait ailleurs.
+--
+-- CONFRONTATION DU MASQUE (0,0,33554432) À LA FAMILLE 21 — 1108 sorts, un seul bit :
+--   w2 bit 25 (=33554432) : 1 sort
+--       680515 Pommel Smash, Rank 1  -> la cible annoncée, et elle seule.
+--   Contrôle du nom : deux sorts s'appellent « Pommel Smash » dans tout le DBC —
+--   680515 (Rank 1, flags (0,0,33554432)) et 582588 (rank « Aura », flags (0,0,524288)).
+--   Le second est l'aura de marquage, pas la capacité ; il ne porte pas ce bit et n'est
+--   donc pas touché. Aucun rang 2+ n'existe. Aucun débordement.
+--
+-- Ce que ce prototype NE fait pas : rien ici ne juge l'effet 1 (JUMP_TARGETS = 3 alors
+-- que l'infobulle promet « 2 additional »). Ce n'est pas l'objet du patron.
+-- -------------------------------------------------------------------------------------
+DELETE FROM `spell_dbc` WHERE `ID` = 681493;
+INSERT INTO `spell_dbc`
+(`ID`, `Category`, `DispelType`, `Mechanic`, `Attributes`, `AttributesEx`, `AttributesEx2`, `AttributesEx3`, `AttributesEx4`, `AttributesEx5`, `AttributesEx6`, `AttributesEx7`, `ShapeshiftMask`, `unk_320_2`, `ShapeshiftExclude`, `unk_320_3`, `Targets`, `TargetCreatureType`, `RequiresSpellFocus`, `FacingCasterFlags`, `CasterAuraState`, `TargetAuraState`, `ExcludeCasterAuraState`, `ExcludeTargetAuraState`, `CasterAuraSpell`, `TargetAuraSpell`, `ExcludeCasterAuraSpell`, `ExcludeTargetAuraSpell`, `CastingTimeIndex`, `RecoveryTime`, `CategoryRecoveryTime`, `InterruptFlags`, `AuraInterruptFlags`, `ChannelInterruptFlags`, `ProcTypeMask`, `ProcChance`, `ProcCharges`, `MaxLevel`, `BaseLevel`, `SpellLevel`, `DurationIndex`, `PowerType`, `ManaCost`, `ManaCostPerLevel`, `ManaPerSecond`, `ManaPerSecondPerLevel`, `RangeIndex`, `Speed`, `ModalNextSpell`, `CumulativeAura`, `Totem_1`, `Totem_2`, `Reagent_1`, `Reagent_2`, `Reagent_3`, `Reagent_4`, `Reagent_5`, `Reagent_6`, `Reagent_7`, `Reagent_8`, `ReagentCount_1`, `ReagentCount_2`, `ReagentCount_3`, `ReagentCount_4`, `ReagentCount_5`, `ReagentCount_6`, `ReagentCount_7`, `ReagentCount_8`, `EquippedItemClass`, `EquippedItemSubclass`, `EquippedItemInvTypes`, `Effect_1`, `Effect_2`, `Effect_3`, `EffectDieSides_1`, `EffectDieSides_2`, `EffectDieSides_3`, `EffectRealPointsPerLevel_1`, `EffectRealPointsPerLevel_2`, `EffectRealPointsPerLevel_3`, `EffectBasePoints_1`, `EffectBasePoints_2`, `EffectBasePoints_3`, `EffectMechanic_1`, `EffectMechanic_2`, `EffectMechanic_3`, `ImplicitTargetA_1`, `ImplicitTargetA_2`, `ImplicitTargetA_3`, `ImplicitTargetB_1`, `ImplicitTargetB_2`, `ImplicitTargetB_3`, `EffectRadiusIndex_1`, `EffectRadiusIndex_2`, `EffectRadiusIndex_3`, `EffectAura_1`, `EffectAura_2`, `EffectAura_3`, `EffectAuraPeriod_1`, `EffectAuraPeriod_2`, `EffectAuraPeriod_3`, `EffectMultipleValue_1`, `EffectMultipleValue_2`, `EffectMultipleValue_3`, `EffectChainTargets_1`, `EffectChainTargets_2`, `EffectChainTargets_3`, `EffectItemType_1`, `EffectItemType_2`, `EffectItemType_3`, `EffectMiscValue_1`, `EffectMiscValue_2`, `EffectMiscValue_3`, `EffectMiscValueB_1`, `EffectMiscValueB_2`, `EffectMiscValueB_3`, `EffectTriggerSpell_1`, `EffectTriggerSpell_2`, `EffectTriggerSpell_3`, `EffectPointsPerCombo_1`, `EffectPointsPerCombo_2`, `EffectPointsPerCombo_3`, `EffectSpellClassMaskA_1`, `EffectSpellClassMaskA_2`, `EffectSpellClassMaskA_3`, `EffectSpellClassMaskB_1`, `EffectSpellClassMaskB_2`, `EffectSpellClassMaskB_3`, `EffectSpellClassMaskC_1`, `EffectSpellClassMaskC_2`, `EffectSpellClassMaskC_3`, `SpellVisualID_1`, `SpellVisualID_2`, `SpellIconID`, `ActiveIconID`, `SpellPriority`, `Name_Lang_enUS`, `Name_Lang_enGB`, `Name_Lang_koKR`, `Name_Lang_frFR`, `Name_Lang_deDE`, `Name_Lang_enCN`, `Name_Lang_zhCN`, `Name_Lang_enTW`, `Name_Lang_zhTW`, `Name_Lang_esES`, `Name_Lang_esMX`, `Name_Lang_ruRU`, `Name_Lang_ptPT`, `Name_Lang_ptBR`, `Name_Lang_itIT`, `Name_Lang_Unk`, `Name_Lang_Mask`, `NameSubtext_Lang_enUS`, `NameSubtext_Lang_enGB`, `NameSubtext_Lang_koKR`, `NameSubtext_Lang_frFR`, `NameSubtext_Lang_deDE`, `NameSubtext_Lang_enCN`, `NameSubtext_Lang_zhCN`, `NameSubtext_Lang_enTW`, `NameSubtext_Lang_zhTW`, `NameSubtext_Lang_esES`, `NameSubtext_Lang_esMX`, `NameSubtext_Lang_ruRU`, `NameSubtext_Lang_ptPT`, `NameSubtext_Lang_ptBR`, `NameSubtext_Lang_itIT`, `NameSubtext_Lang_Unk`, `NameSubtext_Lang_Mask`, `Description_Lang_enUS`, `Description_Lang_enGB`, `Description_Lang_koKR`, `Description_Lang_frFR`, `Description_Lang_deDE`, `Description_Lang_enCN`, `Description_Lang_zhCN`, `Description_Lang_enTW`, `Description_Lang_zhTW`, `Description_Lang_esES`, `Description_Lang_esMX`, `Description_Lang_ruRU`, `Description_Lang_ptPT`, `Description_Lang_ptBR`, `Description_Lang_itIT`, `Description_Lang_Unk`, `Description_Lang_Mask`, `AuraDescription_Lang_enUS`, `AuraDescription_Lang_enGB`, `AuraDescription_Lang_koKR`, `AuraDescription_Lang_frFR`, `AuraDescription_Lang_deDE`, `AuraDescription_Lang_enCN`, `AuraDescription_Lang_zhCN`, `AuraDescription_Lang_enTW`, `AuraDescription_Lang_zhTW`, `AuraDescription_Lang_esES`, `AuraDescription_Lang_esMX`, `AuraDescription_Lang_ruRU`, `AuraDescription_Lang_ptPT`, `AuraDescription_Lang_ptBR`, `AuraDescription_Lang_itIT`, `AuraDescription_Lang_Unk`, `AuraDescription_Lang_Mask`, `ManaCostPct`, `StartRecoveryCategory`, `StartRecoveryTime`, `MaxTargetLevel`, `SpellClassSet`, `SpellClassMask_1`, `SpellClassMask_2`, `SpellClassMask_3`, `MaxTargets`, `DefenseType`, `PreventionType`, `StanceBarOrder`, `EffectChainAmplitude_1`, `EffectChainAmplitude_2`, `EffectChainAmplitude_3`, `MinFactionID`, `MinReputation`, `RequiredAuraVision`, `RequiredTotemCategoryID_1`, `RequiredTotemCategoryID_2`, `RequiredAreasID`, `SchoolMask`, `RuneCostID`, `SpellMissileID`, `PowerDisplayID`, `EffectBonusMultiplier_1`, `EffectBonusMultiplier_2`, `EffectBonusMultiplier_3`, `SpellDescriptionVariableID`, `SpellDifficultyID`)
+VALUES
+(681493, 0, 0, 0, 448, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 100, 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, -1, 0, 0, 6, 6, 6, 1, 1, 1, 0, 0, 0, 2, -1, 49, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 107, 42, 108, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17, 0, 0, 0, 0, 0, 0, 582588, 0, 0, 0, 0, 0, 0, 33554432, 0, 0, 0, 0, 0, 33554432, 0, 0, 6082, 0, 0, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', 16712190, 0, 0, 0, 0, 21, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
+
+-- =====================================================================================
+-- APRÈS APPLICATION — ce qu'il faudra vérifier, et dans cet ordre
+--
+--   1. La table n'est lue qu'au démarrage : redémarrer `coa-world-bots`. Un `.reload`
+--      ne sert à rien ici.
+--   2. Au démarrage, contrôler Errors.log : une ligne `spell_dbc` mal formée ne se
+--      signale pas par un avertissement mais par un ASSERT, donc par un arrêt.
+--   3. En jeu, avec un personnage de la classe concernée, comparer le cooldown affiché
+--      de Gaze of C'Thun avant/après, et les dégâts critiques de Slaughter. Les bots
+--      ne suffisent pas : leur IA n'utilise pas ces capacités.
+--   4. Pour 681493, la vérification qui compte est la NON-régression : mesurer que les
+--      autres sorts du Witch Hunter perdent les +50 % qu'ils n'auraient jamais dû avoir.
+--
+-- RETOUR ARRIÈRE : `DELETE FROM spell_dbc WHERE ID IN (706188, 504269, 681493);` puis
+-- redémarrage. Le fichier Spell.dbc reprend la main : il n'a jamais été modifié.
+-- =====================================================================================

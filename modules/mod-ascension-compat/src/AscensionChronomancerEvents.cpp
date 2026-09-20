@@ -126,7 +126,6 @@ class aura_ascension_vast_infinite : public AuraScript
     {
         uint32 pool = amount;
         amount = 0;
-        _bearers.clear();
         Unit* target = GetTarget();
         Unit* caster = GetCaster();
         SpellInfo const* source = damage.GetSpellInfo();
@@ -138,6 +137,9 @@ class aura_ascension_vast_infinite : public AuraScript
         if (!pool || !damage.GetDamage() || !target || !target->IsAlive() || !caster ||
             (source && source->Id == VastInfiniteShare))
             return;
+        // Rebuilt from scratch for this hit; never emptied before the guard above. A
+        // re-entry through the shared damage reaches this handler while Spread() is still
+        // walking the bearers, and Spread() only owns a local copy because of that.
         _bearers = VastInfiniteBearers(caster, target);
         if (_bearers.size() < 2)
             return; // Nobody to become one with.
@@ -146,7 +148,12 @@ class aura_ascension_vast_infinite : public AuraScript
             return;
         uint64 share = std::min<uint64>(ScaleDown(damage.GetDamage(), uint32(std::min(sharePct, 100))), pool);
         uint64 others = uint64(_bearers.size()) - 1;
-        // Absorb only what can be handed out whole, so no damage silently disappears.
+        // Ask for a multiple of the share count. The core still trims what it grants: it
+        // clamps to the remaining damage and then applies the attacker's absorb piercing
+        // (Unit::CalcAbsorbResist, AddPct(currentAbsorb, -auraAbsorbMod)), both AFTER this
+        // handler. What reaches Spread is therefore not guaranteed to be a multiple, and
+        // the leftover of the division there is absorbed without being handed out: at most
+        // others - 1 points per hit.
         amount = uint32(std::min<uint64>((share / others) * others, pool));
     }
 
@@ -159,7 +166,14 @@ class aura_ascension_vast_infinite : public AuraScript
         SpellInfo const* carrier = sSpellMgr->GetSpellInfo(VastInfiniteShare);
         if (!amount || _bearers.size() < 2 || !target || !caster || !carrier)
             return;
-        uint64 others = uint64(_bearers.size()) - 1;
+        // Take ownership of the list before dealing anything. Unit::DealDamage below can
+        // come back through Unit::CalcAbsorbResist and into Absorb() when an ally carries a
+        // damage split aura cast by this same victim; Absorb() would then reassign the
+        // member vector under the loop that walks it. The local copy is stable, and the
+        // member is left empty for that re-entry to fill.
+        std::vector<ObjectGuid> bearers;
+        bearers.swap(_bearers);
+        uint64 others = uint64(bearers.size()) - 1;
         uint64 portion = uint64(amount) / others;
         if (!portion)
             return;
@@ -167,7 +181,7 @@ class aura_ascension_vast_infinite : public AuraScript
         ObjectGuid casterGuid = caster->GetGUID();
         SpellSchoolMask school = carrier->GetSchoolMask();
         uint64 handedOut = 0;
-        for (ObjectGuid guid : _bearers)
+        for (ObjectGuid guid : bearers)
         {
             if (guid == victimGuid)
                 continue;
@@ -176,16 +190,20 @@ class aura_ascension_vast_infinite : public AuraScript
                 continue;
             // Already mitigated on the original victim: deal it raw, self-inflicted, so
             // it cannot be absorbed a second time nor re-enter this handler.
+            // No combat log packet on purpose: 706083 lands with target 56
+            // TARGET_UNIT_CASTER_AREA_RAID, so this loop runs up to 39 times per absorbed
+            // hit, and Unit::SendSpellNonMeleeDamageLog ends on SendMessageToSet(&data,
+            // true), i.e. one broadcast to every player in visibility range each time. The
+            // transfer stays visible through the health bar it takes off.
             uint32 dealt = Unit::DealDamage(ally, ally, uint32(portion), nullptr, DOT, school, carrier, false);
             handedOut += dealt;
-            ally->SendSpellNonMeleeDamageLog(ally, carrier, dealt, school, 0, 0, false, 0);
         }
-        uint64 credit = handedOut / uint64(_bearers.size());
+        uint64 credit = handedOut / uint64(bearers.size());
         if (!credit)
             return;
         // Every bearer banks the same share of every transfer, so each aura ends the
         // duration holding "the total damage shared split evenly amongst all allies".
-        for (ObjectGuid guid : _bearers)
+        for (ObjectGuid guid : bearers)
             if (Unit* ally = ObjectAccessor::GetUnit(*target, guid))
                 if (Aura* aura = ally->GetAura(VastInfinite, casterGuid))
                     aura->SetScriptValue(VastInfiniteHeal,
@@ -209,9 +227,15 @@ class aura_ascension_vast_infinite : public AuraScript
         if (!credit || !target || !target->IsAlive() || !target->IsInWorld())
             return;
         // The banked share belongs to the bearer, not to the Chronomancer. If the caster
-        // logged out or changed map the payout still happens, self cast: 707601 takes
-        // target 21 TARGET_UNIT_TARGET_ALLY, and a unit is its own valid assist target.
-        Unit* healer = caster && caster->IsInWorld() ? caster : target;
+        // logged out (GetCaster() is then nullptr) or simply stands on another map, the
+        // payout still happens, self cast: 707601 takes target 21 TARGET_UNIT_TARGET_ALLY,
+        // and a unit is its own valid assist target. IsInWorld() alone would not do:
+        // a Chronomancer who changed map is still in world, and the cast would be thrown
+        // from there and silently lost. Same test as VastInfiniteBearers above.
+        Unit* healer = caster && caster->IsInWorld() && caster->GetMap() == target->GetMap() ? caster : target;
+        // 707601 carries DieSides 1 (measured in Spell.dbc, field 74), and
+        // SpellEffectInfo::CalcValue adds that roll on top of the base points supplied
+        // here: the heal lands one point above the banked credit.
         healer->CastCustomSpell(VastInfiniteHeal, SPELLVALUE_BASE_POINT0, ClampToInt32(credit), target, true);
     }
 
@@ -234,6 +258,25 @@ class aura_ascension_timeguard : public AuraScript
 {
     PrepareAuraScript(aura_ascension_timeguard);
 
+    // Effects 1 and 2 are constants: EffectRealPointsPerLevel is 0.0 and EffectDieSides is
+    // 1 for both (measured in Spell.dbc), so CalcValue always returns 35 and 50. Read them
+    // once instead of at every hit taken: the aura lasts 120 s (DurationIndex 4) and this
+    // handler runs for every single damage event on the bearer, and CalcValue calls
+    // sScriptMgr->ModifySpellEffectBaseValue each time it is asked.
+    int32 _floorPct = 0;
+    int32 _cutPct = 0;
+    bool _thresholdsRead = false;
+
+    void ReadThresholds()
+    {
+        if (_thresholdsRead)
+            return;
+        Unit* caster = GetCaster();
+        _floorPct = std::clamp(GetSpellInfo()->Effects[EFFECT_1].CalcValue(caster), 0, 100);
+        _cutPct = std::clamp(GetSpellInfo()->Effects[EFFECT_2].CalcValue(caster), 0, 100);
+        _thresholdsRead = true;
+    }
+
     // -1 tells Unit::CalcAbsorbResist the shield has no pool of its own; the amount is
     // decided per hit below, and the three instances are the aura's DBC ProcCharges.
     void Unlimited(AuraEffect const* /*effect*/, int32& amount, bool& recalculate)
@@ -254,17 +297,16 @@ class aura_ascension_timeguard : public AuraScript
         uint64 maximum = target->GetMaxHealth();
         if (!maximum)
             return;
+        ReadThresholds();
         bool heavy = uint64(hit) * 100 > maximum * uint64(TimeguardHeavyHitPct);
-        int32 floorPct = std::clamp(GetSpellInfo()->Effects[EFFECT_1].CalcValue(GetCaster()), 0, 100);
         uint64 remaining = target->GetHealth() > hit ? uint64(target->GetHealth()) - hit : 0;
         // Read as "the hit leaves them under the floor", which also covers a bearer who
         // was already under it. The tooltip's own wording does not separate the two, and
         // this is the reading a guard is for.
-        bool lethal = remaining * 100 < maximum * uint64(uint32(floorPct));
+        bool lethal = remaining * 100 < maximum * uint64(uint32(_floorPct));
         if (!heavy && !lethal)
             return;
-        int32 cutPct = std::clamp(GetSpellInfo()->Effects[EFFECT_2].CalcValue(GetCaster()), 0, 100);
-        amount = uint32(ScaleDown(hit, uint32(cutPct)));
+        amount = uint32(ScaleDown(hit, uint32(_cutPct)));
     }
 
     void Spend(AuraEffect* /*effect*/, DamageInfo& /*damage*/, uint32& amount)
@@ -286,6 +328,14 @@ class aura_ascension_timeguard : public AuraScript
 
 // Rapid Acceleration, second half: "Your Accelerated Recovery instantly heals the target
 // for 15% of the total periodic effect." Effect 1 of the talent is a bare DUMMY.
+//
+// KNOWN AND ACCEPTED: Keep Accelerating / Resilience propagate Accelerated Recovery by
+// recasting it (AscensionChronomancerTime.cpp, SpreadRecovery), and only shorten the copy
+// AFTER the cast returns, i.e. after this hook has already run. Such a copy therefore pays
+// the full instant heal even though it will tick fewer times. Telling a propagated copy
+// from a fresh cast needs a marker set by the propagating side, which is not in this file;
+// nothing here invents one. The cap below only protects against an application that is
+// already short when the aura is applied.
 class aura_ascension_accelerated_recovery : public AuraScript
 {
     PrepareAuraScript(aura_ascension_accelerated_recovery);
@@ -299,6 +349,13 @@ class aura_ascension_accelerated_recovery : public AuraScript
         int32 percent = EffectAmount(RapidAcceleration, EFFECT_1, player);
         int32 ticks = effect->GetTotalTicks();
         int32 perTick = effect->GetAmount();
+        // AuraEffect::GetTotalTicks() divides the aura's MAXIMUM duration by the amplitude,
+        // so it announces the nominal 15 ticks even for an application that will not last
+        // that long. Pay for what this application can actually deliver.
+        Aura* aura = GetAura();
+        int32 amplitude = effect->GetAmplitude();
+        if (aura && amplitude > 0 && aura->GetDuration() > 0 && aura->GetDuration() < aura->GetMaxDuration())
+            ticks = std::min(ticks, aura->GetDuration() / amplitude);
         if (percent <= 0 || ticks <= 0 || perTick <= 0)
             return;
         // The stored amount of a unit periodic heal already carries the caster's healing
@@ -369,6 +426,12 @@ class aura_ascension_hasten_strikes : public AuraScript
         uint64 blow = ScaleDown(damage->GetDamage(), uint32(std::min(percent, 100)));
         if (!blow)
             return;
+        // Two known and accepted gaps with the tooltip, both measured, neither corrected
+        // here because no number says what the intent is: 803706 carries DieSides 1
+        // (Spell.dbc field 74) and SpellEffectInfo::CalcValue adds that roll on top of the
+        // base points given here, so the strike lands one point high; and the 30% is taken
+        // from damage->GetDamage(), which is already mitigated on the victim, then goes
+        // through resistance and absorption again on its way out.
         target->CastCustomSpell(HastyStrike, SPELLVALUE_BASE_POINT0, ClampToInt32(blow), victim, true);
     }
 
@@ -398,8 +461,12 @@ void ApplyChronomancerEventContracts(SpellInfo* info)
     if (info->Id == VastInfiniteHeal || info->Id == HastyStrike)
     {
         // Both carry an amount resolved from damage that already went through the
-        // caster's outgoing modifiers. Running them again would count them twice.
+        // caster's outgoing modifiers. Running them again would count them twice, and the
+        // attribute below is what prevents it.
         info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+        // Belt and braces only: measured in Spell.dbc (EffectBonusMultiplier, fields
+        // 229-231), both spells already carry 0.0 on all three effects. This line changes
+        // nothing today; it keeps the contract true if the client rows ever change.
         info->Effects[EFFECT_0].BonusMultiplier = 0.0f;
     }
 }

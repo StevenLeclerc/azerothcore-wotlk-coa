@@ -1,7 +1,8 @@
 -- =====================================================================================
 -- mod-ascension-compat — Stormbringer (classe 16, famille de sorts 22)
---   CLASS_STORMBRINGER = 16 (SharedDefines.h:141) ; la classe 14 est CLASS_DEMON_HUNTER
---   (Felsworn, SharedDefines.h:139). Famille = classe + 6 = 22
+--   CLASS_STORMBRINGER = 16 (src/server/shared/SharedDefines.h:141) ; la classe 14 est
+--   CLASS_DEMON_HUNTER (Felsworn, src/server/shared/SharedDefines.h:139).
+--   Famille = classe + 6 = 22
 --   (SpellMgr.cpp:42-45, IsValidSpellProcFamily).
 -- Moitié « donnée » de src/AscensionStormbringerEvents.cpp.
 --
@@ -17,7 +18,9 @@
 -- SchoolMask, 34 ProcFlags, 35 ProcChance, 40 DurationIndex.
 --   Témoins de l'index 213 (DmgClass) : Fireball 133 = 1, Shadow Bolt 686 = 1,
 --   Mortal Strike 12294 = 2, Ambush 2098 = 2. L'énumération est
---   SPELL_DAMAGE_CLASS_NONE 0, MAGIC 1, MELEE 2, RANGED 3 (SharedDefines.h:1638-1641).
+--   SPELL_DAMAGE_CLASS_NONE 0, MAGIC 1, MELEE 2, RANGED 3
+--   (src/server/shared/SharedDefines.h:1638-1641 ; il n'existe PAS de
+--   src/server/game/Miscellaneous/SharedDefines.h dans cet arbre).
 -- =====================================================================================
 
 
@@ -83,16 +86,36 @@ UPDATE `spell_proc` SET `ProcFlags` = 65536 WHERE `SpellId` = 705700 AND `ProcFl
 --   Les drapeaux POS (soins) et PERIODIC sont écartés : l'infobulle dit « critical
 --   strikes », pas « critical heals » ni « periodic ».
 -- HitMask 2 = PROC_HIT_CRITICAL (SpellMgr.h:258).
--- SpellPhaseMask 2 = PROC_SPELL_PHASE_HIT : le critique n'est connu qu'au contact.
---   CORRIGÉ : contrairement à ce qui était écrit ici, le contrôle de phase ne concerne pas
---   que les sorts. REQ_SPELL_PHASE_PROC_FLAG_MASK = SPELL_PROC_FLAG_MASK &
+-- SpellPhaseMask 2 = PROC_SPELL_PHASE_HIT.
+--   NE PAS relire ici « le critique n'est connu qu'au contact » : c'était écrit, et c'est
+--   FAUX dans ce coeur. La phase CAST connaît parfaitement le critique — Spell.cpp:4034-4044
+--   balaie m_UniqueTargetInfo et pose `hitMask |= PROC_HIT_CRITICAL` (ligne 4042) avant
+--   l'appel ProcSkillsAndAuras(..., PROC_SPELL_PHASE_CAST) des lignes 4046-4047.
+--   La vraie raison de garder HIT est ailleurs : l'infobulle dit « critical strikes » sans
+--   restreindre aux sorts, et les procs d'AUTO-ATTAQUE (drapeaux 0x4 et 0x40 du ProcFlags
+--   ci-dessus) ne passent jamais par la phase CAST — ils sont émis avec le procPhase par
+--   défaut de ProcSkillsAndAuras, PROC_SPELL_PHASE_HIT. En phase CAST ils seraient perdus.
+--   PRIX DE CE CHOIX, payé en C++ et pas en donnée : la phase HIT est émise depuis
+--   Spell::DoAllEffectOnTarget (Spell.cpp:2581 ; appels ProcSkillsAndAuras 2831, 2926,
+--   2947), donc UNE FOIS PAR CIBLE TOUCHÉE. Gale est EffectChainTarget 3 et
+--   MaxAffectedTargets 5 (Spell.dbc champs 104 et 212, relus contre Chain Lightning 421 = 3
+--   et Fireball 133 = 0) : un seul lancement qui critique rendrait +4,5 s sur un buff de
+--   15 s, et rien en aval ne plafonne (voir « LIMITE ASSUMÉE » plus bas).
+--   La déduplication se fait donc par lancement dans
+--   aura_ascension_stormbringer_tailwind::CheckProc, via Spell::SetScriptValue /
+--   GetScriptValue (Spell.h:644-649). PAS par un Cooldown sur cette ligne : aucune donnée
+--   n'écrit de valeur d'ICD, et on n'en invente pas.
+--   Noter l'asymétrie VOULUE avec la ligne 801869 plus bas, qui prend elle SpellPhaseMask 1
+--   (CAST) : Titanstorm ne réagit qu'à des sorts lancés, jamais à une auto-attaque, donc la
+--   phase CAST y supprime le comptage par cible sans rien perdre.
+--   Le contrôle de phase de LoadSpellProcs, lui, ne concerne pas que les sorts.
+--   REQ_SPELL_PHASE_PROC_FLAG_MASK = SPELL_PROC_FLAG_MASK &
 --   DONE_HIT_PROC_FLAG_MASK (SpellMgr.h:184) ; l'auto-attaque de MÊLÉE (0x4) est bien hors
 --   de cette intersection (absente de SPELL_PROC_FLAG_MASK, SpellMgr.h:159-172), mais
 --   l'auto-attaque à DISTANCE (0x40) est dans les deux masques, donc dans l'intersection.
---   La ligne fonctionne quand même, pour une autre raison : les procs d'auto-attaque sont
---   émis avec le procPhase par défaut de ProcSkillsAndAuras, PROC_SPELL_PHASE_HIT
---   (Unit.h:1571, valeur 2 ; Unit.cpp:2890 ne l'écrase pas), ce que le SpellPhaseMask 2
---   couvre exactement.
+--   La ligne fonctionne quand même : le procPhase par défaut de ProcSkillsAndAuras invoqué
+--   plus haut est PROC_SPELL_PHASE_HIT (Unit.h:1571, valeur 2 ; Unit.cpp:2890 ne l'écrase
+--   pas), ce que le SpellPhaseMask 2 couvre exactement.
 --   La validation de LoadSpellProcs passe, elle, parce que 0x10000 EST dans ce masque.
 -- SpellFamilyName 0 : aucune restriction de sort, c'est le C++ qui borne (classe,
 --   propriétaire de l'aura, acteur de l'événement).
@@ -117,6 +140,13 @@ UPDATE `spell_proc` SET `ProcFlags` = 65536 WHERE `SpellId` = 705700 AND `ProcFl
 -- (SpellEffects.cpp:464-482) ni Aura::SetDuration (SpellAuras.cpp:816-826) ne plafonnent
 -- la durée. Tailwind dure 15 000 ms (SpellDuration.dbc index 8) et gagne 1 500 ms par
 -- critique. Aucune donnée n'écrit de plafond : on n'en invente pas.
+-- Ce qui EST borné, et par le C++ seul, ce sont les deux multiplications qui rendaient
+-- cette absence de plafond explosive :
+--   par ALLIÉ  — 583254 est LU, pas lancé, donc son ciblage de zone (30 alliés max) ne
+--     s'applique jamais (voir le commentaire de Extend()) ;
+--   par CIBLE  — un seul jeton par lancement, posé dans CheckProc (voir SpellPhaseMask
+--     ci-dessus). Sans lui, un Gale qui critique ses 3 cibles rendait +4,5 s.
+-- Reste donc : +1 500 ms par lancement critique, ce que l'infobulle promet.
 -- -------------------------------------------------------------------------------------
 
 DELETE FROM `spell_proc` WHERE `SpellId` = 804035;

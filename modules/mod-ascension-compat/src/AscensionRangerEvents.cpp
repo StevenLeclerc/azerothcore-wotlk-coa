@@ -26,8 +26,11 @@ enum RangerEventSpells : uint32
     // -2881; radius index 12 = 100 yards). Two falcons make two separate applications
     // on the master: Aura::CanStackWith takes the "different caster" path and returns
     // true on effect 1 being SPELL_AURA_PERIODIC_ENERGIZE with no area implicit target,
-    // and no spell_group row constrains these ids. Unit::GetAuraCount counts one per
-    // application because StackAmount is 0 in the DBC.
+    // and no spell_group row constrains these ids. Unit::GetAuraCount (Unit.cpp:6279)
+    // adds Aura::GetStackAmount() per application; it does NOT read the DBC StackAmount
+    // field (which is 0 here). Aura::m_stackAmount is initialised to 1 (SpellAuras.cpp:
+    // 358) and nothing stacks these auras, so the "else" branch runs and the count is
+    // one per application.
     // Effect 2 is NOT a per-companion figure parked there for convenience. It is
     // SPELL_AURA_ADD_FLAT_MODIFIER (107) with EffectMiscValue 23 = SPELLMOD_EFFECT3
     // (SpellDefines.h:99) and EffectSpellClassMask (0x00080000, 0, 0), which matches
@@ -74,9 +77,16 @@ int32 RangerWingmanAmount(Unit const* master)
 {
     int64 amount = RangerCompanionShare(master, SPELL_WAR_FALCON_COUNT) +
         RangerCompanionShare(master, SPELL_DRAGONHAWK_COUNT);
-    // A multiplier below zero would turn damage into healing. Nothing else is capped:
-    // no record states a ceiling on the number of companions, and the two remaining
-    // DUMMY effects of 705098 (20 and 5) say nothing the tooltip confirms.
+    // A multiplier below zero would turn damage into healing. Nothing else is capped,
+    // and that hole is stated here rather than passed over: with N companions the
+    // talent gives -2N%, so 50 birds reach -100%, i.e. full immunity -- Unit.cpp:9351
+    // (spells) and Unit.cpp:10856 (melee) both fold this aura in as (100 + amount)/100.
+    // 806341 "Falcon Dive" already summons TWO birds at once, for 12 s (DurationIndex
+    // 29 = 12000 ms). No ceiling is invented, because nothing states one: the only two
+    // candidates in the DBC are 705098's unimplemented effects 0 and 1, both DUMMY,
+    // worth 20 and 5 (BasePoints 19 and 4, DieSides 1). 5 x 2 = 10 is not 20, so
+    // nothing ties them together as "5 companions max" / "-20% max". Left for
+    // arbitration; see the SQL beside this file.
     return int32(std::clamp<int64>(amount, -100, 100));
 }
 

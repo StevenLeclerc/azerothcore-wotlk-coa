@@ -4,15 +4,30 @@
 -- fichier et n'est pas la famille).
 --
 -- Accompagne `src/AscensionBloodmageEvents.cpp`, qui câble neuf talents. Les quinze lignes
--- ci-dessous enregistrent les sept scripts de sort/aura de ce fichier. Les trois autres
--- crochets (UnitScript `bloodmage_damage_events`, UnitScript `bloodmage_thick_pelt_scaling`,
--- AllSpellScript `bloodmage_dark_essence_casts`, GlobalScript `bloodmage_event_contracts`)
--- ne se déclarent PAS ici : ces types de scripts s'enregistrent au démarrage sans passer
--- par `spell_script_names`.
+-- ci-dessous enregistrent les NEUF scripts de sort/aura de ce fichier (neuf noms distincts ;
+-- `aura_ascension_bloodmage_aortic_assault` occupe à lui seul sept lignes, les sept rangs).
+-- Les QUATRE autres crochets (UnitScript `bloodmage_damage_events`, UnitScript
+-- `bloodmage_thick_pelt_scaling`, AllSpellScript `bloodmage_dark_essence_casts`, GlobalScript
+-- `bloodmage_event_contracts`) ne se déclarent PAS ici : ces types de scripts s'enregistrent
+-- au démarrage sans passer par `spell_script_names`.
+--
+-- /!\ NE PAS APPLIQUER EN L'ÉTAT : LE BINAIRE NE PORTE AUCUN DE CES SCRIPTS.
+--   `AddSC_AscensionBloodmageEvents()` est défini en bas de `AscensionBloodmageEvents.cpp` et
+--   n'est NI déclaré NI appelé dans `src/MP_loader.cpp` (vérifié le 2026-09-20 : un
+--   `grep -rn AddSC_AscensionBloodmageEvents` sur le module ne rend que la définition, et
+--   `grep -n BloodmageEvents src/MP_loader.cpp` ne rend rien). Les treize objets de script du
+--   fichier n'existent donc pas à l'exécution. Les deux lignes à ajouter, par le propriétaire
+--   de MP_loader.cpp :
+--       bloc de déclarations, à côté de `AddSC_AscensionBloodmageVitality();` (l.155) :
+--           void AddSC_AscensionBloodmageEvents();
+--       corps de `Addmod_ascension_compatScripts()`, à côté de son appel (l.315) :
+--           AddSC_AscensionBloodmageEvents();
 --
 -- ⚠ CE FICHIER EXIGE LE BINAIRE QUI PORTE CES SCRIPTS. Appliqué avant, le serveur signale
 --   au démarrage « ScriptName ... does not exist » et les lignes ne servent à rien.
---   L'ordre est : construire, installer, PUIS appliquer ce fichier.
+--   L'ordre est : câbler MP_loader.cpp, construire, relire les noms dans le binaire
+--   (`strings libmod-ascension-compat.so | grep aura_ascension_bloodmage_`), installer,
+--   PUIS appliquer ce fichier.
 --
 -- Rappel P-051 : un script enregistré en C++ mais absent de `spell_script_names` ne tourne
 -- JAMAIS, et ne coûte qu'une ligne de log. Ces lignes sont la moitié manquante du

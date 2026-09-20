@@ -1,0 +1,143 @@
+-- =====================================================================================
+-- mod-ascension-compat — Runemaster, talent 803018 « Fracture ».
+--
+-- CE FICHIER N'ÉCRIT RIEN, ET C'EST LE RÉSULTAT DE LA MESURE, PAS UN OUBLI.
+-- Il est livré pour que la question « et la donnée, alors ? » ne soit pas reposée à la
+-- prochaine session : tout ce qui suit a été lu, en base et dans Spell.dbc, le 2026-09-20.
+-- Le nom d'un fichier appliqué est sa clé dans `updates` : NE PLUS LE RENOMMER.
+-- S'il gêne, le supprimer AVANT toute application est sans conséquence.
+--
+-- RESTE À CÂBLER (hors de ces deux fichiers) : `void AddSC_AscensionRunemasterFracture();`
+-- dans la liste de déclarations de src/MP_loader.cpp, et `AddSC_AscensionRunemasterFracture();`
+-- dans `Addmod_ascension_compatScripts()` (MP_loader.cpp:175). Sans cela le fichier compile et
+-- ne tourne jamais. Relancer aussi `cmake` sur /opt/coa/build-main avant de compiler : les
+-- sources du module sont ramassées par `file(GLOB)` à la configuration
+-- (src/cmake/macros/AutoCollect.cmake:28), et AscensionRunemasterFracture.cpp est un fichier
+-- neuf, absent de /opt/coa/build-main/compile_commands.json à ce jour.
+--
+-- -------------------------------------------------------------------------------------
+-- POURQUOI AUCUNE LIGNE `spell_script_names`
+--
+-- P-051 dit qu'un SpellScript ou un AuraScript sans ligne `spell_script_names` ne tourne
+-- jamais. Ce n'est pas le cas ici : src/AscensionRunemasterFracture.cpp ne contient
+-- AUCUN SpellScript ni AuraScript. Il contient un seul `AllSpellScript`
+-- (`runemaster_fracture_casts`, crochet ALLSPELLHOOK_ON_CALCULATED_TARGET), enregistré
+-- en C++ par `new` dans `AddSC_AscensionRunemasterFracture()`, comme tous les
+-- AllSpellScript / UnitScript / GlobalScript du module. `ObjectMgr::LoadSpellScriptNames`
+-- (ObjectMgr.cpp:6341-6399) ne les regarde pas. Une ligne pour l'un d'eux ne serait d'ailleurs
+-- même pas REFUSÉE : cette fonction ne rejette une ligne que si le sort est absent de Spell.dbc
+-- — 803018 y est — ou, pour un `spell_id` NÉGATIF seulement, s'il n'est pas le premier rang.
+-- La ligne serait donc acceptée, et resterait inerte : l'instanciation passe par
+-- `ScriptRegistry<SpellScriptLoader>::GetScriptById` (ScriptDefines/SpellScriptLoader.cpp:28,
+-- appelé depuis Spell.cpp:8725), et un AllSpellScript n'est pas dans ce registre. Ne rien
+-- écrire est donc la bonne réponse — parce que la ligne serait inutile, pas parce qu'elle
+-- serait rejetée.
+--
+-- Un SpellScript n'aurait de toute façon pas pu faire le travail : le coup critique d'un
+-- sort est tiré dans `Spell::DoAllEffectOnLaunchTarget` (`targetInfo.crit =
+-- roll_chance_f(...)`), hors de portée de tout crochet SpellScript. Détail dans l'en-tête
+-- du .cpp.
+--
+-- -------------------------------------------------------------------------------------
+-- POURQUOI AUCUNE LIGNE `spell_proc`, `spell_linked_spell`, `spell_dbc`
+-- (`spell_bonus_data` ne figure PAS dans cette liste : il en faudrait une, voir plus bas)
+--
+-- Relevé en lecture seule sur `acore_world`, pour 803018, 803067 et 803125 :
+--   spell_script_names  : 0 ligne     spell_proc          : 0 ligne
+--   spell_linked_spell  : 0 ligne     spell_dbc           : 0 ligne
+--   spell_ranks         : 0 ligne — 803018 n'a pas de chaîne de rangs, il est seul.
+--
+-- 803018 n'est pas une aura et ne procure rien : `spell_proc` n'a rien à y faire (P-045
+-- concerne les auras de proc à ProcFlags 0, pas les attaques directes). Son ProcFlags DBC
+-- vaut d'ailleurs 0, ce qui est normal pour une attaque.
+--
+-- -------------------------------------------------------------------------------------
+-- LE DOSSIER 803125 « VERSUS FROZEN » — la piste « donnée seule », et pourquoi elle est
+-- morte aujourd'hui. À lire avant de la rouvrir.
+--
+-- Spell.dbc porte bien un enregistrement dédié à cette clause d'infobulle :
+--   803125 « Versus Frozen », famille 38, passif caché (Attributes 0xC0),
+--   effet 0 = APPLY_AURA / 112 SPELL_AURA_OVERRIDE_CLASS_SCRIPTS,
+--   MiscValue 20000, MiscValueB 4 (AURA_STATE_FROZEN), BasePoints 99 (valeur 100),
+--   EffectSpellClassMask (0, 0, 0x04000000).
+-- Ce masque sélectionne EXACTEMENT deux sorts de la famille 38 : 803018 Fracture et
+-- 500272 Echo (rang « Heal »). C'est bien la fiche de Fracture.
+--
+-- Elle ne peut pourtant rien produire, pour deux raisons indépendantes, toutes deux
+-- vérifiées :
+--
+--   (1) RIEN N'APPLIQUE 803125. Aucun sort de Spell.dbc ne l'a en EffectTriggerSpell,
+--       il n'est dans aucune table du module (`grep` sur modules/mod-ascension-compat :
+--       zéro occurrence), ni dans `AscensionCustomClassData.h` (liste des sorts de
+--       classe par niveau). Un `OVERRIDE_CLASS_SCRIPTS` que personne ne porte ne
+--       modifie rien.
+--
+--   (2) 20000 N'EST PAS UN SÉLECTEUR ACTIF. `Unit::GetAscensionConditionalCombatModifier`
+--       (src/server/game/Entities/Unit/Unit.cpp) ne connaît que la série 21000
+--       (`AscensionConditionalCombatScript`, SpellAuraDefines.h) et renvoie `false` par
+--       défaut pour tout le reste. La conversion 20000 -> 21000/21004 est faite en C++,
+--       par `ApplyAscensionConditionalCombatContracts` à partir de la table générée
+--       `AscensionConditionalCombatData.h` — qui, relue ligne à ligne, ne contient
+--       AUCUNE entrée de famille 38.
+--
+-- Rouvrir cette piste demanderait donc deux fichiers que le talent ne possède pas :
+-- une règle dans `AscensionConditionalCombatData.h` (sur le modèle de 582310 « Kingdom
+-- Hearts » : OldSelector 20000, BasePoints 99 -> Selector 21004
+-- ASCENSION_STATE_MASKED_GUARANTEED_CRIT) et un moyen de poser 803125 sur le Runemaster
+-- qui suive le talent, pas le niveau. Le script C++ livré se suffit à lui-même et ne peut
+-- pas faire double emploi avec elle : un critique est un booléen.
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUI RESTE OUVERT, ET QUI N'EST PAS RÉPARÉ ICI
+--
+--   * Effet 1 de 803018 : SPELL_EFFECT_DUMMY avec EffectTriggerSpell 803067 et MiscValue
+--     524287. Un DUMMY ne déclenche rien nativement. L'infobulle de Fracture ne mentionne
+--     aucun sort supplémentaire, et 803067 « Sigil Strike » porte dans ce DBC deux auras
+--     passives (107 ADD_FLAT_MODIFIER MiscValue 18, 79 MOD_DAMAGE_PERCENT_DONE) sans
+--     rapport avec son propre nom : rien n'établit ce que cet effet devrait faire.
+--     Laissé tel quel plutôt qu'inventé. Une ligne `spell_linked_spell` serait une
+--     supposition, pas une réparation.
+--   * 712308/712464/712487 « Leyfrost » (« your next spell casts as if the target were
+--     Frozen ») est mort : ProcFlags DBC 0 et aucune ligne `spell_proc` (P-045), et rien
+--     ne lance 712487, dont l'EffectSpellClassMask (0, 0, 0x04000000) est pourtant celui de
+--     Fracture. Le script C++ NE le suit PAS, et c'est délibéré : il appelle
+--     `target->HasAuraState(AURA_STATE_FROZEN)` SANS le SpellInfo ni le lanceur, les deux
+--     paramètres optionnels de la signature (Unit.h:1563). La forme complète
+--     honorerait TOUTE aura 262 SPELL_AURA_ABILITY_IGNORE_AURASTATE du lanceur dont le masque
+--     sélectionne Fracture (Unit.cpp:7997-8006), et en famille 38 il y en a une SECONDE, bien
+--     vivante : 520759 « Runic Breakout », masque (0x80, 0, 0x04002000), que
+--     AscensionRunemasterRunes.cpp:188 pose sur le Runemaster pour 3 s après chaque rupture de
+--     Runeshroud. 0x04002000 & 0x04000000 != 0, donc `SpellInfo::IsAffected` dit oui : la
+--     forme complète offrirait un critique garanti sur N'IMPORTE QUELLE cible pendant cette
+--     fenêtre, ce que l'infobulle ne promet pas. Le jour où Leyfrost repartira, il faudra le
+--     nommer explicitement (`caster->HasAura(712487)`), pas rouvrir toute la classe d'auras.
+--
+--   * LES COEFFICIENTS D'INFOBULLE NE SONT PAS IMPLÉMENTÉS. L'infobulle promet
+--     ${$m1+0+$AP*1.5} de dégâts et ${$m3+0+$AP*.35} de mana brûlé. Le sort rend aujourd'hui
+--     921-1109 au niveau 57 et 929-1117 au niveau 80 (BasePoints 920, DieSides 189, plus le
+--     seul terme d'échelle du DBC : EffectRealPointsPerLevel[0] = 0.35, BaseLevel = SpellLevel
+--     = 57, MaxLevel 0, soit +8 à 80 — voir SpellEffectInfo::CalcValue, SpellInfo.cpp:463),
+--     et brûle 25 plats (BasePoints 24, DieSides 1). Aucune part d'attaque :
+--     EffectBonusMultiplier (champs 229-231 de Spell.dbc) vaut 0.0 sur les trois effets, il y
+--     a 0 ligne dans `spell_bonus_data`, et 803018 est absent de
+--     `AscensionStockCoefficientData.h` — dont l'en-tête généré dit justement que CoA écrit
+--     ses coefficients dans le texte d'infobulle, jamais dans la colonne DBC. Il manque donc bien de la donnée ici, mais elle ne couvre pas tout :
+--       - les dégâts (effet 0) : `spell_bonus_data.ap_bonus` est exactement le bon endroit,
+--         c'est le seul chemin AP du cœur pour les dégâts directs (Unit.cpp:9261-9266,
+--         atteint depuis SpellEffects.cpp:969) ;
+--       - le mana brûlé (effet 2, SPELL_EFFECT_POWER_BURN) : AUCUN chemin de donnée.
+--         `Spell::EffectPowerBurn` (SpellEffects.cpp:1745-1785) n'appelle jamais
+--         `SpellDamageBonusDone` et n'applique que EffectValueMultiplier (champs 101-103),
+--         qui vaut 0.0 ici. Ce terme-là demanderait du C++, pas une ligne SQL.
+--     Hors mandat de la session qui a livré ces deux fichiers, mais à ne pas classer sans suite.
+--
+--   * QUEL ID LE RUNEMASTER APPREND-IL ? Non tranché. Spell.dbc porte une SECONDE « Fracture »
+--     à six rangs, 289090-289095, famille 0, même SpellIconID 64081, portant mot pour mot la
+--     même clause « Damage dealt is guaranteed to critically strike against frozen targets. » ;
+--     et 850187 « Fracture » (famille 8) dit « Teaches you: Fracture @s:289090:-160@ », donc
+--     vers 289090, pas vers 803018. Contre-indice : le module travaille systématiquement en
+--     famille 38 et laisse mourir les doublons famille 0. Le script livré ne teste que 803018.
+--     À établir en lisant Talent.dbc et l'arbre de talents client AVANT de conclure que le
+--     correctif sert à quelqu'un. Si c'est la chaîne 289090-289095, il faudra un ensemble d'ids
+--     et SURTOUT PAS une garde de famille (P-055 : les six premiers sont de famille 0).
+-- =====================================================================================

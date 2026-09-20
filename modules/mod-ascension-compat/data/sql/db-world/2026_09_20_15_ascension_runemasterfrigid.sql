@@ -1,0 +1,93 @@
+-- =====================================================================================
+-- mod-ascension-compat — Runemaster, « Frigid Elements » (707654) et « Frigid Fusion ».
+--
+-- Compagnon de modules/mod-ascension-compat/src/AscensionRunemasterFrigid.cpp.
+-- Le nom de ce fichier est la cle d'update enregistree dans `updates` (state = MODULE) :
+-- ne pas le renommer une fois applique.
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUE CE FICHIER FAIT, ET CE QU'IL NE FAIT PAS
+--
+-- Une seule ligne, dans `spell_script_names` : l'accrochage de l'AuraScript qui fait
+-- detoner Frigid Fusion. Le reste du correctif est en C++.
+--
+-- Aucune ligne `spell_proc` ici, et c'est voulu : le mecanisme ne repose sur aucun proc.
+-- L'accumulation passe par le crochet UNITHOOK_ON_DAMAGE (Unit::DealDamage, Unit.cpp:1004)
+-- et la detonation par AfterEffectRemove ; ni P-045 ni P-052 ne s'appliquent.
+--
+-- -------------------------------------------------------------------------------------
+-- LE RELEVE PREALABLE, FAIT AVANT D'ECRIRE
+--
+-- `spell_script_names`, `spell_proc` et `spell_dbc` interroges en base pour 707654, 803225,
+-- 572338 et les neuf rangs de Frigid Blast (500118, 502853..502860) : AUCUNE ligne, nulle
+-- part. `grep -rn '803225\|572338\|707654' src/ modules/` sur /opt/coa/core-main : aucune
+-- occurrence. Frigid Fusion n'etait donc implemente ni en code ni en donnee, alors que
+-- chaque Frigid Blast l'applique (son effet 1 est TRIGGER_SPELL -> 803225).
+--
+-- CE QUI N'EST PAS UN DEFAUT, ET QUE CE CORRECTIF NE TOUCHE PAS : les masques de classe
+-- de 707654. Lus au bon indice — EffectSpellClassMask est EFFECT-MAJOR, l'effet e occupe
+-- les champs 122+3e..124+3e (DBCStructure.h:1750, SpellInfo.cpp:350) — ses effets 0 et 1
+-- valent tous deux (0, 0x08000000, 0), soit exactement les neuf rangs de Frigid Blast.
+-- Un releve part-major inverse ce diagnostic et fait croire a un masque vide : c'est
+-- l'erreur qu'une premiere version de ce fichier avait consignee. Aucune ligne de
+-- `spell_dbc` n'est donc necessaire, et aucune ne doit etre ajoutee ici : elle figerait
+-- le sort contre le prochain import de DBC client (P-047).
+--
+-- -------------------------------------------------------------------------------------
+-- TROIS PREALABLES, SANS LESQUELS CETTE LIGNE DESIGNE UN SCRIPT INEXISTANT (P-051 a l'envers)
+--
+--   1. relancer `cmake` sur /opt/coa/build-main AVANT de compiler. Les sources du module
+--      sont ramassees par file(GLOB) au moment de la configuration et
+--      AscensionRunemasterFrigid.cpp est un fichier NEUF : un simple `make` ne le verra pas.
+--   2. cabler AddSC_AscensionRunemasterFrigid() dans
+--      modules/mod-ascension-compat/src/MP_loader.cpp (declaration + appel).
+--   3. appliquer cette ligne APRES avoir mis en service le binaire qui porte le script.
+--      Dans l'autre ordre, la ligne est simplement inerte : ObjectMgr::ValidateSpellScripts
+--      n'en dit RIEN (CreateSpellScriptLoaders ne rend que des loaders existants, donc la
+--      boucle ObjectMgr.cpp:6421 ne tourne pas). Le seul signalement vient de
+--      ScriptMgr::CheckIfScriptsInDatabaseExist, ScriptMgr.cpp:207 : « Script named '...' is
+--      assigned in the database, but has no code! » — une ligne de log, rien de casse.
+--
+-- PRISE D'EFFET : REDEMARRAGE OBLIGATOIRE. `ObjectMgr::LoadSpellScriptNames()` n'a qu'un
+-- seul appelant (World.cpp:871) et l'accrochage (World.cpp:883) ne tourne qu'une fois ;
+-- il n'existe pas de `.reload spell_script_names`. (`.reload spell_scripts` porte sur la
+-- table `spell_scripts`, qui n'a rien a voir.)
+--
+-- -------------------------------------------------------------------------------------
+-- LA LIGNE NE SUFFIT PAS SEULE : L'AURA S'AUTODETRUIT SANS LE CORRECTIF C++
+--
+-- L'effet 1 de 803225 est une aura 69 SPELL_AURA_SCHOOL_ABSORB, MiscValue 127 (toutes
+-- ecoles), d'un montant de 1 (BasePoints 0 + DieSides 1). Le premier point de degat encaisse
+-- par la cible epuise ce montant et Unit::CalcAbsorbResist retire l'aura ENTIERE avec
+-- AURA_REMOVE_BY_ENEMY_SPELL (Unit.cpp:2513-2521). Comme 803225 est pose au lancement du
+-- Frigid Blast (TRIGGER_SPELL traite en SPELL_EFFECT_HANDLE_LAUNCH_TARGET,
+-- SpellEffects.cpp:1100-1104), avant meme que les degats de ce Frigid Blast soient infliges,
+-- le sort detruit le debuff qu'il vient d'appliquer. Sans la neutralisation faite dans
+-- runemaster_frigid_metadata (OnLoadSpellCustomAttr), cette ligne accroche un script qui ne
+-- verra jamais AURA_REMOVE_BY_EXPIRE.
+--
+-- -------------------------------------------------------------------------------------
+-- LE Validate() PASSERA — verifie contre le DBC en service, pas suppose
+--
+-- aura_ascension_runemaster_frigid_fusion exige de 803225 : famille 38, effet 0 en
+-- SPELL_AURA_DUMMY, TriggerSpell = 572338. Le Spell.dbc de /opt/coa/server/data/dbc/ donne
+-- exactement cela (champ 208 = 38 ; effet 0 : Effect 6 APPLY_AURA, Aura 4 DUMMY,
+-- EffectTriggerSpell 572338). Le Validate() ne porte que sur l'effet 0 : la neutralisation
+-- de l'effet 1 decrite ci-dessus ne le concerne pas, dans un sens comme dans l'autre.
+--
+-- spell_id POSITIF : 803225 n'a pas de chaine de rangs, et un id negatif declencherait le
+-- controle « is not first rank of spell » (ObjectMgr.cpp:6383) pour rien.
+--
+-- HORS PORTEE, NOMME POUR NE PAS ETRE REDECOUVERT : Spell.dbc contient un second Frigid
+-- Fusion, hors famille 38 et tout aussi inerte — 365058 « Frigid Blast » (Rank 9, famille 0)
+-- declenche 365063 « Frigid Fusion / Aura », qui declenche 365066 « Frigid Fusion / Damage ».
+-- Aucune ligne ici ne les couvre, et rien n'indique que 365058 soit jouable.
+-- =====================================================================================
+
+-- Le DELETE porte sur ABS(spell_id) : une ligne -803225 laissee par une version anterieure
+-- designerait le meme sort et accrocherait le script une SECONDE fois (les liaisons sont
+-- stockees dans un multimap : le handler tournerait deux fois, donc double detonation).
+DELETE FROM `spell_script_names`
+    WHERE ABS(`spell_id`) = 803225 AND `ScriptName` = 'aura_ascension_runemaster_frigid_fusion';
+INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
+(803225, 'aura_ascension_runemaster_frigid_fusion');

@@ -37,9 +37,11 @@
 -- 804441 « Timeguard » : effet 0 = aura 69, effets 1 et 2 = aura 4 DUMMY (35 et 50),
 --        ProcCharges 3. Le script s'accroche à l'effet 0 uniquement.
 -- 800857 + 501772..501778 « Accelerated Recovery », les 8 rangs (`spell_ranks` les
---        chaîne bien, vérifié) : effet 0 = aura 8 PERIODIC_HEAL sur les huit. Une ligne
---        par rang plutôt qu'un identifiant négatif : le -id suit GetNextRankSpell et
---        n'accroche QUE le premier maillon pour un SpellScript.
+--        chaîne bien, vérifié le 2026-09-20 : 800857 -> 501772..501778, 8 lignes) :
+--        effet 0 = aura 8 PERIODIC_HEAL sur les huit. Une ligne par rang pour la
+--        lisibilité ; un -800857 aurait marché aussi. ObjectMgr::LoadSpellScriptNames
+--        boucle sur GetNextRankSpell() quand l'identifiant est négatif et accroche TOUS
+--        les rangs, pas seulement le premier (ObjectMgr.cpp, branche `if (allRanks)`).
 -- 801304 et 803382 « Hasten » : le script ne pose que DoCheckProc/OnProc, sans index
 --        d'effet, donc il s'accroche aux deux lignes quelle que soit leur forme. Le
 --        script lui-même refuse de procer sur 803382 quand 801304 du même lanceur est
@@ -144,13 +146,29 @@ INSERT INTO `spell_proc`
 -- puissance d'attaque de mêlée. Pour un Chronomancer les deux sont proches de zéro, le
 -- terme dominant reste 1.2 × puissance des sorts.
 --
--- RISQUE SIGNALÉ, pas caché : 801282 est aussi le sort déclenché par 501820..501824
--- (« Gravity Bomb » rangs 2 à 6, famille 28), dont la propre description ne promet que
--- « $s3 Shadow damage » porté par leur effet 3 (aura 3 PERIODIC_DAMAGE). Pour ces rangs,
--- l'explosion 801282 est un dégât de zone EN PLUS, qui gagnera donc aussi le
--- coefficient. Si ces rangs sont encore distribués, retirer cette ligne et la remplacer
--- par un contrat C++ ciblant le seul 801281 ; `spell_ranks` est vide pour tous ces
--- identifiants, ce fichier ne peut donc pas les distinguer par la donnée seule.
+-- RISQUE MESURÉ, ET INERTE À CE JOUR — À RELIRE AVANT TOUTE DISTRIBUTION DES RANGS 2-6
+--
+-- 801282 est aussi le sort déclenché par 501820..501824 (« Gravity Bomb » rangs 2 à 6,
+-- famille 28) : mesuré au DBC, les six identifiants 801281 et 501820..501824 portent tous
+-- EffectTriggerSpell = 801282 sur leur effet 0 (aura 23). La description des rangs 2 à 6
+-- ne promet que « $s3 Shadow damage » (effet 3, aura 3 PERIODIC_DAMAGE) : pour eux
+-- l'explosion 801282 est un dégât de zone EN PLUS, qui gagnera donc aussi le coefficient.
+--
+-- Cette ligne est néanmoins conservée, parce que le risque ne porte aujourd'hui sur
+-- personne. VÉRIFIÉ EN BASE LE 2026-09-20, les rangs 2 à 6 ne sont distribués nulle part :
+--   ascension_custom_class_spell : 0 ligne pour 801281 et 501820..501824
+--        (la seule ligne Chronomancer du lot est class 22, spell_id 800857, niveau 6) ;
+--   npc_trainer                  : 0 ligne pour ces six identifiants ;
+--   spell_ranks                  : 0 ligne, ni comme `spell_id` ni comme `first_spell_id`.
+--
+-- CONDITION DE REPRISE, explicite : le jour où 501820..501824 sont distribués (ligne dans
+-- `ascension_custom_class_spell`, `npc_trainer` ou `playercreateinfo_spell_custom`), cette
+-- ligne `spell_bonus_data` doit être RETIRÉE et remplacée par un contrat C++ ciblé. Ce
+-- fichier ne peut pas faire la distinction par la donnée : `spell_bonus_data` est indexée
+-- par le sort déclenché (801282), qui est commun aux six rangs, et `spell_ranks` ne les
+-- chaîne pas. Le contrat C++ ne peut pas non plus passer par
+-- SpellInfo::Effects[0].BonusMultiplier de 801281 : le porteur du dégât est 801282. Il
+-- faudrait un SpellScript sur 801282 lisant le sort déclencheur.
 -- -------------------------------------------------------------------------------------
 
 DELETE FROM `spell_bonus_data` WHERE `entry` = 801282;

@@ -17,6 +17,22 @@
 //   704115 Clotting            gate Aortic Assault's closing cone on the talent, +25% on bleeders
 //   680732 Dark Essence        the periodic heal on Blood Rituals allies, and only on them
 //
+// NOT WIRED YET — READ THIS BEFORE APPLYING THE COMPANION SQL. AddSC_AscensionBloodmageEvents()
+// at the bottom of this file is DEFINED and nothing else: it is neither declared nor called in
+// src/MP_loader.cpp (checked 2026-09-20: `grep -rn AddSC_AscensionBloodmageEvents` over the module
+// returns this file only, and `grep -n BloodmageEvents src/MP_loader.cpp` returns nothing). Until
+// the two lines below are added there, not one of the thirteen script objects exists at runtime:
+// the fifteen rows of the companion SQL log "ScriptName ... does not exist" at startup, and the
+// four non-SQL hooks (two UnitScripts, one AllSpellScript, one GlobalScript) never register
+// either. That is P-051 applied to a whole file, and it costs one line of log.
+//     MP_loader.cpp, declaration block (beside AddSC_AscensionBloodmageVitality, l.155):
+//         void AddSC_AscensionBloodmageEvents();
+//     MP_loader.cpp, Addmod_ascension_compatScripts() (beside its call, l.315):
+//         AddSC_AscensionBloodmageEvents();
+// Order of operations: wire, build, read the names back out of the binary
+// (`strings libmod-ascension-compat.so | grep aura_ascension_bloodmage_`), install, THEN apply the
+// .sql. This file must not touch MP_loader.cpp itself, hence this note rather than the fix.
+//
 // ONE FIELD INDEX WORTH WRITING DOWN. Spell.dbc's EffectRadiusIndex is field 92+e, NOT 104+e
 // (104+e is EffectChainTarget). Witnesses read on 2026-09-20: Arcane Explosion 1449 has
 // field 92 = 13 and SpellRadius entry 13 is 10 yards; Chain Lightning 421 has field 92 = 0 and
@@ -89,6 +105,12 @@ constexpr uint32 BloodmageFamily = 26;
 // flag. Neither can collide: nothing else scripts these two auras.
 constexpr uint32 KEY_UNLEASHING = 1;
 
+// Infuse's unleash share. THIS 100 IS NOT READ FROM THE DATA, and it is the only number in this
+// file that no record states: 681403's effect 1 carries MiscValueB 0, where Atherann's Anguish
+// carries 30 and Genesis 500501 carries 50, and its description names no percentage either
+// ("...then unleashes the stored amount as Shadow damage"). That sentence is taken literally.
+constexpr int32 InfuseUnleashPercent = 100;
+
 // Every creature Animated Blood can leave behind: worms, parasites and the rank 3 amalgam.
 // Duplicated from AscensionBloodmageTalents.cpp, which owns the list and which this task is not
 // allowed to modify; the two copies must stay in step.
@@ -108,11 +130,27 @@ bool IsAnimatedBlood(uint32 entry)
 std::atomic<uint32> ActiveInfuse{0};
 std::atomic<uint32> ActiveAnguish{0};
 
-// Suppresses accumulation while an unleash is resolving. Atherann's Anguish marks a whole pack:
-// several marks expire in the same Unit::_UpdateSpells pass, one at a time, so the explosion paid
-// out on the first enemy would otherwise be accumulated by the marks still alive on the others
-// and paid again. A map is updated by a single thread at a time, and the triggered cast resolves
-// inside the same call, so a thread_local depth is the right scope.
+// Suppresses accumulation while an unleash is resolving.
+//
+// WHAT IT ACTUALLY COVERS, read back from the data rather than assumed: Infuse's payload 681404 is
+// TARGET_UNIT_DEST_AREA_ENEMY at EffectRadiusIndex 13 (field 92, = 10 yards), so one unleash
+// splashes onto the neighbouring enemies, and every Infuse mark standing in that splash — including
+// the legitimate marks of other groups — would accumulate the payout. This gate drops that
+// accumulation for the whole realm for the duration of the resolution. It is deliberately
+// conservative: it silences marks that have nothing to do with the unleash, and that is accepted.
+//
+// WHAT IT IS NOT FOR, contrary to what this comment claimed until 2026-09-20: Atherann's Anguish
+// does not need it, and the two facts that were invoked for it are both false. Its three effects
+// are all SPELL_EFFECT_APPLY_AURA, so each marked enemy owns its own UnitAura (UnitAura::
+// FillTargetMap, SpellAuras.cpp: the "non-area aura" branch pushes the aura's own unit owner) and
+// expires in ITS OWN Unit::_UpdateSpells pass — the expiry loop at Unit.cpp:4240 walks the
+// HOLDER's m_ownedAuras, never the caster's — so the marks of a pack never expire in one pass.
+// And its payload 680681 is single target (ImplicitTargetA 6, no radius), so it cannot reach the
+// other marks of the pack at all. The one mark it can reach is the one being paid, which
+// KEY_UNLEASHING already covers on its own.
+//
+// A map is updated by a single thread at a time, and the triggered cast resolves inside the same
+// call, so a thread_local depth is the right scope.
 thread_local uint32 UnleashDepth = 0;
 
 struct UnleashGuard
@@ -148,6 +186,17 @@ int32 ClampBasePoints(uint64 amount)
 // The shared body of the two accumulators: pay out what the mark stored, once, on natural expiry.
 // `percent` is the share the record authors; 100 means "the stored amount", which is what Infuse's
 // description says and all its data allows (see the Infuse note in the metadata pass below).
+//
+// A REFRESH KEEPS THE RUNNING TOTAL, and that is a decision, not an oversight. Recasting the mark
+// on an already-marked enemy goes through Unit::_TryStackingOrRefreshingExistingAura, which ends
+// in Aura::ModStackAmount (Unit.cpp:4969) and never re-runs an AfterEffectApply registered with
+// AURA_EFFECT_HANDLE_REAL — the `_counted` flags of the two scripts below rely on exactly that.
+// So neither the script instance nor its stored value is rebuilt: the mark pays once, for
+// everything accumulated since it was FIRST applied, and a recast only extends the window. The
+// descriptions ("accumulating ... for $d, and then exploding for that amount") do not say which
+// of the two it should be, and this is the behaviour Genesis (AscensionRunemasterGenesis.cpp)
+// already has; it is inherited from that pattern rather than chosen here, and it is written down
+// so the next reader does not take it for a bug.
 void UnleashMark(AuraScript* script, uint32 payloadId, int32 percent)
 {
     Aura* mark = script->GetAura();
@@ -204,7 +253,28 @@ public:
         // talent promises. The metadata pass below turns that effect into a DUMMY so the core
         // stops applying it, and the condition is enforced here instead. The 5 is read back from
         // the very effect that was disarmed, never hard-coded.
-        if (damage && IsBloodmage(victim))
+        //
+        // TWO DEPARTURES FROM THE AURA THAT WAS DISARMED, both forced by the hook this uses, both
+        // stated here because neither is visible from the tooltip:
+        //   - ORDER. Aura 87 is consumed inside Unit::SpellDamageBonusTaken (Unit.cpp:9351) and
+        //     Unit::MeleeDamageBonusTaken (Unit.cpp:10856), i.e. BEFORE absorption. OnDamage is
+        //     called from Unit::DealDamage (Unit.cpp:1004), i.e. AFTER it. So a shield now soaks
+        //     the unreduced amount and the 5% is taken from whatever got through. Accepted: this
+        //     is the only hook that also sees auto attacks.
+        //   - SCOPE. Those two native callers only ever run on damage that has an attacker.
+        //     DealDamage also carries falls, drowning and lava, which Player::EnvironmentalDamage
+        //     (Player.cpp:883) pushes through it with attacker == victim; the disarmed aura never
+        //     touched those. The `attacker` and `attacker != victim` tests below keep them out —
+        //     the talent says "your damage taken", not "your cliff fall". They cannot be obtained
+        //     by moving this block below the shared guard on the next lines, which also returns on
+        //     UnleashDepth: the reduction must keep applying to an unleash payload.
+        //     RESIDUAL, and accepted knowingly: `attacker != victim` is the widest filter this
+        //     hook offers — UnitScript::OnDamage is handed (attacker, victim, damage) and no
+        //     damagetype (UnitScript.h:70), so SELF_DAMAGE cannot be told apart from a genuinely
+        //     self-inflicted spell. A Bloodmage spell that damages its own caster therefore loses
+        //     the 5% it would have had from the native aura. No such spell is wired in this file;
+        //     the alternative, keeping falls in scope, is the worse of the two errors.
+        if (damage && attacker && attacker != victim && IsBloodmage(victim))
             if (AuraEffect const* shadows = victim->GetAuraEffect(SPELL_SHADOWS_IN_THE_NIGHT, EFFECT_1))
                 if (victim->HealthAbovePct(75))
                 {
@@ -331,7 +401,7 @@ class aura_ascension_bloodmage_infuse : public AuraScript
             _counted = false;
             ReleaseMark(ActiveInfuse);
         }
-        UnleashMark(this, SPELL_INFUSE_DAMAGE, 100);
+        UnleashMark(this, SPELL_INFUSE_DAMAGE, InfuseUnleashPercent);
     }
 
     void Register() override
@@ -526,6 +596,14 @@ class aura_ascension_bloodmage_festering_maw : public AuraScript
 // description says "$AP*0.25", 704626's says "$AP*0.2" — so the one written on the record whose
 // amount this is (556233) is the one applied, and the disagreement is reported rather than
 // averaged away. No other source states a coefficient.
+
+// NOT DATA-DRIVEN, and it has to be named for that to be visible at a glance. Read on 2026-09-20
+// out of 556233's own description text ("$AP*0.25"); 704626's description disagrees ("$AP*0.2").
+// No DBC field carries either: EffectBonusMultiplier (field 229+e) and PointsPerComboPoint are
+// 0.0 on both records, and no table of this module holds the number. A tooltip re-import will
+// therefore leave this silently stale — there is nothing for the code to compare it against.
+constexpr double ThickPeltAttackPowerShare = 0.25;
+
 class bloodmage_thick_pelt_scaling : public UnitScript
 {
 public:
@@ -542,7 +620,7 @@ public:
         // The authored amount is negative because it is a reduction, so the attack-power share is
         // subtracted, not added.
         double const amount = double(value) -
-            double(caster->GetTotalAttackPowerValue(BASE_ATTACK)) * 0.25;
+            double(caster->GetTotalAttackPowerValue(BASE_ATTACK)) * ThickPeltAttackPowerShare;
         if (std::isfinite(amount) && amount <= 0.0 &&
             double(float(amount)) >= double(std::numeric_limits<int32>::min()))
             value = float(amount);
@@ -581,6 +659,15 @@ public:
                 info->Effects[EFFECT_1].ApplyAuraName = SPELL_AURA_DUMMY;
             // The running total is in memory only. A mark restored from `character_aura` after a
             // restart would expire with nothing to pay, so it must not be saved at all.
+            //
+            // THIS CLEAR IS WIDER THAN IT LOOKS, and the trap is in the core, not here:
+            // SPELL_ATTR0_CU_FORCE_AURA_SAVING is 0x20000800 (SpellInfo.h:206) and overlaps
+            // SPELL_ATTR0_CU_IGNORE_EVADE (0x00000800, SpellInfo.h:188) and
+            // SPELL_ATTR0_CU_ONLY_ONE_AREA_AURA (0x20000000, SpellInfo.h:207), so every
+            // `&= ~FORCE_AURA_SAVING` in this codebase clears three flags. Harmless on these two
+            // records — `spell_custom_attr` holds no row for 680680 or 681403, and neither is an
+            // area aura — and it is the shared idiom of 18 other files of this module, so the
+            // repair belongs in the core and not in a class file.
             info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
             info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
         }
@@ -620,7 +707,8 @@ public:
             {
                 // Sated and Ravenous are re-derived from the live Thirst stack on every stack
                 // change; a copy restored from `character_aura` would be a tier with no resource
-                // behind it.
+                // behind it. Same three-flag overlap as above (SpellInfo.h:206/188/207); harmless
+                // for the same two reasons, checked on 570024 and 570025.
                 info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
                 info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
             }
@@ -714,6 +802,17 @@ class spell_ascension_bloodmage_clotting : public SpellScript
 // marker, 525031 or 524861, which is the pair AscensionBloodmageTalents.cpp already documents and
 // mirrors onto the real form state. Bloodbolt is the empowerment family AscensionPooledVitality.h
 // already names. Both are read, not enumerated here.
+//
+// HOW WIDE THAT SET IS, counted on 2026-09-20 rather than assumed: 86 Spell.dbc records of family
+// 26 (field 208) carry one of the two markers at CasterAuraSpell (field 24), and 85 of them are
+// castable — exactly one has SPELL_ATTR0_PASSIVE. It is NOT a list of attacks: Ironhide 801956,
+// Eternal Resolve 801962, Endure the Curse 681189/681190, Terrify 804198 and the howls (Blood Howl
+// 800782, Monstrous Howl 804091 and 804811, Wicked Howl 804207) sit in it beside Lunge 500126,
+// Rotclaw 804197, Reave 800490 and Aortic Assault 806212, so casting a defensive or a shout also
+// triggers the heal. That is left as is: the description says "Cursed Form abilities", not "Cursed
+// Form attacks", and no record states a narrower set — narrowing it to damaging spells would be a
+// rule this project has nowhere read. Triggered sub-casts are excluded below by IsTriggered(), and
+// passives are never cast.
 //
 // The tooltip's second line ("Healing from Sanguine Essence increases target's critical strike
 // chance by $680693s3% for $680593d") is left alone: 680693 has a single effect, so its "s3" names

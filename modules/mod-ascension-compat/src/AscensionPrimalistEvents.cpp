@@ -26,7 +26,6 @@ enum PrimalistEventSpells : uint32
     SPELL_BESTIAL_WRATH_FOCUS      = 803348,
     SPELL_BESTIAL_WRATH_MANA       = 803350,
     SPELL_BESTIAL_WRATH_VULNERABLE = 572047,
-    SPELL_BONES_MARKER             = 806552,
     SPELL_BONES_STACKER            = 806378,
     SPELL_BONES_MARK               = 806554,
     SPELL_BONES_DETONATION         = 806553
@@ -82,6 +81,13 @@ void GainEarthshaping(Player* player)
 // swings included. No proc flag can express "a control effect landed on me", so the event
 // is taken from aura application instead, and the companion SQL's DisableEffectsMask = 1
 // suppresses that over-heal.
+//
+// THE TWO AUTHORED TOOLTIPS DISAGREE, and the code follows the DBC: 706167 says
+// "$707806s1% of your maximum health" while 707806's own Description says "10% of your
+// base health". What is applied is 4% of MAXIMUM health: 707806 effect 0 is a
+// SPELL_EFFECT_HEAL_PCT with base points 3 (value 4), and Spell::EffectHealPct feeds it
+// to CountPctFromMaxHealth (SpellEffects.cpp:1916). 707806's Description is the stale
+// one; nothing here compensates for it.
 // ---------------------------------------------------------------------------------
 bool IsControlEffect(SpellInfo const* info)
 {
@@ -116,7 +122,7 @@ public:
 
     void OnAuraApply(Unit* unit, Aura* aura) override
     {
-        // The heal is cast from inside Unit::_ApplyAura (Unit.cpp:5110), so this runs on
+        // The heal is cast from inside Unit::_ApplyAura (Unit.cpp:5111), so this runs on
         // the map update thread of the player. Unit updates are NOT single-threaded here:
         // worldserver.conf sets MapUpdate.Threads = 10. A plain member would be shared by
         // those threads - one map could clear the flag while another is still inside the
@@ -124,6 +130,13 @@ public:
         // another. thread_local makes this exactly what it has to be: a call-stack guard.
         static thread_local bool healing = false;
 
+        // TWO call sites, not one. Unit.cpp:5111 is the fresh application; the second is
+        // Unit::_TryStackingOrRefreshingExistingAura (Unit.cpp:4970), fired right after
+        // foundAura->ModStackAmount(1) when the SAME caster re-lands the SAME spell. So a
+        // re-applied root or stun heals again, with no internal delay - this path never
+        // goes through spell_proc, so no Cooldown field reaches it. That is accepted and
+        // written down rather than throttled: no authored record carries a cadence for
+        // this talent, and none is invented here.
         Player* player = Primalist(unit);
         if (!player || !aura || !player->IsAlive() || !player->IsInWorld())
             return;
@@ -241,8 +254,9 @@ class aura_ascension_primalist_rupturer : public AuraScript
 //   504856 Lion    THREE auras 117 = 40 (mechanics 1, 5, 10)
 //     -> 505218    TWO auras 117 = 20 (mechanics 1, 5); the third is GONE
 //   800137 Wolf    aura 31 = 25, aura 49 = 8
-//     -> 802726    aura 31 = 13, aura 49 = 5; no dummy effect at all, so the player
-//                  carries no application of this one, only the summons do
+//     -> 802726    aura 31 = 13, aura 49 = 5, plus the same inert dummy the other four
+//                  carry: Effect = [190, 190, 6], ApplyAuraName = [31, 49, 4] (re-read
+//                  in Spell.dbc). All five copies do apply something to the player.
 // So three of the five copies drop an effect on the way, and Turtle's copy is not
 // weakened. That is the authored data; correcting it is a data question, not this
 // script's, and nothing here compensates for it.
@@ -294,11 +308,19 @@ class spell_ascension_primalist_fury_of_the_wild : public SpellScript
 
     void Handle()
     {
+        // NO pet test in the guard below, deliberately. The copy is cast on the PLAYER,
+        // and its effect 190 re-walks owner->m_Controlled on every
+        // UnitAura::FillTargetMap (SpellAuras.cpp:2882-2895), which Aura::UpdateTargetMap
+        // replays every UPDATE_TARGET_MAP_INTERVAL from Unit::_UpdateSpells
+        // (Unit.cpp:4235-4237 -> Aura::UpdateOwner, SpellAuras.cpp:729-730). A Primalist
+        // who buffs himself before whistling his pet back still gets the copy on it;
+        // gating on GetGuardianPet() would throw that away for nothing.
         Player* player = Primalist(GetCaster());
         uint32 petBoon = PetBoonOf(GetSpellInfo()->Id);
-        if (!player || !petBoon || !player->IsAlive() || !player->IsInWorld() ||
-            !player->HasAura(SPELL_FURY_OF_THE_WILD) || !player->GetGuardianPet())
+        if (!player || !petBoon || !player->IsAlive() || !player->IsInWorld())
             return;
+
+        bool const talented = player->HasAura(SPELL_FURY_OF_THE_WILD);
 
         // The five player Boons are mutually exclusive through spell_group 1132
         // (stack_rule 2, SPELL_GROUP_STACK_RULE_EXCLUSIVE_FROM_SAME_CASTER), but the
@@ -309,25 +331,114 @@ class spell_ascension_primalist_fury_of_the_wild : public SpellScript
         // caster group is checked between the incoming and the existing aura without
         // regard to which is the copy (Aura::CanStackWith, SpellAuras.cpp:2001), so the
         // copy would immediately remove the player Boon that just cast it. The previous
-        // copy is therefore taken down here, one line before the new one goes up.
+        // copy is therefore taken down here, one line before the new one goes up - and
+        // ALL FIVE come down instead when the talent is missing, so a Boon cast after a
+        // respec cleans up rather than leaving the last copy behind.
         //
         // RemoveOwnedAura, not RemoveAurasDueToSpell: the latter only walks
-        // m_appliedAuras (Unit.cpp:5471), and 802726 has no SPELL_EFFECT_APPLY_AURA
-        // effect at all, so the player owns that aura without carrying an application
-        // of it. Removing the owned aura takes the summons' applications with it.
+        // m_appliedAuras (Unit.cpp:5471), i.e. the player's OWN application, which for a
+        // copy is just its inert dummy - every one of the five, 802726 included, carries
+        // a SPELL_EFFECT_APPLY_AURA, so that application does exist. What has to go is
+        // the OWNED aura, because removing it takes the summons' applications with it.
         for (BoonPetCopy const& pair : FURY_OF_THE_WILD_BOONS)
-            if (pair.petBoon != petBoon)
+            if (!talented || pair.petBoon != petBoon)
                 player->RemoveOwnedAura(pair.petBoon, player->GetGUID());
 
+        if (!talented)
+            return;
+
         // The copy is cast on the player: its area-aura effects are the ones that
-        // reach the summons, the player himself only keeps its inert dummy (and for
-        // 802726, not even that).
+        // reach the summons, the player himself only keeps its inert dummy.
         player->CastSpell(player, petBoon, true);
     }
 
     void Register() override
     {
         AfterCast += SpellCastFn(spell_ascension_primalist_fury_of_the_wild::Handle);
+    }
+};
+
+// The copies are PERMANENT (DurationIndex 21 -> SpellDuration.dbc 21 = -1, read today) and
+// nothing in Spell.dbc ever takes them down. Casting another scripted Boon is NOT a
+// sufficient cleanup path: Boon of the Eagle (504773), the Tiger, the Elements and the
+// Empowered Boons have no "(Pet)" record, carry no script, and would leave the last copy
+// on the player for good - his summons buffed by a Boon he no longer has. The copy is
+// therefore tied to the life of the Boon that spawned it.
+//
+// This AuraScript rides the SAME script name as the SpellScript above
+// (RegisterSpellAndAuraScriptPair), so it needs no extra spell_script_names row: it is
+// loaded on the same five player Boons. EFFECT_0 is an APPLY_AURA on all five (read in
+// Spell.dbc: 500935 aura 4, 500939 aura 166, 500943 aura 72, 504856 aura 117, 800137
+// aura 31), hence SPELL_AURA_ANY rather than a type that would match only one of them.
+class aura_ascension_primalist_fury_of_the_wild_boon : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_fury_of_the_wild_boon);
+
+    bool Validate(SpellInfo const* spellInfo) override
+    {
+        if (!spellInfo || spellInfo->SpellFamilyName != PRIMALIST_FAMILY)
+            return false;
+
+        uint32 petBoon = PetBoonOf(spellInfo->Id);
+        return petBoon && sSpellMgr->GetSpellInfo(petBoon);
+    }
+
+    bool Load() override { return Primalist(GetUnitOwner()) != nullptr; }
+
+    void Remove(AuraEffect const* /*effect*/, AuraEffectHandleModes /*mode*/)
+    {
+        Player* player = Primalist(GetTarget());
+        uint32 petBoon = PetBoonOf(GetId());
+        if (!player || !petBoon)
+            return;
+
+        // Only this Boon's own copy: a switch to another scripted Boon removes this one
+        // first, and the new copy is cast afterwards from AfterCast (Spell.cpp:3993 runs
+        // the launch phase, Spell.cpp:4102 the AfterCast hooks), so the order is safe.
+        player->RemoveOwnedAura(petBoon, player->GetGUID());
+    }
+
+    void Register() override
+    {
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_primalist_fury_of_the_wild_boon::Remove,
+            EFFECT_0, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+// Losing the talent itself (respec, unlearn) leaves the Boon up and would leave its copy
+// with it. 801234's single effect is an APPLY_AURA / SPELL_AURA_DUMMY (read in Spell.dbc),
+// so the removal hook hangs on EFFECT_0 / SPELL_AURA_DUMMY. Needs its own
+// spell_script_names row - see the companion SQL.
+class aura_ascension_primalist_fury_of_the_wild_talent : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_fury_of_the_wild_talent);
+
+    bool Validate(SpellInfo const* spellInfo) override
+    {
+        return spellInfo && spellInfo->Id == SPELL_FURY_OF_THE_WILD &&
+            spellInfo->SpellFamilyName == PRIMALIST_FAMILY &&
+            spellInfo->Effects[EFFECT_0].IsAura(SPELL_AURA_DUMMY);
+    }
+
+    bool Load() override { return Primalist(GetUnitOwner()) != nullptr; }
+
+    void Remove(AuraEffect const* /*effect*/, AuraEffectHandleModes /*mode*/)
+    {
+        Player* player = Primalist(GetTarget());
+        if (!player)
+            return;
+
+        // RemoveOwnedAura on an id the player does not own is a no-op, and erasing
+        // another entry of the m_ownedAuras multimap does not invalidate the iterator
+        // the caller may be holding on a different element.
+        for (BoonPetCopy const& pair : FURY_OF_THE_WILD_BOONS)
+            player->RemoveOwnedAura(pair.petBoon, player->GetGUID());
+    }
+
+    void Register() override
+    {
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_primalist_fury_of_the_wild_talent::Remove,
+            EFFECT_0, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
     }
 };
 
@@ -354,6 +465,17 @@ class spell_ascension_primalist_fury_of_the_wild : public SpellScript
 // tooltip of 803347 says "When your pet critically strikes", singular, so Proc keeps
 // the guardian pet alone. (The five "(Pet)" Boons reach every summon the same way,
 // but that is the authored data's doing, not this file's.)
+//
+// NO INTERNAL DELAY, said plainly rather than left to be discovered: the spell_proc row
+// of 803347 is the preexisting one (ProcFlags 69972, SpellTypeMask 1, SpellPhaseMask 2,
+// HitMask 2, Cooldown 0, Charges 0 - read in acore_world), and 69972 contains 0x4
+// PROC_FLAG_DONE_MELEE_AUTO_ATTACK (SpellMgr.h:113). Every critical strike of the pet,
+// white swings included, therefore restores 2% of maximum mana (803350, ENERGIZE_PCT,
+// base points 1 -> value 2) and re-lays 572047 (+4% physical damage taken, 10 s). That is
+// what the tooltip promises, but it is an unthrottled mana faucet and it has NOT been
+// measured. Capping it means either a Cooldown on that row - which would throttle
+// sentence one's Focus as well, since both hang on the same row - or an internal timer.
+// No cadence is written in any authored record, so none is invented here.
 // ---------------------------------------------------------------------------------
 class aura_ascension_primalist_bestial_wrath : public AuraScript
 {
@@ -406,12 +528,25 @@ class aura_ascension_primalist_bestial_wrath : public AuraScript
 // pet's abilities to the target to add a stack ... At 5 stacks, your pet consumes this
 // buff to deal ${$806553m1+$AP*0.5} damage to the target, ignoring Armor."
 //
-// What the authored chain does and why it cannot work as written:
+// What the authored chain does, and the exactly one place where it breaks:
 //   806552 effect 1 triggers 806554 "Mark" (5 stacks) on the enemy, effect 2 triggers
 //   806378 "Stacker Passive on Pet", whose single effect is an aura 42 towards 806589.
+//   THE STACKER REACHES THE PET BY ITSELF - checked in the core, not assumed, and this
+//   is why nothing is scripted on 806552. 806378's effect 0 has ImplicitTargetA 5 =
+//   TARGET_UNIT_PET (SharedDefines.h:1507), which Spell::SelectImplicitCasterObjectTargets
+//   resolves against the CASTER (Spell.cpp:1824, `m_caster->GetGuardianPet()`), and the
+//   caster of the triggered cast is the player. The LAUNCH branch of
+//   Spell::EffectTriggerSpell (SpellEffects.cpp:1222-1233) only bails when
+//   NeedsToBeTriggeredByCaster is true, and it is false here: TARGET_UNIT_PET is a
+//   caster-referenced target so it adds nothing to GetExplicitTargetMask
+//   (SpellInfo.cpp:128-160, table entry SpellInfo.cpp:219), 806552 is not channeled
+//   (AttributesEx 0x10000000) and its effect 2 TargetA is TARGET_CHECK_ENEMY, not
+//   TARGET_CHECK_ENTRY (SpellInfo.cpp:1160-1202). Spell::HandleLaunchPhase runs that mode
+//   for every effect (Spell.cpp:8406-8416) and Spell::cast calls it unconditionally
+//   (Spell.cpp:3993). The marker's own target being the enemy changes nothing.
 //   806378 has ProcFlags 0 in Spell.dbc, so SpellMgr::LoadSpellProcs generates nothing
 //   and the aura is never a proc candidate (P-045) - the companion SQL supplies the row.
-//   806589 itself is broken twice over: its effect 0 is a
+//   806589 is where it really breaks, twice over: its effect 0 is a
 //   SPELL_EFFECT_ASCENSION_MODIFY_AURA_STACKS whose MiscValue is 0, and
 //   ModifyAscensionAuraStacks returns at once on a zero delta; its effect 1 fires the
 //   806553 detonation on EVERY hit instead of the fifth. The proc handler below
@@ -421,7 +556,14 @@ class aura_ascension_primalist_bestial_wrath : public AuraScript
 //   * "${$806553m1+$AP*0.5}". Only the m1 part exists: 806553 effect 0 is a
 //     SPELL_EFFECT_SCHOOL_DAMAGE with base points 309 (value 310), and there is no
 //     spell_bonus_data row for 806553 (checked in acore_world). The attack-power half
-//     is therefore NOT applied and the detonation deals a flat 310. A spell_bonus_data
+//     is therefore NOT applied and the detonation deals a flat 310.
+//     Nor is the stock DBC coefficient doing anything: 806553 does carry
+//     EffectBonusMultiplier 1.0 (Spell.dbc field 230; Fireball 133 and Shadow Bolt 686
+//     both read 0.0), and Unit::SpellDamageBonusDone would use it - but 806553 is listed
+//     in AscensionCompatData::StockCoefficientSpells (AscensionStockCoefficientData.h:140)
+//     and the GlobalScript ascension_stock_coefficients zeroes every effect's
+//     BonusMultiplier at load (AscensionStockCoefficients.cpp:36-38). THAT is what makes
+//     the 310 flat, not the missing spell_bonus_data row alone. A spell_bonus_data
 //     row (entry 806553, ap_bonus 0.5) would reach Unit::SpellDamageBonusDone
 //     (Unit.cpp:9260-9267, called for every EffectSchoolDMG), but the caster of 806553
 //     is the SUMMON, so such a row would scale on the pet's attack power, while the
@@ -436,44 +578,6 @@ class aura_ascension_primalist_bestial_wrath : public AuraScript
 //     StackAmount is 5 and Aura::ModStackAmount caps there (SpellAuras.cpp:969-1006).
 //     Making it the fifth hit needs a separate counter, i.e. new data - not done here.
 // ---------------------------------------------------------------------------------
-class spell_ascension_primalist_bring_me_their_bones : public SpellScript
-{
-    PrepareSpellScript(spell_ascension_primalist_bring_me_their_bones);
-
-    bool Validate(SpellInfo const* spellInfo) override
-    {
-        return spellInfo && spellInfo->Id == SPELL_BONES_MARKER &&
-            spellInfo->SpellFamilyName == PRIMALIST_FAMILY &&
-            ValidateSpellInfo({SPELL_BONES_STACKER});
-    }
-
-    bool Load() override { return Primalist(GetCaster()) != nullptr; }
-
-    void Handle()
-    {
-        Player* player = Primalist(GetCaster());
-        Guardian* pet = player ? player->GetGuardianPet() : nullptr;
-        if (!pet || !pet->IsAlive() || !player->IsInWorld())
-            return;
-
-        // Effect 2 of the marker already triggers 806378, but it does so through an
-        // enemy unit target (ImplicitTargetA 6), so the pet never gets it from the
-        // authored chain. Cast unconditionally: 806378 has StackAmount 0, so a second
-        // cast cannot double anything, it refreshes the existing application
-        // (Aura::TryRefreshStackOrCreate). Skipping the cast when the pet already
-        // carries the aura would be worse than useless - 806378 and 806554 share
-        // DurationIndex 8 (SpellDuration.dbc 8 = 15000 ms), so a re-cast while the old
-        // stacker is still running would leave the stacker expiring up to 15 s before
-        // the new mark, and the pet's last hits would stop counting.
-        player->CastSpell(pet, SPELL_BONES_STACKER, true);
-    }
-
-    void Register() override
-    {
-        AfterCast += SpellCastFn(spell_ascension_primalist_bring_me_their_bones::Handle);
-    }
-};
-
 class aura_ascension_primalist_bones_stacker : public AuraScript
 {
     PrepareAuraScript(aura_ascension_primalist_bones_stacker);
@@ -509,9 +613,17 @@ class aura_ascension_primalist_bones_stacker : public AuraScript
         if (!mark)
             return;
 
+        // "Mark an enemy for $d": a fixed window, not one the pet can renew. 806554 has
+        // StackAmount 5, so the `m_spellInfo->StackAmount ||` term of Aura::ModStackAmount
+        // (SpellAuras.cpp:990) is true and every increment calls RefreshTimers - a pet
+        // hitting more than once per 15 s (806554 DurationIndex 8 -> SpellDuration.dbc
+        // 8 = 15000 ms) would hold the mark open for ever. Same idiom as GainEarthshaping.
         uint32 cap = mark->GetSpellInfo()->StackAmount;
+        int32 remaining = mark->GetDuration();
         if (mark->ModStackAmount(1))
             return;                                 // the mark is gone, nothing to consume
+
+        mark->SetDuration(remaining);
 
         if (mark->GetStackAmount() < cap)
             return;
@@ -563,8 +675,9 @@ void AddSC_AscensionPrimalistEvents()
     new primalist_event_auras();
     new primalist_event_metadata();
     RegisterSpellScript(aura_ascension_primalist_rupturer);
-    RegisterSpellScript(spell_ascension_primalist_fury_of_the_wild);
+    RegisterSpellAndAuraScriptPair(spell_ascension_primalist_fury_of_the_wild,
+        aura_ascension_primalist_fury_of_the_wild_boon);
+    RegisterSpellScript(aura_ascension_primalist_fury_of_the_wild_talent);
     RegisterSpellScript(aura_ascension_primalist_bestial_wrath);
-    RegisterSpellScript(spell_ascension_primalist_bring_me_their_bones);
     RegisterSpellScript(aura_ascension_primalist_bones_stacker);
 }

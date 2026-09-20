@@ -33,8 +33,9 @@ enum ReaperEventSpells : uint32
 
 // Every talent whose tooltip reads "generating a Reaped Soul ..." reacts here, on the
 // resource aura itself. Two producers exist and neither is a proc: the declarative one
-// (AscensionCompat.cpp ModifyAuraStacks -> HandleAscensionReaperResource -> ModStackAmount)
-// and the direct casts of 500363 (soul capture, Final Requiem 680338, Sinister Litany).
+// (ModifyAuraStacks, AscensionCompat.cpp:2939 -> HandleAscensionReaperResource,
+// AscensionReaperTalents.cpp:176 -> ModStackAmount) and the direct casts of 500363
+// (soul capture, Final Requiem 680338, Sinister Litany).
 // Both end in Aura::SetStackAmount or Unit::_ApplyAura, and both therefore reach an aura
 // effect handler: SetStackAmount calls AuraEffect::ChangeAmount(onStackOrReapply = true),
 // which calls HandleEffect with AURA_EFFECT_HANDLE_REAPPLY, which calls the apply hooks
@@ -64,17 +65,21 @@ class aura_ascension_reaper_soul_events : public AuraScript
         return aura && !aura->IsRemoved();
     }
 
-    // KNOWN GAP, measured, not guessed: at the ceiling the three talents in this handler are dead.
-    // Crossing 3 souls does NOT spend them (AscensionCompat.cpp:3148-3152 only casts Soul
-    // Infusion), so 3/3 is the resting state. A further award reaches Aura::ModStackAmount,
-    // which clamps stackAmount to maxStackAmount (SpellAuras.cpp:972-981) and then calls
-    // SetStackAmount(3) anyway (SpellAuras.cpp:1002); this handler therefore runs with
-    // current == previous and leaves on the comparison at its top. Fatesealer, Spirit Culling and
-    // Eater of Souls pay nothing for every "generating a Reaped Soul" that lands on a full
-    // bar, which no tooltip conditions. Repairing it belongs to the PRODUCER side
-    // (HandleAscensionReaperResource / ApplyGainRule in AscensionCompat.cpp), which would
-    // have to signal a clamped award, or move the talents onto an award hook instead of the
-    // stack. Both files are outside this file's scope, so the gap is recorded, not patched.
+    // CEILING GAP, measured, not guessed. This is NOT a corner case: it is the resting
+    // state. Nothing spends a soul when the bar reaches 3 — SynchronizeThresholdResources
+    // (AscensionCompat.cpp:3103, the threshold block at :3148-3153) only casts Soul
+    // Infusion — so a Reaper sits at 3/3 between two spenders. Every award landing in that
+    // window is clamped by Aura::ModStackAmount (SpellAuras.cpp:972-981) and still ends in
+    // SetStackAmount(3) (SpellAuras.cpp:1002), so this handler runs with current ==
+    // previous and leaves on the comparison at its top. Fatesealer and Spirit Culling
+    // therefore pay NOTHING over a large share of playing time, which no tooltip
+    // conditions, and they must NOT be described as repaired until this is closed.
+    // The repair belongs to the PRODUCER, HandleAscensionReaperResource
+    // (AscensionReaperTalents.cpp:176): it already reads `previous` and re-reads the final
+    // stack, so it can signal an award that was clamped, i.e. one where the stack did not
+    // move. That file is outside this file's scope, so the gap is recorded, not patched.
+    // Eater of Souls is not affected the same way: its tooltip is a threshold and its ward
+    // check below is what gates it.
     void Harvested(AuraEffect const*, AuraEffectHandleModes)
     {
         uint8 previous = _seen;
@@ -95,30 +100,52 @@ class aura_ascension_reaper_soul_events : public AuraScript
         if (!player || player->getClass() != CLASS_REAPER || !player->IsInWorld() || !player->IsAlive())
             return;
 
-        _running = true;
+        // Scope guard, not a pair of assignments: any early return added below by a later
+        // hand, or anything travelling up out of Spell::prepare, would otherwise leave
+        // _running at true and kill this script for the whole life of the aura, silently.
+        struct RunGuard
+        {
+            bool& Flag;
+            explicit RunGuard(bool& flag) : Flag(flag) { Flag = true; }
+            ~RunGuard() { Flag = false; }
+        } runGuard(_running);
 
-        // Fatesealer: "Generating a Reaped Soul now reduces damage taken ..., stacking u times."
-        // 705443 carries its own stack cap and duration; casting it is the whole talent.
-        if (player->HasAura(SPELL_FATESEALER))
-            player->CastSpell(player, SPELL_FATESEALER_WARD, true);
+        // One award can be worth several souls, and it arrives here as ONE call: two
+        // ResourceGainRules grant 3 at once (AscensionCustomResourceData.h:421-424,
+        // Wraithblade 805258 and Sinister Litany 806818), and both travel through a single
+        // ModifyAuraStacks -> ModStackAmount -> SetStackAmount. The talents whose tooltip
+        // reads "generating a Reaped Soul" are therefore paid once per soul, not once per
+        // event, which is what lets Fatesealer reach its own stack cap.
+        uint8 const gained = uint8(current - previous);
+        for (uint8 i = 0; i < gained && Still(); ++i)
+        {
+            // Fatesealer: "Generating a Reaped Soul now reduces damage taken ..., stacking
+            // u times." 705443 carries its own stack cap and duration; casting it is the
+            // whole talent, and one cast per soul is what makes the stacking reachable.
+            if (player->HasAura(SPELL_FATESEALER))
+                player->CastSpell(player, SPELL_FATESEALER_WARD, true);
 
-        // Spirit Culling: "... now has a $h% chance to summon a Spectral Scythe". $h is the
-        // talent's own DBC ProcChance; 500576 is the Spirit Culling variant of the summon and
-        // carries its own duration. The damage half of the talent is a native ADD_FLAT_MODIFIER.
-        // 500576 is listed in REAPER_ALL_SOUL_CONSUMERS (AscensionCompat.cpp:274), so the
-        // cast MUST stay triggered = true. ConsumeReaperSouls (AscensionCompat.cpp:3014, la liste testee l.3028)
-        // would otherwise RemoveAurasDueToSpell(500363) from inside Aura::SetStackAmount,
-        // which goes on iterating its application list and calls SetNeedClientUpdateForTargets
-        // on a removed aura (SpellAuras.cpp:943-966). Only the triggered test at the top of
-        // OnSpellCast (AscensionCompat.cpp:2456) keeps that out today, and Still() does not
-        // cover it: the damage would happen in the core after this handler returns.
-        if (Still() && player->HasAura(SPELL_SPIRIT_CULLING))
-            if (SpellInfo const* culling = sSpellMgr->GetSpellInfo(SPELL_SPIRIT_CULLING))
-                if (roll_chance_i(int32(std::min<uint32>(culling->ProcChance, 100))))
-                    player->CastSpell(player, SPELL_SPIRIT_CULLING_SCYTHE, true);
+            // Spirit Culling: "... now has a $h% chance to summon a Spectral Scythe". $h is
+            // the talent's own DBC ProcChance, rolled once per soul. 500576 is the Spirit
+            // Culling variant of the summon and carries its own duration. The damage half of
+            // the talent is a native ADD_FLAT_MODIFIER.
+            // 500576 is listed in REAPER_ALL_SOUL_CONSUMERS (AscensionCompat.cpp:274), so the
+            // cast MUST stay triggered = true. ConsumeReaperSouls (AscensionCompat.cpp:3014,
+            // the list tested at l.3028) would otherwise RemoveAurasDueToSpell(500363) from
+            // inside Aura::SetStackAmount, which goes on iterating its application list and
+            // calls SetNeedClientUpdateForTargets on a removed aura (SpellAuras.cpp:943-966).
+            // Only the triggered test at the top of OnSpellCast (AscensionCompat.cpp:2456)
+            // keeps that out today, and Still() does not cover it: the damage would happen in
+            // the core after this handler returns.
+            if (Still() && player->HasAura(SPELL_SPIRIT_CULLING))
+                if (SpellInfo const* culling = sSpellMgr->GetSpellInfo(SPELL_SPIRIT_CULLING))
+                    if (roll_chance_i(int32(std::min<uint32>(culling->ProcChance, 100))))
+                        player->CastSpell(player, SPELL_SPIRIT_CULLING_SCYTHE, true);
+        }
 
-        // Eater of Souls: "Reaching 3 Reaped Souls ... This will not trigger while already
-        // active." The 3 of the tooltip is Reaped Soul's own ceiling, read here rather than
+        // Eater of Souls stays OUT of the loop on purpose: its tooltip reads "Reaching 3
+        // Reaped Souls", a threshold, not a gain; "... This will not trigger while
+        // already active." The 3 of the tooltip is Reaped Soul's own ceiling, read here rather than
         // written down, and read the way the core reads it: Aura::ModStackAmount clamps on
         // CalcMaxAuraStacks(GetCaster()) (SpellAuras.cpp:972), not on the raw DBC StackAmount,
         // so a modifier that ever raised the cap is followed for free. Today both give 3.
@@ -137,8 +164,6 @@ class aura_ascension_reaper_soul_events : public AuraScript
         if (Still() && full && current >= full && player->HasAura(SPELL_EATER_OF_SOULS) &&
             !player->HasAura(SPELL_EATER_OF_SOULS_WARD))
             player->CastSpell(player, SPELL_EATER_OF_SOULS_WARD, true);
-
-        _running = false;
     }
 
     void Register() override
@@ -183,6 +208,20 @@ class aura_ascension_reaper_soul_infusion : public AuraScript
 // Weakened Souls: "Your Soulrend now also applies Weakened Soul". The proc window is a
 // spell_proc row (family 36, Soulrend's family bit, melee spell damage, hit phase); the
 // row disables effect 1, a private Ascension aura 354 whose core handler is nullptr.
+//
+// NOT WIRED TODAY, ON PURPOSE. 2026_09_20_09_ascension_reaper_events.sql deliberately
+// omits both the `spell_proc` row for 92146 and the `spell_script_names` row for this
+// script, because the debuff this script would apply, 803433, is unfit to ship as its
+// data stands (permanent, and not restricted to Shadow/Frost — both measured below).
+// The class stays compiled and registered, which costs exactly one startup line,
+// LOG_ERROR "Script named 'aura_ascension_weakened_souls' is not assigned in the
+// database." (ScriptMgr.h:921-926, because ObjectMgr::GetScriptId returns 0 for an
+// unassigned name, ObjectMgr.cpp:10512-10524). That line is the marker: it disappears
+// the day the two rows go in.
+//
+// DO NOT ADD THOSE TWO ROWS before 803433 has a `spell_dbc` row fixing its DurationIndex
+// and the EffectSpellClassMask of its effect 0. Wiring this script as it stands puts a
+// permanent +10% damage-taken debuff on players in PvP.
 class aura_ascension_weakened_souls : public AuraScript
 {
     PrepareAuraScript(aura_ascension_weakened_souls);
@@ -217,14 +256,17 @@ class aura_ascension_weakened_souls : public AuraScript
         // 803433 holds the percentage (effect 0, BasePoints 9 -> 10%). The caster is the
         // Reaper, which is what "damage taken from you" needs.
         //
-        // TWO MEASURED DIVERGENCES FROM THE TOOLTIP, neither of them repairable from here:
+        // TWO MEASURED DIVERGENCES FROM THE TOOLTIP. They are what keeps this script
+        // UNWIRED (see the block above the class): nothing applied 803433 in game before
+        // this file, so shipping it would be this work introducing both of them.
         //
         // 1. The debuff is PERMANENT. 803433 carries DurationIndex 21 and line 21 of
         //    SpellDuration.dbc is (-1, 0, -1), i.e. infinite. On a player it lasts until
         //    death or a dispel, on an NPC until the evade. No source anywhere writes a
         //    duration for it: neither the tooltip of 92146 nor that of 803433 announces one,
-        //    so none is invented here. Giving it one means a `spell_dbc` row on 803433,
-        //    which is data on a spell outside this file's scope.
+        //    so none is invented here, and no DurationIndex is guessed. Giving it one means
+        //    a `spell_dbc` row on 803433 with a duration someone has to DECIDE, which is why
+        //    the wiring is withheld rather than shipped with a made-up number.
         //
         // 2. It is NOT limited to Shadow and Frost. Effect 0 is aura 271
         //    SPELL_AURA_MOD_DAMAGE_FROM_CASTER, and that aura never reads its MiscValue: its
@@ -238,7 +280,10 @@ class aura_ascension_weakened_souls : public AuraScript
         //    REFLECT_SPELLS_SCHOOL read a MiscValue as a school mask. Both consumers also
         //    require a spellProto, so automatic weapon swings are not affected. Narrowing it
         //    for real means giving effect 0 an EffectSpellClassMask through a `spell_dbc`
-        //    row, again outside this file's scope. For contrast, 573320 "Soulrend / aura"
+        //    row. The only non-invented value available is (0,8192,0), Soulrend's own
+        //    SpellFamilyFlags, which frames the debuff on Soulrend alone rather than on the
+        //    Shadow-and-Frost the tooltip claims; that is a design call, not a reading, so
+        //    it is not made here. For contrast, 573320 "Soulrend / aura"
         //    carries the same aura 271 with mask (2,0,0) and is correctly framed.
         owner->CastSpell(victim, SPELL_WEAKENED_SOUL, true);
     }

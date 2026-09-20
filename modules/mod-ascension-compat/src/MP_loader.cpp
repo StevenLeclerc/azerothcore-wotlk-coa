@@ -167,6 +167,14 @@ void AddSC_AscensionRunemasterHurricane();
 void AddSC_AscensionRunemasterEngravings();
 void AddSC_AscensionRunemasterGenesis();
 void AddSC_AscensionRunemasterRunes();
+void AddSC_AscensionReaperEvents();
+void AddSC_AscensionPrimalistEvents();
+void AddSC_AscensionBloodmageEvents();
+void AddSC_AscensionChronomancerEvents();
+void AddSC_AscensionRangerEvents();
+void AddSC_AscensionStormbringerEvents();
+void AddSC_AscensionRunemasterFrigid();
+void AddSC_AscensionRunemasterFracture();
 void AddSC_AscensionRunemasterRiftClones();
 
 // Add all
@@ -327,6 +335,14 @@ void Addmod_ascension_compatScripts()
     AddSC_AscensionRunemasterEngravings();
     AddSC_AscensionRunemasterGenesis();
     AddSC_AscensionRunemasterRunes();
+    AddSC_AscensionReaperEvents();
+    AddSC_AscensionPrimalistEvents();
+    AddSC_AscensionBloodmageEvents();
+    AddSC_AscensionChronomancerEvents();
+    AddSC_AscensionRangerEvents();
+    AddSC_AscensionStormbringerEvents();
+    AddSC_AscensionRunemasterFrigid();
+    AddSC_AscensionRunemasterFracture();
     AddSC_AscensionRunemasterRiftClones();
     AddAscensionRunemasterZenithScripts();
     AddAscensionRunemasterEchoesScripts();

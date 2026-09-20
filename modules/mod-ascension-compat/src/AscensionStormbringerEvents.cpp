@@ -58,7 +58,8 @@ Pet* LiveAirElemental(Player* player)
 //
 // MEASURED COST, accepted on purpose. Arm of Thorim has a CATEGORY cooldown (Spell.dbc
 // field 1 Category = 981, field 30 CategoryRecoveryTime = 20000 on every rank), and
-// Player::AddSpellAndCategoryCooldowns (Player.cpp:11360, category block 11443-11491)
+// Player::AddSpellAndCategoryCooldowns (Player.cpp:11360, category block 11453-11504,
+// the "// category spells" branch, whose same-family loop is Player.cpp:11469-11495)
 // stores an entry for every spell of that category in the same family, whether or not the
 // player ever casts it. All nine ranks of the chain (`spell_ranks`
 // first_spell_id 801847: 801847, 501433-501437, 567518-567520) therefore hold a live
@@ -71,7 +72,13 @@ Pet* LiveAirElemental(Player* player)
 // (Player.cpp:4145-4149) does test it, but nothing here has measured that the Ascension
 // class spellbook keeps exactly one rank Active; getting that wrong would skip the rank
 // really on cooldown and kill the talent in silence — the P-045 / P-051 / P-053 family.
-void ReduceCooldownOverChain(Player* player, uint32 spellId, int32 delta)
+//
+// resetCategory carries the effect's MiscValueB, exactly as the native caller does
+// (Spell::EffectAscensionModifyCooldown passes `effect.MiscValueB != 0`,
+// SpellEffects.cpp:381). It is 0 on both effects of 801854 today (Spell.dbc field 113,
+// read 2026-09-20), so the branch is dead for now — it is wired anyway so that a future
+// data row raising the flag does not diverge from the core in silence.
+void ReduceCooldownOverChain(Player* player, uint32 spellId, int32 delta, bool resetCategory)
 {
     if (!player || !spellId || delta >= 0)
         return;
@@ -80,13 +87,21 @@ void ReduceCooldownOverChain(Player* player, uint32 spellId, int32 delta)
     uint32 current = sSpellMgr->GetFirstSpellInChain(spellId);
     for (uint8 step = 0; current && step < MAX_SPELL_CHAIN_WALK; ++step)
     {
-        // Same shape as the core's own ModifyAscensionCooldown: ModifySpellCooldown only
-        // shifts the stored end time, with no floor, so a reduction at least as long as
-        // what is left has to clear the entry instead of wrapping it.
+        // Same shape as the core's own ModifyAscensionCooldown (SpellEffects.cpp:303-327):
+        // ModifySpellCooldown only shifts the stored end time, with no floor, so a
+        // reduction at least as long as what is left has to clear the entry instead of
+        // wrapping it -- and clearing it means ResetAscensionCooldown
+        // (SpellEffects.cpp:290-301), which also purges the shared category when asked.
         if (uint32 remaining = player->GetSpellCooldownDelay(current))
         {
             if (reduction >= remaining)
+            {
                 player->RemoveSpellCooldown(current, true);
+                if (resetCategory)
+                    if (SpellInfo const* currentInfo = sSpellMgr->GetSpellInfo(current))
+                        if (uint32 category = currentInfo->GetCategory())
+                            player->RemoveCategoryCooldown(category);
+            }
             else
                 player->ModifySpellCooldown(current, delta);
         }
@@ -160,9 +175,36 @@ class aura_ascension_stormbringer_tailwind : public AuraScript
         // object, so the buffed allies reach this hook too. The owner is the one whose
         // application target is the aura's caster; this test is the only thing keeping an
         // ally's critical strike from extending someone else's Tailwind.
-        return player && player->getClass() == CLASS_STORMBRINGER &&
-            GetCasterGUID() == player->GetGUID() && eventInfo.GetActor() == player &&
-            player->HasAura(SPELL_GIFT_OF_AIR);
+        if (!player || player->getClass() != CLASS_STORMBRINGER ||
+            GetCasterGUID() != player->GetGUID() || eventInfo.GetActor() != player ||
+            !player->HasAura(SPELL_GIFT_OF_AIR))
+            return false;
+
+        // ONE extension per CAST, not one per target hit. The spell_proc row asks for
+        // PROC_SPELL_PHASE_HIT, and that phase is emitted from Spell::DoAllEffectOnTarget
+        // (Spell.cpp:2581, the Unit::ProcSkillsAndAuras calls at 2831 / 2926 / 2947), i.e.
+        // once per TargetInfo. Gale, the class's own filler, is EffectChainTarget 3 and
+        // MaxAffectedTargets 5 in Spell.dbc (fields 104 and 212, probed against Chain
+        // Lightning 421 = 3 and Fireball 133 = 0), so a single critting cast would hand
+        // out +4.5 s on a 15 s buff. Nothing downstream stops it: the row carries
+        // Cooldown 0 so Aura::IsProcOnCooldown never bites, 804035 has ProcCharges 0 in
+        // the DBC (field 36), and Aura::SetDuration (SpellAuras.cpp:816-826) has no cap.
+        // The cast is therefore marked, using the carrier this module already uses for
+        // per-cast state (AscensionStormbringerTalents.cpp:57-59;
+        // Spell::SetScriptValue / GetScriptValue, Spell.h:644-649).
+        // The alternative -- an ICD in the spell_proc row -- would be an invented number:
+        // no data anywhere writes one.
+        // ProcEventInfo::GetProcSpell (Unit.h:470) hands back a Spell const*, hence the
+        // cast to mark it; it is null for an auto attack, which only ever has one target,
+        // so there is nothing to deduplicate there.
+        if (Spell const* procSpell = eventInfo.GetProcSpell())
+        {
+            if (procSpell->GetScriptValue(SPELL_TAILWIND_EXTENSION))
+                return false;
+            const_cast<Spell*>(procSpell)->SetScriptValue(SPELL_TAILWIND_EXTENSION, 1);
+        }
+
+        return true;
     }
 
     void Extend(ProcEventInfo& /*eventInfo*/)
@@ -259,7 +301,8 @@ class aura_ascension_stormbringer_titanstorm : public AuraScript
             if (effect.Effect != SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN || effect.MiscValue <= 0)
                 continue;
 
-            ReduceCooldownOverChain(player, uint32(effect.MiscValue), effect.CalcValue(player));
+            ReduceCooldownOverChain(player, uint32(effect.MiscValue), effect.CalcValue(player),
+                effect.MiscValueB != 0);
         }
     }
 

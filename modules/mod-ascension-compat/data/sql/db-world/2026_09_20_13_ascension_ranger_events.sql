@@ -1,8 +1,25 @@
 -- =====================================================================================
--- mod-ascension-compat — Ranger : les trois talents « promesse sans handler » que le
--- fichier src/AscensionRangerEvents.cpp repare, et rien d'autre.
+-- mod-ascension-compat — Ranger. Moitie DONNEE du correctif de trois talents
+-- « promesse sans handler » (src/AscensionRangerEvents.cpp), PLUS une consequence qui
+-- n'est pas un detail et qui est ecrite ici pour ne pas etre decouverte en jeu :
 --
--- Moitie DONNEE du correctif. P-051 : un script enregistre en C++ mais absent de
+--   la ligne `creature_template_addon` (50393, '680278') posee en bas de ce fichier
+--   ACTIVE AUSSI l'effet 1 de 680278 — aura 24 PERIODIC_ENERGIZE, EffectMiscValue 2 =
+--   POWER_FOCUS (SharedDefines.h:327), valeur 1, Amplitude 1000 ms — c'est-a-dire
+--   1 Focus par seconde et par oiseau, rendu au MAITRE. Cela vaut pour TOUT Ranger qui
+--   a un War Falcon 50393 actif, qu'il ait Wingman (705098) ou non, et quelle que soit
+--   la source de l'invocation, pas seulement Phoenix Plumes. Le `$?s705098[...]` de
+--   l'infobulle ne conditionne QUE le texte cote client : cote serveur l'effet 1 de
+--   680278 n'est conditionne a RIEN. Ce qui depend vraiment de Wingman, c'est le -2% —
+--   non par un test sur 680278, mais parce que ce montant est porte par l'effet 2 de
+--   705098 lui-meme, aura que le joueur n'a que s'il a pris le talent.
+--   Porte mesuree : 806341 « Falcon Dive » invoque DEUX oiseaux pour 12 s
+--   (DurationIndex 29 = 12000 ms), soit ~24 Focus rendus pour un seul lancer.
+--   Si ce Focus n'est PAS voulu, ce fichier ne suffit pas : il faudrait un porteur
+--   n'ayant que l'effet 0 (nouvelle ligne `spell_dbc`) ou un AuraScript de suppression.
+--   A arbitrer, non tranche ici.
+--
+-- P-051 : un script enregistre en C++ mais absent de
 -- `spell_script_names` ne tourne JAMAIS et ne coute qu'une ligne de log au demarrage
 -- (« Script named '...' is not assigned in the database. »).
 --
@@ -50,8 +67,11 @@
 --       SPELL_AURA_PERIODIC_ENERGIZE dont aucune cible implicite n'est une zone
 --       (SpellEffectInfo::IsTargetingArea = false), et aucune ligne `spell_group` ne
 --       porte sur ces ids (SELECT verifie, 0 ligne) ;
---     - Unit::GetAuraCount (Unit.cpp:6279) compte 1 par application, StackAmount valant
---       0 dans le DBC.
+--     - Unit::GetAuraCount (Unit.cpp:6279) ajoute Aura::GetStackAmount() par
+--       application. Il ne lit PAS le champ StackAmount du DBC (qui vaut 0 ici) :
+--       Aura::m_stackAmount est initialise a 1 (SpellAuras.cpp:358) et rien n'empile ces
+--       auras, donc c'est la branche « else » qui passe et le compte vaut bien 1 par
+--       application.
 --   L'effet 2 de 680278 / 681394 n'est PAS « le chiffre par familier range la » : c'est
 --     un SPELL_AURA_ADD_FLAT_MODIFIER (107), EffectMiscValue 23 = SPELLMOD_EFFECT3
 --     (SpellDefines.h:99), EffectSpellClassMask (0x00080000,0,0) — exactement les
@@ -114,7 +134,14 @@
 -- -500075 « Precision Shot »  ->  spell_ascension_ranger_swiftshot
 --   705028 « Swiftshot » : « Damage dealt by Precision Shot now increases enemy Physical
 --     damage taken by $800578s1% for $800578d. » Son unique effet DBC est une aura 4
---     DUMMY : aucun code, aucune ligne de donnee ne lancait 800578.
+--     DUMMY : aucun code ne lancait 800578.
+--     Correction d'une affirmation trop large : une donnee le reference bel et bien. La
+--     SEULE reference a 800578 dans Spell.dbc (balayage des 234 champs des 209510
+--     enregistrements) est 804182 « Mighty Arbalest », champ 118 = EffectTriggerSpell[2],
+--     effet 2 = SPELL_EFFECT_TRIGGER_SPELL (64). Mais 804182 est orphelin : 0 occurrence
+--     de la valeur 804182 dans tout Spell.dbc, et aucune ligne dans spell_linked_spell,
+--     spell_proc ni spell_script_names (SELECT verifies). La voie est morte, donc aucun
+--     double-comptage reel aujourd'hui.
 --   800578 « Precision Shot » (le debuff) : APPLY_AURA / aura 87, MiscValue 1
 --     (SPELL_SCHOOL_MASK_NORMAL), valeur 4, duree 12000 ms (indice 29). Il fonctionne
 --     nativement une fois lance.
@@ -144,6 +171,23 @@
 --   Le piege P-052 ne mord pas ici : l'aura 49 n'a pas de case dans
 --   AuraEffect::HandleProc, la reveiller ne produit rien, et DisableEffectsMask 0 reste
 --   correct.
+--
+-- 520567 « Phoenix Plumes » : conception CONCURRENTE du meme talent, laissee en place.
+--   Infobulle « Next Woodland Blade summons a War Falcon. », effet unique =
+--   SPELL_EFFECT_TRIGGER_SPELL (64) vers 520558, EffectImplicitTargetA 6. Elle est
+--   orpheline aujourd'hui : 0 occurrence de la valeur 520567 dans Spell.dbc (balayage
+--   exhaustif) et aucune ligne dans spell_linked_spell, spell_proc ni
+--   spell_script_names (SELECT verifies). Rien ne la lance, donc pas de double
+--   invocation. Le jour ou elle serait cablee, elle DOUBLERAIT l'invocation faite par
+--   spell_ascension_ranger_phoenix_plumes : il faudra choisir l'une des deux.
+--
+-- STYLE SQL : apps/codestyle/codestyle-sql.py rejette ce fichier (« No DELETE keyword
+--   found before the INSERT » a la ligne de l'INSERT — faux positif, le DELETE est juste
+--   au-dessus — et « Missing backticks around (ABS) »). Les fichiers freres
+--   2026_09_20_09, _11 et _12 echouent exactement de la meme facon : le depot ne soumet
+--   pas le SQL de module a ce script. Non bloquant, laisse tel quel : mettre des
+--   backticks autour d'un nom de fonction integree ne leverait pas le faux positif sur
+--   le DELETE et changerait du SQL qui fonctionne.
 -- =====================================================================================
 
 -- DELETE sur ABS(`spell_id`) : une ligne de signe oppose laissee par une version
@@ -175,9 +219,33 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 -- `creature_template_addon` n'avait AUCUNE ligne pour 50393 (SELECT verifie, 0 ligne) ;
 -- le DELETE n'est la que pour rendre le fichier rejouable.
 --
--- 50393 « War Falcon » est la creature invoquee par 520558 « Phoenix Plumes », 520588
--- « Falconstrike Summon », 806341 « Falcon Dive » et 807119 « Falcon Diving » (tous
--- famille 27) — c'est le familier que l'infobulle de Wingman appelle « War Falcon ».
+-- 50393 « War Falcon » — c'est le familier que l'infobulle de Wingman appelle « War
+-- Falcon ». LISTE EXHAUSTIVE de ce qui l'invoque, etablie par balayage complet de
+-- Spell.dbc (Effect[71+e] == 28 SPELL_EFFECT_SUMMON et EffectMiscValue[110+e] == 50393),
+-- et non par echantillonnage. Elle compte, parce que chaque oiseau vivant porte 680278
+-- et rend donc 1 Focus/s au maitre, en plus des -2% de Wingman :
+--
+--   INVOCATION DIRECTE (5 enregistrements, 6 effets SUMMON) :
+--     520558 « Phoenix Plumes »       1 oiseau,  DurationIndex 32 =  6000 ms  (fam 27)
+--     520588 « Falconstrike Summon »  1 oiseau,  DurationIndex 32 =  6000 ms  (fam 27)
+--     806341 « Falcon Dive »          DEUX oiseaux (effets 0 ET 1), 29 = 12000 ms (fam 27)
+--     807119 « Falcon Diving »        1 oiseau,  DurationIndex 29 = 12000 ms  (fam 27)
+--     289371 « Falcon Diving »        1 oiseau,  DurationIndex 29 = 12000 ms  (fam 0)
+--
+--   VOIE INDIRECTE VIVANTE : 520587 « Falconstrike Summon Trigger » (TRIGGER_SPELL vers
+--     520588) est lui-meme declenche par les huit enregistrements nommes « Falconstrike »
+--     (806345, 806437..806443, champ 117 = EffectTriggerSpell[1] ; `spell_ranks` n'a
+--     AUCUNE ligne pour eux, ce ne sont donc pas des rangs au sens du coeur), par
+--     593281 « Advantage / 5 point trigger », et DEUX fois par 803118 « Ranger
+--     General's Command ».
+--
+--   VOIES INDIRECTES MORTES AUJOURD'HUI, listees pour qu'on ne les reveille pas sans le
+--     savoir : 705075 et 707383 « Falcon's Aid », 706282 « Forest Fighter » (aura 42
+--     PROC_TRIGGER_SPELL vers 520588) et 520783 / 289370 « Falcon Diving » (aura 42 vers
+--     807119 / 289371). Les cinq ont ProcFlags DBC = 0 et AUCUNE ligne `spell_proc`
+--     (SELECT verifie) : P-045, elles ne se declenchent jamais. Le jour ou on leur
+--     ajoute une ligne de proc, le nombre d'oiseaux simultanes — donc le Focus rendu et
+--     le -2N% de Wingman — monte d'autant.
 --
 -- LAISSE DE COTE, FAUTE D'ECRIT : 50264 est AUSSI nomme « War Falcon » (invoque par
 -- 800251 « Falcon's Call », dont la description dit seulement « Summons a falcon »).
