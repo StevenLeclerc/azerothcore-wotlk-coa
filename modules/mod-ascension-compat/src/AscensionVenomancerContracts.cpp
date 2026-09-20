@@ -60,6 +60,20 @@ void ApplyContracts(SpellInfo* info)
             info->Effects[0].TargetA = SpellImplicitTargetInfo(heal ? TARGET_UNIT_TARGET_ALLY : TARGET_UNIT_TARGET_ENEMY);
             info->Effects[0].TargetB = SpellImplicitTargetInfo();
         }
+    if (id == 680800 && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_COOLDOWN &&
+        info->Effects[EFFECT_0].SpellClassMask == flag96())
+        // Shadra's Vigil authors a -12 s SPELLMOD_COOLDOWN with an EMPTY EffectSpellClassMask.
+        // SpellInfo::IsAffected only tests the flags when the mask is non-empty, so an empty mask
+        // does not miss its target: it takes the WHOLE family. The talent's tooltip promises
+        // nothing about cooldowns -- "Healing done by Serpent's Fang now applies Shadra's Vigil to
+        // allies" -- so there is no named spell to narrow the mask onto, and narrowing it to a
+        // guess would not miss its target either. The effect is disarmed instead, the way
+        // AscensionNecromancerContracts.cpp:28 disarms 552011, whose comment names the same
+        // failure ("never as wildcard Mage spell modifiers").
+        // Guarded on the three fields it depends on, so a DBC import that authors something else
+        // here is left alone rather than silently neutered. -> P-071
+        dummy(EFFECT_0);
     if (id == 504796 || id == 504803)
         info->Effects[1].Effect = 0; // Explicit self-heal follows both damage and healing copies.
     if (id == Brood)
