@@ -1,0 +1,70 @@
+-- =====================================================================================
+-- mod-ascension-compat — Knight of Xoroth : le talent « Impcaller » n'invoquait rien.
+--
+-- Signalé en jeu le 2026-09-20 : « Shieldgore est censée invoquer une créature, elle
+-- n'invoque rien ». Diagnostic fait le jour même, et la cause est d'une seule pièce.
+--
+-- LA CHAÎNE, telle qu'elle est écrite dans les données :
+--   706755  « Impcaller », talent passif, famille 23
+--   707666  « Impcaller », rang "Aura" — c'est ELLE qui porte la promesse :
+--           « Your Shieldgore now summons a Hellfire Imp to aid you in combat for
+--             $807699d ... In addition, the maximum health of your imps is increased »
+--   et le module l'attend, très exactement :
+--           AscensionXorothAbilities.cpp:457
+--               if (Infernal(info) && player->HasAura(707666))
+--                   Summon(player, 50301, ..., duree de 807699);
+--           AscensionXorothSummons.cpp:36   même test, pour la santé des invocations.
+--
+-- LA RUPTURE : **rien n'applique jamais l'aura 707666.** Vérifié sur les trois chemins,
+-- et pas déduit :
+--   * aucun des 209 510 sorts de Spell.dbc ne la nomme — ni en EffectTriggerSpell, ni
+--     en CasterAuraSpell / TargetAuraSpell / Exclude* (champs 24 à 27) ;
+--   * le module ne la lance nulle part : aucun Cast/CastSpell/AddAura sur 707666, les
+--     deux seules occurrences sont les `HasAura` ci-dessus, qui la LISENT ;
+--   * la base n'a ni ligne `spell_linked_spell`, ni `spell_script_names` pour elle.
+-- Les deux tests sont donc TOUJOURS faux, et l'invocation n'a jamais lieu.
+--
+-- La session du matin l'avait trouvé et consigné dans AscensionXoroth.cpp:217 :
+-- « Open defect, deliberately not fixed here: nothing applies aura 707666 ». Elle
+-- avait raison sur un point décisif : faire de 707666 un bouton de remplacement aurait
+-- SUPPRIMÉ le bouton d'invocation, ce qui aurait été pire que le silence.
+--
+-- LA RÉPARATION, en donnée seule. `spell_linked_spell` type 2 = SPELL_LINK_AURA
+-- (SpellAuras.cpp:1259-1291) : à l'application de `spell_trigger`, le cœur fait
+-- `caster->AddAura(spell_effect, target)`, et `RemoveAura` à son retrait. L'aura vit
+-- donc exactement tant que le talent est porté — y compris à la reconnexion, puisqu'un
+-- passif est réappliqué. C'est le mécanisme employé le même jour pour les gravures
+-- d'arme du Runemaster (2026_09_20_04), éprouvé depuis.
+-- Prise d'effet à chaud : `.reload spell_linked_spell`. Retour arrière : DELETE + reload.
+--
+-- CE QUE LA LIGNE APPORTE, et rien d'autre : l'aura 707666 porte un effet 190
+-- (SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS, aura 133, valeur 30 — la santé des
+-- invocations de l'infobulle) et un SPELL_AURA_DUMMY porteur. Elle n'a ni coût, ni
+-- temps d'incantation, ni recharge : elle ne peut pas devenir un bouton par accident.
+--
+-- -------------------------------------------------------------------------------------
+-- ⚠ SECOND DÉFAUT, MESURÉ ET **NON CORRIGÉ ICI** — à lire avant de prendre ce talent.
+--
+-- L'effet 1 de 706755 est un `SPELL_AURA_ADD_FLAT_MODIFIER`, `MiscValue 14`
+-- (SPELLMOD_COST), valeur **+100**, avec un `EffectSpellClassMask` **VIDE** (0,0,0) et
+-- une famille non nulle (23). Or `SpellInfo::IsAffected` ne teste les drapeaux que si
+-- le masque est non nul :
+--       if (!familyName)                                       return true;
+--       if (familyName != SpellFamilyName)                     return false;
+--       if (familyFlags && !(familyFlags & SpellFamilyFlags))  return false;
+-- Un masque vide ne rate donc pas sa cible : **il touche toute la famille 23**. Le
+-- surcoût que l'infobulle attribue à la seule capacité transformée (« but its Rage cost
+-- is increased ») s'applique en réalité à TOUS les sorts de la classe.
+--
+-- Ce n'est corrigé ni ici ni ailleurs, pour une raison de méthode : le masque juste
+-- n'est écrit nulle part. Le candidat évident est le masque de l'effet 0 du même sort,
+-- (0, 768, 0), qui désigne les sorts que ce talent transforme — mais c'est une
+-- déduction, pas une lecture, et poser un masque faux ne rate pas non plus sa cible.
+-- Personne ne porte ce talent aujourd'hui (`character_spell` : 0 pour 706755), donc le
+-- défaut est LATENT. Il mordra le premier joueur qui le prendra.
+-- -------------------------------------------------------------------------------------
+
+DELETE FROM `spell_linked_spell` WHERE `spell_trigger` = 706755 AND `spell_effect` = 707666;
+
+INSERT INTO `spell_linked_spell` (`spell_trigger`, `spell_effect`, `type`, `comment`) VALUES
+(706755, 707666, 2, 'Knight of Xoroth Impcaller - applique l aura que le code attend pour invoquer');
