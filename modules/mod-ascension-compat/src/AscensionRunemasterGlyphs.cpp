@@ -30,6 +30,10 @@ constexpr uint32 SPELL_SCROLL_PASSIVE = 802204;
 constexpr uint32 SPELL_SCROLL_BUFF = 520077;
 constexpr uint32 SPELL_PHASE_RUSH_PASSIVE = 805724;
 constexpr uint32 SPELL_PHASE_RUSH_BUFF = 805725;
+constexpr uint32 SPELL_PRIMORDIAL_SALVOS = 800752;
+constexpr uint32 SPELL_SALVO_FLAME = 800729;
+constexpr uint32 SPELL_SALVO_FROST = 800730;
+constexpr uint32 SPELL_SALVO_ARCANE = 800731;
 constexpr uint32 SPELL_UNLEASHED_POWER = 807504;
 constexpr uint32 SPELL_UNLEASHED_POWER_DEBUFF = 504844;
 
@@ -205,6 +209,35 @@ class spell_ascension_runemaster_glyph_payload : public SpellScript
         PreventHitDefaultEffect(effIndex);
     }
 
+    // Primordial Salvos (800752): "Unleashing a Glyph now deals an additional
+    // ${$800730m1+$SP*0.06} damage OF THE SAME MAGIC SCHOOL to all enemies within $800730a1 yds
+    // of the target." The three per-school helpers exist side by side in the DBC — 800729 Fire,
+    // 800730 Frost, 800731 Arcane — which is what makes "same school" expressible at all.
+    // AfterCast, not AfterHit: the helper is itself an area spell, and AfterHit runs once per
+    // target, so hanging it there would fire one salvo per enemy struck.
+    void PrimordialSalvos()
+    {
+        Unit* caster = GetCaster();
+        Unit* target = GetExplTargetUnit();
+        if (!target || !caster->HasAura(SPELL_PRIMORDIAL_SALVOS, caster->GetGUID()))
+            return;
+        uint32 salvo = 0;
+        switch (GetSpellInfo()->Id)
+        {
+            case SPELL_UNLEASHED_FLAME: salvo = SPELL_SALVO_FLAME; break;
+            case SPELL_UNLEASHED_FROST: salvo = SPELL_SALVO_FROST; break;
+            case SPELL_UNLEASHED_ARCANE: salvo = SPELL_SALVO_ARCANE; break;
+            default: return;
+        }
+        SpellInfo const* helper = sSpellMgr->GetSpellInfo(salvo);
+        if (!helper)
+            return;
+        int32 const amount = helper->Effects[EFFECT_0].CalcValue(caster) +
+            int32(std::max(0, caster->ToPlayer()->SpellBaseDamageBonusDone(helper->GetSchoolMask())) * 0.06f);
+        if (amount > 0)
+            caster->CastCustomSpell(salvo, SPELLVALUE_BASE_POINT0, amount, target, TRIGGERED_FULL_MASK);
+    }
+
     void AfterPayloadHit()
     {
         Unit* target = GetHitUnit();
@@ -230,6 +263,7 @@ class spell_ascension_runemaster_glyph_payload : public SpellScript
     {
         BeforeCast += SpellCastFn(spell_ascension_runemaster_glyph_payload::PreparePayload);
         AfterHit += SpellHitFn(spell_ascension_runemaster_glyph_payload::AfterPayloadHit);
+        AfterCast += SpellCastFn(spell_ascension_runemaster_glyph_payload::PrimordialSalvos);
         if (m_scriptSpellId == SPELL_UNLEASHED_FROST)
         {
             OnEffectLaunch += SpellEffectFn(spell_ascension_runemaster_glyph_payload::PreventFrostRoot,

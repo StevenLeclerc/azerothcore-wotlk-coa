@@ -47,6 +47,21 @@ RIDER_SCRIPTS = {
     653266: 'aura_ascension_runemaster_ice_engraving',    # Icebound Momentum stacks
     653261: 'spell_ascension_runemaster_water_engraving',  # drain is a PERCENT, not an amount
     653263: 'aura_ascension_runemaster_arcane_mark',       # pays out the stored healing
+    653272: 'spell_ascension_runemaster_earth_engraving',  # Expansive Engraver's Earth quarter
+}
+
+# Fire's roll was moved out of the proc entry and into the script, because no spell modifier
+# can reach a family-0 aura and Expansive Engraver has to raise its chance. The row is pinned
+# at 100 as a result: if the roll ever leaves the C++, Fire procs on EVERY direct hit.
+FIRE_ENGRAVING = 653211
+FIRE_SOURCE = 'src/AscensionRunemasterSecondary.cpp'
+
+# Spells that carry SpellFamilyName 0 and are handled by a module script. A
+# `SpellFamilyName != 38` guard — the one the rest of the Runemaster metadata uses — would
+# skip them in silence: no binding, no metadata pass, no log line. See P-055.
+FAMILY_ZERO_SOURCES = {
+    'src/AscensionRunemasterGenesis.cpp': (500501, 500502),
+    'src/AscensionRunemasterEngravings.cpp': (653225, 653266, 653261, 653263, 653272),
 }
 
 PROC_AURAS = (42, 231, 354)
@@ -75,7 +90,7 @@ def module_sql():
 
 
 def proc_rows(sql):
-    """SpellId -> ProcFlags, from the INSERTs of `spell_proc` in the module's SQL."""
+    """SpellId -> {column: value}, from the INSERTs of `spell_proc` in the module's SQL."""
     rows = {}
     for block in re.findall(r'INSERT\s+INTO\s+`?spell_proc`?\s*\((.*?)\)\s*VALUES(.*?);',
                             sql, re.S | re.I):
@@ -85,7 +100,7 @@ def proc_rows(sql):
             if len(cells) != len(columns):
                 continue
             entry = dict(zip(columns, cells))
-            rows[int(entry['SpellId'])] = int(entry['ProcFlags'])
+            rows[int(entry['SpellId'])] = entry
     return rows
 
 
@@ -115,7 +130,8 @@ class WeaponEngravings(unittest.TestCase):
         cls.spell = DBC(DBC_DIR / 'Spell.dbc').by_id()
         cls.enchant = DBC(DBC_DIR / 'SpellItemEnchantment.dbc').by_id()
         sql = module_sql()
-        cls.procs = proc_rows(sql)
+        cls.procs_full = proc_rows(sql)
+        cls.procs = {k: int(v['ProcFlags']) for k, v in cls.procs_full.items()}
         cls.links = linked_rows(sql)
         cls.scripts = script_rows(sql)
 
@@ -173,6 +189,36 @@ class WeaponEngravings(unittest.TestCase):
                 self.assertIn(name, self.scripts.get(spell_id, set()),
                               f'{name} is not attached to {spell_id} in the module SQL: '
                               'the C++ would be compiled in and never called')
+
+    def test_fire_chance_is_rolled_in_cpp(self):
+        """The pinned Chance=100 row and the C++ roll are one mechanism: neither works alone."""
+        pinned = self.procs_full.get(FIRE_ENGRAVING, {}).get('Chance')
+        source = (MODULE / FIRE_SOURCE).read_text()
+        rolls = 'roll_chance_i' in source.split('class aura_ascension_runemaster_fire_engraving')[-1] \
+            .split('class ')[0]
+        if pinned == '100':
+            self.assertTrue(rolls, f'`spell_proc` pins {FIRE_ENGRAVING} at Chance 100 but '
+                                   f'{FIRE_SOURCE} no longer rolls: Fire would proc on every hit')
+        elif rolls:
+            self.fail(f'{FIRE_SOURCE} rolls the Fire chance itself, but `spell_proc` does not pin '
+                      f'{FIRE_ENGRAVING} at 100: the chance would be applied twice')
+
+    def test_family_zero_handlers_have_no_family_guard(self):
+        """P-055: these records carry family 0, so a family-38 guard disables them silently."""
+        for source, ids in FAMILY_ZERO_SOURCES.items():
+            # Comments are stripped first: these files quote the offending guard on purpose,
+            # to warn the next reader. Only real code counts.
+            text = '\n'.join(l for l in (MODULE / source).read_text().splitlines()
+                             if not l.lstrip().startswith('//'))
+            for spell_id in ids:
+                with self.subTest(spell=spell_id):
+                    self.assertEqual(self.spell[spell_id][149], 0,
+                                     f'{spell_id} is no longer family 0: re-read {source}, the '
+                                     'reasoning in its header no longer holds')
+            with self.subTest(source=source):
+                self.assertNotIn('SpellFamilyName != 38', text,
+                                 f'{source} handles family-0 spells but gates on family 38: '
+                                 'the scripts would never bind and nothing would be logged')
 
     def test_payloads_exist(self):
         """Every payload named by a carrier's proc aura is a real spell."""

@@ -38,8 +38,25 @@ enum RunemasterEngravingSpells : uint32
     SPELL_ICEBOUND_MOMENTUM_ICD = 712495,
     SPELL_WATER_DRAIN = 653261,
     SPELL_ARCANE_MARK = 653263,
-    SPELL_ARCANE_STORED_HEALING = 712493
+    SPELL_ARCANE_STORED_HEALING = 712493,
+    SPELL_FIREBRAND_APPLY = 653210,
+    SPELL_EARTH_PAYLOAD = 653272,
+    SPELL_WATER_PAYLOAD = 653261,
+    SPELL_ICE_PAYLOAD = 653217,
+    SPELL_AIR_ENGRAVING_PASSIVE = 653223,
+    SPELL_CONVERGENCE = 801086,
+    SPELL_CONVERGENCE_HIT = 560241,
+    SPELL_EXPANSIVE_ENGRAVER = 807496
 };
+
+// The six payloads a Weapon Engraving fires. "Weapon Engravings you trigger" (Convergence)
+// has no other common point: four of the six are cast natively by the core's aura 42 handler
+// and never pass through a script of ours.
+bool IsEngravingPayload(uint32 id)
+{
+    return id == SPELL_FIREBRAND_APPLY || id == SPELL_ICE_PAYLOAD || id == SPELL_WATER_PAYLOAD ||
+        id == SPELL_EARTH_PAYLOAD || id == SPELL_AIR_REPLICATION || id == SPELL_ARCANE_MARK;
+}
 
 // Shared by the Air and Ice engraving handlers: the tooltips say "direct damage", which is
 // what the proc flags of their `spell_proc` rows already select (DONE_PERIODIC is absent);
@@ -201,7 +218,36 @@ class runemaster_engraving_momentum : public AllSpellScript
 {
 public:
     runemaster_engraving_momentum() : AllSpellScript("runemaster_engraving_momentum",
-        {ALLSPELLHOOK_ON_HIT_RESULT}) { }
+        {ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_ON_CAST}) { }
+
+    // Convergence (801086): "For 15 s, the next 10 Weapon Engravings you trigger will now deal
+    // an additional <damage> Elemental Damage." The count lives on the aura, so it dies with it.
+    // The amount follows the tooltip's own formula: the helper's value + SP*0.3 + AP*0.2.
+    void OnSpellCast(Spell* spell, Unit* caster, SpellInfo const* info, bool) override
+    {
+        Player* player = caster ? caster->ToPlayer() : nullptr;
+        if (!player || player->getClass() != CLASS_SPIRIT_MAGE || !IsEngravingPayload(info->Id))
+            return;
+        Aura* convergence = player->GetAura(SPELL_CONVERGENCE, player->GetGUID());
+        Unit* target = spell->m_targets.GetUnitTarget();
+        if (!convergence || !target || target == player || player->IsFriendlyTo(target))
+            return;
+        SpellInfo const* helper = sSpellMgr->GetSpellInfo(SPELL_CONVERGENCE_HIT);
+        if (!helper)
+            return;
+        int64 const amount = int64(helper->Effects[EFFECT_0].CalcValue(player)) +
+            int64(std::max(0, player->SpellBaseDamageBonusDone(helper->GetSchoolMask())) * 0.3f) +
+            int64(std::max(0.0f, player->GetTotalAttackPowerValue(BASE_ATTACK)) * 0.2f);
+        if (amount > 0)
+            player->CastCustomSpell(SPELL_CONVERGENCE_HIT, SPELLVALUE_BASE_POINT0,
+                int32(std::min<int64>(amount, std::numeric_limits<int32>::max())), target,
+                TRIGGERED_FULL_MASK);
+        uint64 const spent = convergence->GetScriptValue(SPELL_CONVERGENCE) + 1;
+        if (spent >= 10)
+            convergence->Remove();
+        else
+            convergence->SetScriptValue(SPELL_CONVERGENCE, spent);
+    }
 
     // Icebound Momentum: "The Runemaster deals $s1% additional damage per stack as Frost damage."
     // Triggered spells are skipped, which both matches "the Runemaster deals" and keeps the Frost
@@ -228,6 +274,35 @@ public:
     }
 };
 
+// Expansive Engraver (807496), quart « Earth »: "While Air Engraving is active, Earth Engraving
+// deals 10% increased damage to the first target hit, plus an additional 10% for each subsequent
+// target." The two percentages are literal in the tooltip, not $s variables.
+class spell_ascension_runemaster_earth_engraving : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_runemaster_earth_engraving);
+
+    uint8 _hit = 0;
+
+    bool Load() override
+    {
+        Unit* caster = GetCaster();
+        return caster && caster->IsPlayer() && caster->getClass() == CLASS_SPIRIT_MAGE &&
+            caster->HasAura(SPELL_EXPANSIVE_ENGRAVER) && caster->HasAura(SPELL_AIR_ENGRAVING_PASSIVE);
+    }
+
+    void Escalate()
+    {
+        // One SpellScript instance per cast, so the counter cannot leak between two casts.
+        ++_hit;
+        SetHitDamage(GetHitDamage() + CalculatePct(GetHitDamage(), 10 * _hit));
+    }
+
+    void Register() override
+    {
+        OnHit += SpellHitFn(spell_ascension_runemaster_earth_engraving::Escalate);
+    }
+};
+
 class runemaster_engraving_metadata : public GlobalScript
 {
 public:
@@ -241,14 +316,18 @@ public:
         if (info->Id == SPELL_AIR_REPLICATION || info->Id == SPELL_ICEBOUND_MOMENTUM_HIT)
         {
             // Both carry a share of damage that has already been resolved once: it must not be
-            // scaled, critted or reduced a second time. Same treatment as the Fists of Power hit
-            // and the Arcane Sigil DoT (AscensionRunemasterSecondary.cpp).
-            info->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
+            // scaled or reduced a second time. Same treatment as the Fists of Power hit and the
+            // Arcane Sigil DoT (AscensionRunemasterSecondary.cpp).
             info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
             info->AttributesEx4 |= SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS;
             info->AscensionInheritsResolvedAmount = true;
             info->Effects[EFFECT_0].BonusMultiplier = 0.0f;
         }
+        // Icebound Momentum's payload is NOT barred from critting: Expansive Engraver grants it
+        // "30 percentage points of critical strike chance", so the design expects it to crit.
+        // The Air replication has no such clause and keeps the bar.
+        if (info->Id == SPELL_AIR_REPLICATION)
+            info->AttributesEx2 |= SPELL_ATTR2_CANT_CRIT;
         if (info->Id == SPELL_AIR_REPLICATION)
             // "Replicated damage ignores armor" — and its school mask includes Normal (9),
             // so without this the armour reduction would apply.
@@ -279,4 +358,5 @@ void AddSC_AscensionRunemasterEngravings()
     RegisterSpellScript(aura_ascension_runemaster_ice_engraving);
     RegisterSpellScript(spell_ascension_runemaster_water_engraving);
     RegisterSpellScript(aura_ascension_runemaster_arcane_mark);
+    RegisterSpellScript(spell_ascension_runemaster_earth_engraving);
 }

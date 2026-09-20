@@ -165,6 +165,7 @@ void AddSC_AscensionPrimalistSecondary();
 void AddSC_AscensionRunemasterSecondary();
 void AddSC_AscensionRunemasterHurricane();
 void AddSC_AscensionRunemasterEngravings();
+void AddSC_AscensionRunemasterGenesis();
 void AddSC_AscensionRunemasterRiftClones();
 
 // Add all
@@ -323,6 +324,7 @@ void Addmod_ascension_compatScripts()
     AddSC_AscensionRunemasterSecondary();
     AddSC_AscensionRunemasterHurricane();
     AddSC_AscensionRunemasterEngravings();
+    AddSC_AscensionRunemasterGenesis();
     AddSC_AscensionRunemasterRiftClones();
     AddAscensionRunemasterZenithScripts();
     AddAscensionRunemasterEchoesScripts();

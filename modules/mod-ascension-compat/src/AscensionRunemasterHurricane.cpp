@@ -16,7 +16,14 @@ enum HurricaneSpells : uint32
     SPELL_HURRICANE_HIT = 645437,
     SPELL_HURRICANE_DODGE = 645440,
     SPELL_WAVEFORGED = 705565,
-    SPELL_WAVEFORGED_READY = 500469
+    SPELL_WAVEFORGED_READY = 500469,
+    SPELL_WATER_RUNES = 707150,
+    SPELL_WATER_ENGRAVING = 653214,
+    SPELL_WATER_PAYLOAD = 653261,
+    SPELL_ICE_ENGRAVING = 653266,
+    SPELL_ICE_PAYLOAD = 653217,
+    SPELL_SWIFT_ETCHING = 705600,
+    SPELL_SWIFT_ETCHING_BUFF = 500506
 };
 
 bool StrikeHurricane(Unit* player, Aura* aura)
@@ -75,10 +82,17 @@ class aura_ascension_runemaster_hurricane : public AuraScript
     {
         Unit* player = GetTarget();
         player->RemoveAurasDueToSpell(SPELL_HURRICANE_DODGE, player->GetGUID());
-        if (player->IsAlive() && player->IsInWorld() &&
-            GetTargetApplication()->GetRemoveMode() != AURA_REMOVE_BY_DEATH &&
-            player->HasAura(SPELL_WAVEFORGED, player->GetGUID()))
+        if (!player->IsAlive() || !player->IsInWorld() ||
+            GetTargetApplication()->GetRemoveMode() == AURA_REMOVE_BY_DEATH)
+            return;
+        if (player->HasAura(SPELL_WAVEFORGED, player->GetGUID()))
             player->CastSpell(player, SPELL_WAVEFORGED_READY, true);
+        // Swift Etching (705600): "After Hurricane ends, your melee attack speed is increased by
+        // $500506s1% and critical strike chance by $500506s2% for $500506d." Same window as
+        // Waveforged above, and the same exclusion: a Hurricane that ends because the Runemaster
+        // died has not "ended", it was cut short.
+        if (player->HasAura(SPELL_SWIFT_ETCHING, player->GetGUID()))
+            player->CastSpell(player, SPELL_SWIFT_ETCHING_BUFF, true);
     }
 
     void Register() override
@@ -111,6 +125,26 @@ class spell_ascension_hurricane_damage : public SpellScript
     {
         if (GetHitUnit()->IsPlayer())
             SetHitDamage(CalculatePct(GetHitDamage(), 80));
+        WaterRunes();
+    }
+
+    // Water Runes (707150): "Each strike from Hurricane is now guaranteed to apply Weapon
+    // Engraving: Water or Ice to your target while they are active." The talent's own effects
+    // are two proc auras on melee auto attacks, which is not what the tooltip describes — a
+    // Hurricane strike is neither. Whichever engraving is actually on the weapons fires here,
+    // guaranteed, which is the whole point of the talent; both fire when both are engraved,
+    // since a dual wielder can carry one of each.
+    void WaterRunes()
+    {
+        Unit* caster = GetCaster();
+        Unit* target = GetHitUnit();
+        if (!caster->HasAura(SPELL_WATER_RUNES) || !target || target == caster ||
+            !target->IsAlive() || caster->IsFriendlyTo(target))
+            return;
+        if (caster->HasAura(SPELL_WATER_ENGRAVING))
+            caster->CastSpell(target, SPELL_WATER_PAYLOAD, true);
+        if (caster->HasAura(SPELL_ICE_ENGRAVING))
+            caster->CastSpell(target, SPELL_ICE_PAYLOAD, true);
     }
 
     void Register() override

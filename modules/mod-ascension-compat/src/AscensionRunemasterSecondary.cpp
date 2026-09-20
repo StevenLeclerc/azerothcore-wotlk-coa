@@ -38,7 +38,9 @@ enum RunemasterSecondarySpells : uint32
     SPELL_ARCANE_SIGIL_SILENCE = 808020,
     SPELL_FIRE_ENGRAVING = 653211,
     SPELL_FIREBRAND = 653210,
-    SPELL_FIREBRAND_EXPLOSION = 653212
+    SPELL_FIREBRAND_EXPLOSION = 653212,
+    SPELL_AIR_ENGRAVING_PASSIVE = 653223,
+    SPELL_EXPANSIVE_ENGRAVER = 807496
 };
 
 bool HasTattoo(Player* player, uint32 root)
@@ -222,9 +224,16 @@ class aura_ascension_arcane_palm_sigil : public AuraScript
     }
 };
 
-// Fire Engraving (equip spell of enchant 1000): direct damage has a 30% chance to apply Firebrand. The
-// proc flags come from spell_proc; this script only keeps the existing Firebrand's duration, since
+// Fire Engraving (equip spell of enchant 1000): direct damage has a 30% chance to apply Firebrand.
+// The proc flags come from spell_proc; this script keeps the existing Firebrand's duration, since
 // "Additional applications do not refresh its duration".
+//
+// THE ROLL LIVES HERE, not in the proc entry. Expansive Engraver (807496) says "While Air Engraving
+// is active, Fire Engraving's trigger chance is increased by $s1 percentage points", and no spell
+// modifier can reach this aura: SpellInfo::IsAffected matches on SpellFamilyName, and the engravings
+// carry family 0. So `spell_proc` is set to Chance 100 and the real roll is below.
+// COUPLING, deliberate and one-way: with the row at 100 and this script missing, Fire would proc on
+// every hit. The companion SQL must therefore be applied AFTER the binary that carries this code.
 class aura_ascension_runemaster_fire_engraving : public AuraScript
 {
     PrepareAuraScript(aura_ascension_runemaster_fire_engraving);
@@ -234,9 +243,18 @@ class aura_ascension_runemaster_fire_engraving : public AuraScript
         Unit* player = GetTarget();
         DamageInfo const* damage = event.GetDamageInfo();
         Unit* target = event.GetActionTarget();
-        return player->IsPlayer() && player->getClass() == CLASS_SPIRIT_MAGE && event.GetActor() == player &&
-            target && target != player && target->IsAlive() && damage && damage->GetDamage() &&
-            damage->GetDamageType() != DOT;
+        if (!player->IsPlayer() || player->getClass() != CLASS_SPIRIT_MAGE || event.GetActor() != player ||
+            !target || target == player || !target->IsAlive() || !damage || !damage->GetDamage() ||
+            damage->GetDamageType() == DOT)
+            return false;
+        // Base chance from the DBC, never from the proc entry: the entry is pinned at 100 so that
+        // this roll is the only one. Reading the DBC keeps the tooltip and the code on one number.
+        SpellInfo const* engraving = GetSpellInfo();
+        int32 chance = int32(engraving->ProcChance);
+        if (player->HasAura(SPELL_EXPANSIVE_ENGRAVER) && player->HasAura(SPELL_AIR_ENGRAVING_PASSIVE))
+            if (SpellInfo const* talent = sSpellMgr->GetSpellInfo(SPELL_EXPANSIVE_ENGRAVER))
+                chance += talent->Effects[EFFECT_0].CalcValue(player);
+        return roll_chance_i(std::clamp(chance, 0, 100));
     }
 
     void Proc(AuraEffect const* /*effect*/, ProcEventInfo& event)
