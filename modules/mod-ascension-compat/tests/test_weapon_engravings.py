@@ -37,10 +37,17 @@ ENGRAVINGS = {
 # Fire's proc row predates this module's SQL: it is part of the base world data.
 PROC_ROW_FROM_BASE_DATA = {653211}
 
-# Air's proc effect is the Ascension-private aura 354, which the core cannot execute
-# on its own (isTriggerAura[354] is false and there is no native handler). A row alone
-# would do nothing, and applying 653225 would also double the haste 653223 grants.
-NEEDS_CPP = {653225}
+# Carriers whose proc aura the core cannot execute on its own, and the script the module
+# must therefore name in `spell_script_names`. Air's aura 354 has AuraEffectHandler[354]
+# == nullptr: the proc row alone fires into the void.
+NEEDS_SCRIPT = {653225: 'aura_ascension_runemaster_air_engraving'}
+
+# Riders no table can express: the payload works without them, the tooltip does not.
+RIDER_SCRIPTS = {
+    653266: 'aura_ascension_runemaster_ice_engraving',    # Icebound Momentum stacks
+    653261: 'spell_ascension_runemaster_water_engraving',  # drain is a PERCENT, not an amount
+    653263: 'aura_ascension_runemaster_arcane_mark',       # pays out the stored healing
+}
 
 PROC_AURAS = (42, 231, 354)
 
@@ -82,6 +89,16 @@ def proc_rows(sql):
     return rows
 
 
+def script_rows(sql):
+    """spell_id -> {script names}, from the INSERTs of `spell_script_names`."""
+    rows = {}
+    for block in re.findall(r'INSERT\s+INTO\s+`?spell_script_names`?\s*\(.*?\)\s*VALUES(.*?);',
+                            sql, re.S | re.I):
+        for spell, name in re.findall(r"\((-?\d+),\s*'([^']+)'\)", block):
+            rows.setdefault(abs(int(spell)), set()).add(name)
+    return rows
+
+
 def linked_rows(sql):
     """(trigger, effect) -> type, from the INSERTs of `spell_linked_spell`."""
     rows = {}
@@ -100,6 +117,7 @@ class WeaponEngravings(unittest.TestCase):
         sql = module_sql()
         cls.procs = proc_rows(sql)
         cls.links = linked_rows(sql)
+        cls.scripts = script_rows(sql)
 
     def carrier_aura_effect(self, spell_id):
         row = self.spell[spell_id]
@@ -121,11 +139,6 @@ class WeaponEngravings(unittest.TestCase):
             with self.subTest(element=element):
                 self.assertTrue(self.carrier_aura_effect(carrier),
                                 f'{element}: {carrier} carries no proc aura')
-                if carrier in NEEDS_CPP:
-                    self.assertNotIn(carrier, self.procs,
-                                     f'{element}: {carrier} now has a row — aura 354 still has no '
-                                     'native handler, so update NEEDS_CPP and this test together')
-                    continue
                 dbc_flags = self.spell[carrier][34]
                 flags = self.procs.get(carrier, 0) or dbc_flags
                 if carrier in PROC_ROW_FROM_BASE_DATA:
@@ -142,8 +155,6 @@ class WeaponEngravings(unittest.TestCase):
             with self.subTest(element=element):
                 self.assertNotEqual(equip_spell, carrier,
                                     f'{element}: marked detached but the enchant applies it')
-                if carrier in NEEDS_CPP:
-                    continue
                 self.assertEqual(self.links.get((equip_spell, carrier)), 2,
                                  f'{element}: no type 2 (SPELL_LINK_AURA) row applying {carrier}; '
                                  f'{equip_spell} is applied by the enchant but carries no proc aura')
@@ -151,11 +162,17 @@ class WeaponEngravings(unittest.TestCase):
     def test_proc_chance_is_never_zero(self):
         """Chance 0 in `spell_proc` falls back to the DBC ProcChance; a zero there is a dead proc."""
         for ability, (element, _enchant, carrier, _direct) in ENGRAVINGS.items():
-            if carrier in NEEDS_CPP:
-                continue
             with self.subTest(element=element):
                 self.assertGreater(self.spell[carrier][35], 0,
                                    f'{element}: {carrier} has ProcChance 0 in Spell.dbc')
+
+    def test_scripts_are_named_in_sql(self):
+        """P-051: a script registered in C++ but absent from `spell_script_names` never runs."""
+        for spell_id, name in {**NEEDS_SCRIPT, **RIDER_SCRIPTS}.items():
+            with self.subTest(spell=spell_id):
+                self.assertIn(name, self.scripts.get(spell_id, set()),
+                              f'{name} is not attached to {spell_id} in the module SQL: '
+                              'the C++ would be compiled in and never called')
 
     def test_payloads_exist(self):
         """Every payload named by a carrier's proc aura is a real spell."""

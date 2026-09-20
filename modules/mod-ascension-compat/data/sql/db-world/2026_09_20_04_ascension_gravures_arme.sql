@@ -39,13 +39,20 @@
 -- CE QUI N'EST PAS RÉPARÉ ICI, ET POURQUOI — à lire avant de croire la classe entière
 -- remise d'aplomb.
 --
---   * AIR (653225) est laissé de côté : son effet de proc est l'aura privée 354, que
---     le cœur ne sait pas exécuter (`isTriggerAura[354]` est faux, SpellMgr.cpp:1984+,
---     et aucun handler natif). Le module s'en sert ailleurs, TOUJOURS avec un
---     AuraScript (AscensionPrimalistSecondary.cpp:92, AscensionRunemasterSecondary.cpp:221).
---     Lier 653223 -> 653225 sans ce script n'apporterait rien et DOUBLERAIT en plus la
---     hâte : 653223 E2 (aura 349, +10 %) et 653225 E2 (aura 216 HASTE_SPELLS, +10 %).
---     => Air demande du C++.
+--   * AIR (653225) est laissé de côté DANS CE FICHIER : son effet de proc est l'aura
+--     privée 354, que le cœur ne sait pas exécuter (`isTriggerAura[354]` est faux,
+--     SpellMgr.cpp:1984+, et `AuraEffectHandler[354]` vaut `nullptr`). Le module s'en
+--     sert ailleurs, TOUJOURS avec un AuraScript (AscensionPrimalistSecondary.cpp:92,
+--     AscensionRunemasterSecondary.cpp:221). Une ligne seule ne ferait rien.
+--     => Air demande du C++, livré depuis dans AscensionRunemasterEngravings.cpp et
+--        2026_09_20_05_ascension_gravures_riders.sql.
+--
+--     CORRECTION du 2026-09-20 : ce commentaire affirmait d'abord que lier
+--     653223 -> 653225 « doublerait la hâte ». C'est FAUX, et la vérification est à
+--     une ligne : l'aura 349 que porte 653223 n'a AUCUN handler dans le cœur
+--     (`AuraEffectHandler[349] = nullptr`, « unknown Ascension aura »). Ses +10 % ne
+--     s'appliquent donc pas du tout. C'est l'aura 216 HASTE_SPELLS de 653225 qui est
+--     native : la lier AJOUTE la hâte d'incantation promise, elle ne la double pas.
 --
 --   * Les « riders » des charges utiles restent muets, faute de script :
 --       - Ice : les dégâts de 653217 partent, mais NI le ralentissement 653231
