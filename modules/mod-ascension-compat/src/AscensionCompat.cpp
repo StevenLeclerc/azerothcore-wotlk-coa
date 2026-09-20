@@ -2347,8 +2347,11 @@ public:
 
     void OnPlayerLogin(Player* player) const
     {
-        _lastClientResourceStates.erase(player->GetGUID().GetCounter());
-        _staticDecayTimers.erase(player->GetGUID());
+        {
+            std::lock_guard<std::mutex> lock(_resourceLock);
+            _lastClientResourceStates.erase(player->GetGUID().GetCounter());
+            _staticDecayTimers.erase(player->GetGUID());
+        }
         if (IsAscensionCustomClass(player))
         {
             SynchronizeThresholdResources(player);
@@ -2370,6 +2373,7 @@ public:
     {
         if (player)
         {
+            std::lock_guard<std::mutex> lock(_resourceLock);
             _lastClientResourceStates.erase(player->GetGUID().GetCounter());
             _staticDecayTimers.erase(player->GetGUID());
         }
@@ -2866,12 +2870,17 @@ private:
             (uint64(runicPower) << 17) |
             (uint64(maximumRunicPower) << 37);
         uint32 guid = player->GetGUID().GetCounter();
-        auto previous = _lastClientResourceStates.find(guid);
-        if (!force && previous != _lastClientResourceStates.end() &&
-            previous->second == packedState)
-            return;
+        {
+            // Never send the packet with the lock held: the container is shared by
+            // every map thread, the session is not. See P-050.
+            std::lock_guard<std::mutex> lock(_resourceLock);
+            auto previous = _lastClientResourceStates.find(guid);
+            if (!force && previous != _lastClientResourceStates.end() &&
+                previous->second == packedState)
+                return;
 
-        _lastClientResourceStates[guid] = packedState;
+            _lastClientResourceStates[guid] = packedState;
+        }
 
         std::string message = ASCENSION_LOCAL_RESOURCE_PREFIX;
         message += "\tR:" + std::to_string(uint32(souls));
@@ -3053,6 +3062,7 @@ private:
         uint8 const stacks = GetAuraStacks(player, SPELL_STORMBRINGER_STATIC);
         if (player->getClass() != CLASS_STORMBRINGER || !player->IsAlive() || !stacks || player->IsInCombat())
         {
+            std::lock_guard<std::mutex> lock(_resourceLock);
             _staticDecayTimers.erase(guid);
             return;
         }
@@ -3061,19 +3071,33 @@ private:
         // The rate is a local tuning choice; the archived changelog only establishes the grace period.
         constexpr uint32 graceMs = 5000;
         constexpr uint32 intervalMs = 1000;
-        uint32& timer = _staticDecayTimers[guid];
-        uint64 const elapsed = uint64(timer) + diff;
-        if (elapsed < graceMs + intervalMs)
+
+        uint32 loss = 0;
         {
-            timer = uint32(elapsed);
-            return;
+            // The reference returned by operator[] is only valid while the lock is
+            // held: another map thread inserting here rehashes the table and moves
+            // every node. See P-050.
+            std::lock_guard<std::mutex> lock(_resourceLock);
+            uint32& timer = _staticDecayTimers[guid];
+            uint64 const elapsed = uint64(timer) + diff;
+            if (elapsed < graceMs + intervalMs)
+            {
+                timer = uint32(elapsed);
+                return;
+            }
+
+            loss = uint32(std::min<uint64>(stacks, (elapsed - graceMs) / intervalMs));
+            timer = graceMs + uint32((elapsed - graceMs) % intervalMs);
         }
 
-        uint32 const loss = uint32(std::min<uint64>(stacks, (elapsed - graceMs) / intervalMs));
-        timer = graceMs + uint32((elapsed - graceMs) % intervalMs);
+        // Out of the critical section: ModifyAuraStacks re-enters the game and must
+        // never run with a module lock held.
         ModifyAuraStacks(player, SPELL_STORMBRINGER_STATIC, -int32(loss));
         if (loss == stacks)
+        {
+            std::lock_guard<std::mutex> lock(_resourceLock);
             _staticDecayTimers.erase(guid);
+        }
     }
 
     static void SynchronizeThresholdResources(Player* player)
@@ -3129,6 +3153,12 @@ private:
         }
     }
 
+    // One service for every player, and player updates run on ten map threads at once
+    // (MapUpdate.Threads = 10): every access to the two containers below goes through
+    // this lock. Without it a concurrent erase leaves a bucket pointing at a node that
+    // another thread has just unlinked, and the next lookup dereferences null.
+    // That is the 2026-09-20 13:05 segfault, P-050.
+    mutable std::mutex _resourceLock;
     mutable std::unordered_map<uint32, uint64> _lastClientResourceStates;
     mutable std::unordered_map<ObjectGuid, uint32> _staticDecayTimers;
 };
