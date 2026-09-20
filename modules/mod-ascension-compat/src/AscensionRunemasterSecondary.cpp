@@ -229,9 +229,10 @@ class aura_ascension_arcane_palm_sigil : public AuraScript
 // "Additional applications do not refresh its duration".
 //
 // THE ROLL LIVES HERE, not in the proc entry. Expansive Engraver (807496) says "While Air Engraving
-// is active, Fire Engraving's trigger chance is increased by $s1 percentage points", and no spell
-// modifier can reach this aura: SpellInfo::IsAffected matches on SpellFamilyName, and the engravings
-// carry family 0. So `spell_proc` is set to Chance 100 and the real roll is below.
+// is active, Fire Engraving's trigger chance is increased by $s1 percentage points" — a chance that
+// depends on ANOTHER aura being up. A spell modifier cannot express that: it applies whenever its
+// own aura is present, with no second condition. 807496 authors no modifier either; its three
+// effects are DUMMY. So `spell_proc` is set to Chance 100 and the real roll is below.
 // COUPLING, deliberate and one-way: with the row at 100 and this script missing, Fire would proc on
 // every hit. The companion SQL must therefore be applied AFTER the binary that carries this code.
 class aura_ascension_runemaster_fire_engraving : public AuraScript

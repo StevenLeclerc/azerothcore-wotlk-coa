@@ -309,8 +309,9 @@ public:
     runemaster_engraving_metadata() : GlobalScript("runemaster_engraving_metadata",
         {GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR}) { }
 
-    // The engraving spells carry SpellFamilyName 0, so this pass cannot use the family guard the
-    // rest of the Runemaster metadata uses: it names its four ids instead.
+    // Keyed on four explicit ids rather than on the family guard the rest of the Runemaster
+    // metadata uses. The engravings are family 38, so the guard would pass — naming the ids just
+    // says exactly which records this pass is allowed to touch.
     void OnLoadSpellCustomAttr(SpellInfo* info) override
     {
         if (info->Id == SPELL_AIR_REPLICATION || info->Id == SPELL_ICEBOUND_MOMENTUM_HIT)

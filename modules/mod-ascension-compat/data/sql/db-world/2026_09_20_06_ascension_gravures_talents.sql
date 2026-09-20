@@ -23,10 +23,11 @@
 -- « While Air Engraving is active, Fire Engraving's trigger chance is increased by $s1
 -- percentage points. » ($s1 = effet 0 du talent = 30.)
 --
--- Aucun modificateur de sort ne peut atteindre cette aura : `SpellInfo::IsAffected`
--- compare les `SpellFamilyName`, et les gravures portent la famille **0**. Le seul
--- endroit où la chance peut dépendre d'une autre aura est donc le `DoCheckProc` du
--- script. La ligne est mise à 100 pour que le cœur ne tire plus, et
+-- Un modificateur de sort ne sait pas exprimer cette condition : il s'applique dès que
+-- son aura est là, sans second test, alors que l'infobulle exige qu'une AUTRE aura
+-- (Air Engraving) soit active. Et 807496 n'écrit aucun modificateur : ses trois effets
+-- sont des DUMMY. Le seul endroit où la chance peut dépendre d'une autre aura est donc
+-- le `DoCheckProc` du script. La ligne est mise à 100 pour que le cœur ne tire plus, et
 -- `aura_ascension_runemaster_fire_engraving::Check` fait le tirage réel, en lisant la
 -- chance de base dans le `ProcChance` du DBC (30) — de sorte que l'infobulle et le
 -- code ne dépendent que d'un seul nombre.
@@ -69,8 +70,9 @@ INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
 --
 -- * CONVERGENCE (801086) est traité par le crochet `ALLSPELLHOOK_ON_CAST` de
 --   `runemaster_engraving_momentum`, qui voit passer les six charges utiles de gravure.
---   Un `spell_proc` sur 801086 ne pourrait pas les reconnaître : elles portent la
---   famille 0 et aucun masque commun.
+--   Un `spell_proc` sur 801086 ne pourrait pas les reconnaître : « la prochaine gravure
+--   déclenchée » n'est pas un événement de proc, et les six charges utiles ne partagent
+--   aucun bit de `SpellFamilyFlags` qui les isolerait du reste de la famille 38.
 --
 -- * Les deux quarts restants d'EXPANSIVE ENGRAVER ne sont PAS implémentés, et c'est
 --   assumé : « Ice » demande d'ajouter 30 points de chance de critique à deux sorts

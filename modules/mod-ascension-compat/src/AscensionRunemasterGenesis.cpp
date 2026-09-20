@@ -5,19 +5,17 @@
 // triggers your Weapon Engraving."
 //
 // What the DBC actually authors, read on 2026-09-20 from /opt/coa/server/data/dbc/Spell.dbc:
-//   500501  family 0 (NOT 38 — see the warning below), DurationIndex 31 = 8000 ms, ProcFlags 0,
-//           no `spell_proc` row.
+//   500501  family 38, DurationIndex 31 = 8000 ms, ProcFlags 0, no `spell_proc` row.
 //           Effect 0  APPLY_AURA / aura 4 DUMMY, EffectTriggerSpell 500502
 //           Effect 1  APPLY_AURA / aura 69,      MiscValue 127, MiscValueB 50, amount 1
 //           Effect 2  APPLY_AURA / aura 4 DUMMY
-//   500502  family 0, "Genesis / Damage", SchoolMask 28 (Fire|Nature|Frost = "Elemental"),
+//   500502  family 38, "Genesis / Damage", SchoolMask 28 (Fire|Nature|Frost = "Elemental"),
 //           one SPELL_EFFECT_SCHOOL_DAMAGE of base value 1, i.e. a carrier for a computed amount.
 //
-// BOTH RECORDS CARRY SpellFamilyName 0, not 38. It matters twice, and silently: a `Validate` that
-// demanded family 38 would refuse to bind this script at all, and an OnLoadSpellCustomAttr pass
-// that opened with `if (info->SpellFamilyName != 38) return;` — the guard the rest of the
-// Runemaster metadata uses — would never reach the absorb disarm below. Neither failure logs
-// anything. This file therefore keys on ids only.
+// Both records carry SpellFamilyName 38, read at field 208 of Spell.dbc — field 149 reads 0 for
+// every spell in the file and must not be mistaken for it. This file still keys on ids rather
+// than on a family guard: the ids are what the logic actually depends on, and a family guard
+// that ever stopped matching would disable the script without logging anything.
 //
 // THE TRAP IN EFFECT 1. Aura 69 is NOT an unknown Ascension aura: it is the stock
 // SPELL_AURA_SCHOOL_ABSORB (SpellAuraDefines.h:132), and its table entry is a real handler
@@ -155,8 +153,8 @@ class aura_ascension_runemaster_genesis : public AuraScript
 
     bool Validate(SpellInfo const* info) override
     {
-        // No SpellFamilyName test: this record carries family 0, and demanding 38 here would
-        // silently refuse the binding.
+        // Keyed on the id, not on SpellFamilyName: the guard would add nothing here, and a
+        // family guard that stops matching disables a script in silence.
         return info && info->Id == SPELL_GENESIS &&
             info->Effects[EFFECT_0].IsAura(SPELL_AURA_DUMMY) &&
             info->Effects[EFFECT_0].TriggerSpell == SPELL_GENESIS_DAMAGE &&
@@ -230,9 +228,8 @@ public:
     runemaster_genesis_metadata() : GlobalScript("runemaster_genesis_metadata",
         {GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR}) { }
 
-    // Keyed on ids, NOT on SpellFamilyName: both Genesis records carry family 0, so the usual
-    // `if (info->SpellFamilyName != 38) return;` guard of the Runemaster metadata passes would
-    // skip them entirely and leave the absorb effect armed.
+    // Keyed on ids. Both records are family 38, so the usual family guard of the Runemaster
+    // metadata passes would work here — the ids are simply the thing this pass depends on.
     void OnLoadSpellCustomAttr(SpellInfo* info) override
     {
         if (info->Id == SPELL_GENESIS)

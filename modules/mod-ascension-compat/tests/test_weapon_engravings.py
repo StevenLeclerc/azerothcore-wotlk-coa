@@ -56,12 +56,17 @@ RIDER_SCRIPTS = {
 FIRE_ENGRAVING = 653211
 FIRE_SOURCE = 'src/AscensionRunemasterSecondary.cpp'
 
-# Spells that carry SpellFamilyName 0 and are handled by a module script. A
-# `SpellFamilyName != 38` guard — the one the rest of the Runemaster metadata uses — would
-# skip them in silence: no binding, no metadata pass, no log line. See P-055.
-FAMILY_ZERO_SOURCES = {
-    'src/AscensionRunemasterGenesis.cpp': (500501, 500502),
-    'src/AscensionRunemasterEngravings.cpp': (653225, 653266, 653261, 653263, 653272),
+# SpellFamilyName lives at field 208, NOT 149 — 149 reads 0 for every spell in the file, which
+# is how an earlier version of this test "passed" while asserting the opposite of the truth.
+# The check below is the one that settles it, and it runs first (see test_family_field_offset).
+FAMILY_FIELD = 208
+FAMILY_PROBE = {133: 3, 12294: 4, 686: 5, 589: 6, 2098: 8}  # Fireball, Mortal Strike, Shadow Bolt…
+
+# The Runemaster spells this module scripts, with the family they really carry. A metadata pass
+# or a Validate() that tests the wrong family skips them in silence: no binding, no log line.
+SCRIPTED_FAMILIES = {
+    500501: 38, 500502: 38,                                   # Genesis
+    653225: 38, 653266: 38, 653261: 38, 653263: 38, 653272: 38,  # engravings
 }
 
 PROC_AURAS = (42, 231, 354)
@@ -203,22 +208,21 @@ class WeaponEngravings(unittest.TestCase):
             self.fail(f'{FIRE_SOURCE} rolls the Fire chance itself, but `spell_proc` does not pin '
                       f'{FIRE_ENGRAVING} at 100: the chance would be applied twice')
 
-    def test_family_zero_handlers_have_no_family_guard(self):
-        """P-055: these records carry family 0, so a family-38 guard disables them silently."""
-        for source, ids in FAMILY_ZERO_SOURCES.items():
-            # Comments are stripped first: these files quote the offending guard on purpose,
-            # to warn the next reader. Only real code counts.
-            text = '\n'.join(l for l in (MODULE / source).read_text().splitlines()
-                             if not l.lstrip().startswith('//'))
-            for spell_id in ids:
-                with self.subTest(spell=spell_id):
-                    self.assertEqual(self.spell[spell_id][149], 0,
-                                     f'{spell_id} is no longer family 0: re-read {source}, the '
-                                     'reasoning in its header no longer holds')
-            with self.subTest(source=source):
-                self.assertNotIn('SpellFamilyName != 38', text,
-                                 f'{source} handles family-0 spells but gates on family 38: '
-                                 'the scripts would never bind and nothing would be logged')
+    def test_family_field_offset(self):
+        """Pin the field index itself against known families: P-055 was a wrong offset, not a bug."""
+        for spell_id, family in FAMILY_PROBE.items():
+            with self.subTest(spell=spell_id):
+                self.assertEqual(self.spell[spell_id][FAMILY_FIELD], family,
+                                 f'field {FAMILY_FIELD} is not SpellFamilyName any more: every '
+                                 'conclusion drawn from it in this module must be re-checked')
+
+    def test_scripted_spells_keep_their_family(self):
+        """A metadata pass or Validate() gating on the wrong family skips the spell in silence."""
+        for spell_id, family in SCRIPTED_FAMILIES.items():
+            with self.subTest(spell=spell_id):
+                self.assertEqual(self.spell[spell_id][FAMILY_FIELD], family,
+                                 f'{spell_id} changed family: re-read the guards of the script '
+                                 'attached to it — a wrong family guard logs nothing at all')
 
     def test_payloads_exist(self):
         """Every payload named by a carrier's proc aura is a real spell."""
