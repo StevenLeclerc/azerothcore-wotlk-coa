@@ -243,7 +243,29 @@ void ApplyContracts(SpellInfo* info)
             if (id == 560123 || id == 570125)
                 aura(slot, SPELL_AURA_PERIODIC_DUMMY, 0, 0, id == 570125 ? TARGET_UNIT_TARGET_ENEMY : TARGET_UNIT_CASTER);
             else
+            {
+                // Writing ApplyAuraName alone is inert unless the slot is an APPLY_AURA
+                // effect: SpellEffectInfo::IsAura() reads Effect (SpellInfo.cpp), while
+                // AuraScript validation (EffectAuraNameCheck) only ever reads
+                // ApplyAuraName, so the omission produced no diagnostic anywhere.
+                //
+                // It cost Sun Down (572752). The 2026-09-19 client file turned its slot 0
+                // into TRIGGER_SPELL, so this branch left a trigger effect whose trigger
+                // had just been cleared: no aura, no damage, no ground field, no log line.
+                // Asserting the effect is a no-op for 300361 and 704930, whose slot
+                // already carries APPLY_AURA.
+                //
+                // Nothing here writes a duration. Sun Down's delay moved from a 2 s
+                // self-channel into a 2 s cast time in that same import, so adding one
+                // back would delay the strike twice. With no duration the aura counts as
+                // expired the moment it lands (Aura::IsExpired, SpellAuras.h) and
+                // Unit::_UpdateSpells removes it with AURA_REMOVE_BY_EXPIRE on the next
+                // unit update, which is exactly the hook that fires 572753 and the 572754
+                // ground field (AscensionSunClericAuras.cpp). If a later import gives the
+                // spell a duration of its own, the aura simply lives that long instead.
+                info->Effects[slot].Effect = SPELL_EFFECT_APPLY_AURA;
                 info->Effects[slot].ApplyAuraName = SPELL_AURA_PERIODIC_DUMMY;
+            }
             info->Effects[slot].TriggerSpell = 0;
             if (id == 560123)
                 info->Effects[slot].Amplitude = 3000;

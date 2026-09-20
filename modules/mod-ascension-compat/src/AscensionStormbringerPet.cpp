@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "Log.h"
 #include "Pet.h"
 #include "Player.h"
 #include "Random.h"
@@ -29,6 +30,9 @@ enum AirElementalEntries : uint32
 {
     NPC_AIR_ELEMENTAL = 500941
 };
+
+// Value promised by 807464's aura tooltip ("Magic Damage taken increased by 2%").
+constexpr int32 FLURRY_MAGIC_DAMAGE_TAKEN_PCT = 2;
 
 Player* AirElementalOwner(Unit* unit)
 {
@@ -167,9 +171,33 @@ public:
 
     void OnLoadSpellCustomAttr(SpellInfo* info) override
     {
-        if (info && info->Id == SPELL_FLURRY_DEBUFF && info->SpellFamilyName == 22 &&
-            info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN)
-            info->Effects[EFFECT_1].BasePoints = info->Effects[EFFECT_1].CalcBaseValue(2);
+        if (info && info->Id == SPELL_FLURRY_DEBUFF)
+        {
+            // Spell.dbc stores the magic-damage slot as -3 over one die side, i.e. -2%,
+            // while the aura tooltip promises "Magic Damage taken increased by 2%".
+            // Normalise it to the promised +2%.
+            //
+            // The former guard also demanded SpellFamilyName == 22 (Stormbringer), while
+            // the record carries 18 (Barbarian) in both client files we hold — the
+            // 2026-09-19 one and the one it replaced. So this normalisation was already
+            // dead before that import and is not one of its casualties. The spell id is
+            // unique, so no family test is needed here; what the record must still satisfy
+            // is that slot 1 really is the damage-taken aura, and that is now reported.
+            SpellEffectInfo& magicTaken = info->Effects[EFFECT_1];
+            if (magicTaken.Effect == SPELL_EFFECT_APPLY_AURA &&
+                magicTaken.ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN)
+            {
+                magicTaken.BasePoints = magicTaken.CalcBaseValue(FLURRY_MAGIC_DAMAGE_TAKEN_PCT);
+            }
+            else
+            {
+                LOG_ERROR("module.ascension_compat",
+                    "Flurry debuff {}: effect 1 is no longer a damage-taken aura (effect {}, aura {}), "
+                    "the +{}% normalisation was skipped",
+                    info->Id, magicTaken.Effect, uint32(magicTaken.ApplyAuraName),
+                    FLURRY_MAGIC_DAMAGE_TAKEN_PCT);
+            }
+        }
         if (info && info->Id == SPELL_FLURRY_DOT && info->SpellFamilyName == 22)
         {
             // The proc snapshots the owner's Nature power. Keep native pet

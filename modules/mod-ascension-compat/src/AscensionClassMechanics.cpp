@@ -736,18 +736,36 @@ void ApplyRangerForestDwellerContract(SpellInfo* spellInfo)
 
     SpellEffectInfo const& heal = spellInfo->Effects[EFFECT_0];
     SpellEffectInfo& obsoleteSpeed = spellInfo->Effects[EFFECT_1];
-    if (heal.Effect != SPELL_EFFECT_APPLY_AURA || heal.ApplyAuraName != SPELL_AURA_PERIODIC_TRIGGER_SPELL ||
-        heal.TriggerSpell != SPELL_RANGER_FOREST_DWELLER_HEAL || heal.Amplitude != 3000 ||
-        !((obsoleteSpeed.Effect == SPELL_EFFECT_APPLY_AURA &&
+    bool const healMatches = heal.Effect == SPELL_EFFECT_APPLY_AURA &&
+        heal.ApplyAuraName == SPELL_AURA_PERIODIC_TRIGGER_SPELL &&
+        heal.TriggerSpell == SPELL_RANGER_FOREST_DWELLER_HEAL && heal.Amplitude == 3000;
+    // Slot 1 has carried the superseded movement modifier under two shapes. Before the
+    // 2026-09-19 client import: SPELLMOD_EFFECT1, +10, class mask [0,0,0x800000], which
+    // reached 524862 and 524886. Since the import: SPELLMOD_EFFECT3, +20, class mask
+    // [1,0,0], which cancels 524886's own -20% slow on its slot 2.
+    //
+    // Either shape is surplus, because RefreshRangerEludePenalty already zeroes that slow
+    // from code (CoA changelog 71881) and 524886 was untouched by the import. The imported
+    // shape is worse than surplus: in family 27 its class mask reaches exactly 524886,
+    // 804937, 680470 and 805736 (whole-file scan), and 804937 "Adaptation: Swashbuckler"
+    // carries a parry aura on slot 2 — leaving the modifier in place would hand a Forest
+    // Dweller ranger 30% parry instead of 10%.
+    //
+    // Effect 0 means an earlier pass has already disabled the slot.
+    bool const modifierMatches = obsoleteSpeed.Effect == 0 ||
+        (obsoleteSpeed.Effect == SPELL_EFFECT_APPLY_AURA &&
             obsoleteSpeed.ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
-            obsoleteSpeed.MiscValue == SPELLMOD_EFFECT1) || obsoleteSpeed.Effect == 0))
+            (obsoleteSpeed.MiscValue == SPELLMOD_EFFECT1 || obsoleteSpeed.MiscValue == SPELLMOD_EFFECT3));
+    if (!healMatches || !modifierMatches)
     {
-        LOG_ERROR("module.ascension_compat", "Skipped unexpected Forest Dweller record {}", spellInfo->Id);
+        LOG_ERROR("module.ascension_compat",
+            "Skipped unexpected Forest Dweller record {} (effect 0: {}/{} trigger {} period {}; "
+            "effect 1: {}/{} misc {})",
+            spellInfo->Id, heal.Effect, uint32(heal.ApplyAuraName), heal.TriggerSpell, heal.Amplitude,
+            obsoleteSpeed.Effect, uint32(obsoleteSpeed.ApplyAuraName), obsoleteSpeed.MiscValue);
         return;
     }
 
-    // The old modifier adds movement speed through 524862 and would retain
-    // the superseded bonus alongside the correctly removed slow.
     obsoleteSpeed.Effect = 0;
     obsoleteSpeed.ApplyAuraName = SPELL_AURA_NONE;
 }
