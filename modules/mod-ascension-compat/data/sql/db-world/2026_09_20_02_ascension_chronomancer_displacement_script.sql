@@ -1,0 +1,105 @@
+-- =====================================================================================
+-- mod-ascension-compat — Chronomancer « Displacement » (806727) : le script C++ existe,
+-- il n'etait accroche a rien.
+--
+-- Recensement du 2026-09-20 (audit des scripts orphelins). Gabarit : les deux correctifs
+-- du jour, 2026_09_20_00_ascension_chronomancer_anomaly_spikes.sql et
+-- 2026_09_20_01_ascension_talents_proc_donnee_seule.sql.
+--
+-- Le nom de ce fichier est la cle d'update enregistree dans `updates` (state = MODULE) ;
+-- ne pas le renommer une fois applique.
+--
+-- -------------------------------------------------------------------------------------
+-- LE CONSTAT
+--
+-- `RegisterSpellScript` ne dit JAMAIS sur quels sorts un script s'applique : c'est
+-- `spell_script_names` qui le dit. Sur les 213 scripts que le module enregistre en C++
+-- (src/, macro `RegisterSpellScript` — la seule employee, verifie), 212 ont au moins une
+-- ligne dans `spell_script_names`. Un seul n'en a aucune :
+--
+--   spell_ascension_displacement   — src/AscensionChronomancerMovement.cpp:160 (classe), enregistre
+--                                    l. 215 dans AddSC_AscensionChronomancerMovement()
+--
+-- Le coeur le signale au demarrage, ScriptMgr.h:925 :
+--   « Script named 'spell_ascension_displacement' is not assigned in the database. »
+-- (releve dans /opt/coa/server/bots/logs/Errors.log du demarrage du 2026-09-20 12:43.)
+-- Le nom est present dans le binaire en service (`strings -a worldserver`), donc le script
+-- est bien compile et enregistre : il ne lui manque que sa ligne de liaison.
+--
+-- -------------------------------------------------------------------------------------
+-- LE spell_id, ETABLI SUR PREUVE ET NON DEDUIT
+--
+-- AscensionChronomancerMovement.cpp:21 :   Displacement = 806727
+-- AscensionChronomancerMovement.cpp:198 :  le GlobalScript `chronomancer_movement_contracts`
+--   traite explicitement `info->Id == Displacement` et commente :
+--   « The authored row leaves this a placeholder marker effect; spell_ascension_displacement
+--     does the actual pull-and-cleanse. »
+--   La paire sort/script est donc nommee dans le code meme.
+-- 806727 est le SEUL sort nomme « Displacement » de la famille Chronomancer dans le
+--   Spell.dbc en service (SpellFamilyName = champ 208, indice verifie par recoupement sur
+--   Fireball 133 -> 3, Charge 100 -> 4, Corruption 172 -> 5, Smite 585 -> 6,
+--   Sinister Strike 1752 -> 8). 806727 porte 28 ; les 19 autres entrees du DBC dont le nom
+--   commence par « Displacement » portent 0, 6, 9 ou 27 — lu, pas suppose.
+-- Aucune autre ligne ne pointe 806727 : `spell_script_names`, `spell_proc` et
+--   `spell_linked_spell` sont vides pour ce sort (verifie en base).
+--
+-- Pas de ligne `spell_proc` ici, et c'est voulu : `spell_ascension_displacement` est un
+-- SpellScript accroche a OnEffectHitTarget, pas une aura de proc. Ses deux freres du meme
+-- fichier, `spell_ascension_rewind` (801294) et `aura_ascension_backtrack` (706973), n'ont
+-- eux non plus aucune ligne `spell_proc` (verifie en base).
+--
+-- -------------------------------------------------------------------------------------
+-- LE Validate() PASSERA — ordre de chargement lu dans World.cpp, pas suppose
+--
+-- Le script s'accroche a EFFECT_2 en SPELL_EFFECT_DUMMY. Or le Spell.dbc en service donne
+-- a 806727 les effets (124, 108, 108) = PULL_TOWARDS, DISPEL_MECHANIC 7 (racine),
+-- DISPEL_MECHANIC 11 (entrave). EFFECT_2 n'est donc PAS un DUMMY dans le DBC.
+-- Il le devient avant toute validation :
+--   World.cpp:424  LoadSpellInfoCustomAttributes()  -> OnLoadSpellCustomAttr ->
+--                  le GlobalScript force Effects[EFFECT_2].Effect = SPELL_EFFECT_DUMMY
+--   World.cpp:871  LoadSpellScriptNames()           -> lit CETTE ligne
+--   World.cpp:883  sScriptMgr->LoadDatabase()       -> accroche le script
+--   World.cpp:886  ValidateSpellScripts()           -> valide contre le SpellInfo deja corrige
+-- Le GlobalScript n'est pas lie a la base (GlobalScript, PromotedAfterDbLoad = false,
+-- enregistre des ScriptMgr::Initialize(), Main.cpp:282) : il tourne toujours.
+-- Ajouter cette ligne ne peut donc pas remplacer un silence par un « did not pass Validate ».
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUE CETTE LIGNE REPARE, ET LA REDONDANCE QU'ELLE LAISSE (a corriger en C++, pas ici)
+--
+-- ETAT ACTUEL, MESURE : le GlobalScript neutralise deja EFFECT_2 en DUMMY, et aucun script
+-- n'occupe la place. Le sort perd donc, aujourd'hui, la dissipation de l'entrave
+-- (MECHANIC_SNARE = 11) que son infobulle promet (« dispelling root and snare effects »).
+-- Seule la racine (EFFECT_1, MECHANIC_ROOT = 7) est encore dissipee, nativement.
+-- Cette ligne rend la main au script, dont `RemoveMovementImpairingAuras(true)` dissipe
+-- racine ET entrave : le comportement annonce est retabli.
+--
+-- REDONDANCE ASSUMEE, A SIGNALER : EFFECT_0 (PULL_TOWARDS natif, MoveJump vers le lanceur)
+-- reste actif, et le script fait en plus un `NearTeleportTo` a 2 yards du lanceur. Les deux
+-- tirent la cible au meme endroit ; la teleportation ecrase le saut. Le resultat visible est
+-- un saut sec au lieu d'un arc, pas une double traction. A noter que l'ordre natif est de
+-- toute facon bancal : les effets sont appliques dans l'ordre 0, 1, 2, donc le MoveJump natif
+-- part AVANT que la racine ne soit dissipee (EFFECT_1). Le deplacement du script, lui, tombe
+-- apres les deux dissipations : sur une cible enracinee, c'est lui qui fait reellement le
+-- travail. Le commentaire du GlobalScript
+-- (« placeholder marker effect ») est en contradiction avec tests/chronomancer_passives/run.py
+-- (« Displacement already supplies a native pull and both mechanic dispels ») ; le DBC donne
+-- raison au test. La correction propre est en C++ — retirer la branche `info->Id == Displacement`
+-- du GlobalScript et supprimer le script — mais elle exige une recompilation. Tant qu'elle
+-- n'est pas faite, la moitie C++ de la paire est deja en service : ne pas poser cette ligne
+-- revient a laisser le sort ampute de sa dissipation d'entrave.
+--
+-- PRISE D'EFFET : REDEMARRAGE OBLIGATOIRE. `ObjectMgr::LoadSpellScriptNames()` n'a qu'un
+-- seul appelant dans tout l'arbre (World.cpp:871) ; il n'existe aucune commande
+-- `.reload spell_script_names`. `.reload spell_scripts` porte sur la table `spell_scripts`,
+-- qui n'a rien a voir. De plus l'accrochage lui-meme
+-- (ScriptRegistry<SpellScriptLoader>::AddALScripts, World.cpp:883) ne tourne qu'une fois.
+-- =====================================================================================
+
+-- Le DELETE porte sur ABS(spell_id) : une ligne -806727 laissee par une version anterieure
+-- designerait le meme sort et accrocherait le script une SECONDE fois (le coeur stocke les
+-- liaisons dans un multimap : le handler tournerait deux fois sur le meme lancement).
+DELETE FROM `spell_script_names`
+    WHERE ABS(`spell_id`) = 806727 AND `ScriptName` = 'spell_ascension_displacement';
+INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
+(806727, 'spell_ascension_displacement');
