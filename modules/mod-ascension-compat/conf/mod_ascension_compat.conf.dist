@@ -142,3 +142,59 @@ AscensionCompat.HighRiskDeathLevelGap = 4
 #        Default:     100 - (one silver per item level)
 
 AscensionCompat.HighRiskPremiumPerItemLevel = 100
+
+#
+#    AscensionCompat.HighRiskLootToKiller
+#        Description: Where the lost piece goes when the premium cannot be paid.
+#                     Enabled, the very same item — enchantments, durability and
+#                     random properties included — is handed to the killer: into
+#                     their bags, or into their mailbox if their bags are full or
+#                     they logged out between the kill and the release.
+#                     A killer that is a creature, or the victim themselves
+#                     (a fall, a drowning), leaves nobody to hand it to, and the
+#                     piece is destroyed as before.
+#                     It is handed over rather than left on the corpse because
+#                     the core has no open-world player-corpse loot: the loot
+#                     opcode refuses any guid that is not a creature, and the
+#                     battleground insignia path needs the victim online and
+#                     still a ghost. See CONCEPTION-butin-cadavre.md.
+#        Default:     1 - (the killer takes the spoils)
+#                     0 - (the piece is destroyed, nobody gains it)
+
+AscensionCompat.HighRiskLootToKiller = 1
+
+#
+#    AscensionCompat.HighRiskSettleDelayMs
+#        Description: How long after the body is released the penalty waits
+#                     before it is applied, in milliseconds.
+#                     The penalty is decided when the player dies, armed when
+#                     they release, and applied on a later player tick — never
+#                     inside Unit::Kill, never inside BuildPlayerRepop, never
+#                     while a graveyard teleport is still unacknowledged.
+#                     The delay leaves the end-of-tick update batch that carries
+#                     the ghost state (health, PLAYER_FLAGS, animation tier)
+#                     reach the client before anything else is sent.
+#                     0 means: the first tick that finds the player settled.
+#        Default:     2000 - (two seconds)
+
+AscensionCompat.HighRiskSettleDelayMs = 2000
+
+#
+#    AscensionCompat.DeadPlayerHealthGuard
+#        Description: Force a dead player's health back to 0 when something has
+#                     raised it.
+#                     The core protects that invariant only on the first aura
+#                     purge (Unit::setDeathState, JustDied branch). The second
+#                     purge, the one Player::KillPlayer triggers by entering
+#                     DeathState::Corpse, has no such net, and Unit::ModifyHealth
+#                     has no death guard at all. A corpse carrying health makes
+#                     the 3.3.5 client leave its dead state while the server
+#                     keeps the player dead: rooted, undetected by creatures,
+#                     unable to release. See P-031 and P-041.
+#                     Every correction is logged as an error, with the player
+#                     name and the health found, so the real source can be named
+#                     instead of hidden. Turn this off to observe the raw bug.
+#        Default:     1 - (restore the invariant, and say so in the log)
+#                     0 - (leave the corpse as it is)
+
+AscensionCompat.DeadPlayerHealthGuard = 1
