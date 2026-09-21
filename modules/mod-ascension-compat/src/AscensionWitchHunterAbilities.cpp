@@ -30,8 +30,13 @@ enum WitchHunterCastSpells
     SPELL_SHADOW_RAGE_TALENT = 705455,
     SPELL_SHADOW_RAGE_PET = 804192,
     SPELL_SHARPSHOOTER = 705456,
-    SPELL_SHARPSHOOTER_ENERGIZE = 704385
+    SPELL_SHARPSHOOTER_ENERGIZE = 704385,
+    SPELL_GUARDBREAKER_RANK_2 = 681493,
+    SPELL_POMMEL_SMASH_STACK = 582588
 };
+
+// Pommel Smash's own SpellFamilyFlags word, read from 680515: the only family-21 record with it.
+constexpr uint32 POMMEL_SMASH_FAMILY_FLAG = 0x2000000;
 
 void ApplyShadowblastTalents(Player* player)
 {
@@ -203,6 +208,15 @@ class spell_ascension_witch_hunter_ability : public SpellScript
         }
         if (Heartseeking(GetSpellInfo()) && dealt)
             player->RewardRage(dealt, 0, true);
+        // Guardbreaker rank 2 advertises one extra stack of Pommel Smash's magic-damage debuff. Its
+        // own trigger effect could never deliver it - DBC ProcFlags 0 and no spell_proc row - and is
+        // disarmed in ApplyContracts, so the stack is added here, once per enemy the strike reaches,
+        // on top of the single stack the ability's native trigger effect applies. That native
+        // trigger runs in the launch phase, which DoAllEffectOnLaunchTarget also skips for every
+        // missed target, so the two follow the same target set apart from a target that only turns
+        // immune between launch and hit; there the native stack lands alone.
+        if (Family(GetSpellInfo(), 2, POMMEL_SMASH_FAMILY_FLAG) && player->HasAura(SPELL_GUARDBREAKER_RANK_2))
+            Cast(player, target, SPELL_POMMEL_SMASH_STACK);
         if (Desecrate(GetSpellInfo()) && dealt && player->HasAura(560208) &&
             target->HasAura(680517, player->GetGUID()))
             player->CastCustomSpell(574335, SPELLVALUE_BASE_POINT0, int32(player->CountPctFromMaxHealth(1)), player,
@@ -304,7 +318,12 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                                   player->GetPositionY() - std::sin(heading), speedXY, speedZ);
             sScriptMgr->AnticheatSetUnderACKmount(player);
             talent(524812, 525054);
-            talent(681156, 681155);
+            // Strategist (681156) reads "Your $?s807797[Hunt][Vault] now regenerates ...": Hunt
+            // REPLACES Vault as the carrier once the 807797 marker is up, it does not add a second
+            // carrier. Now that the marker is actually applied, guard this side the same way the
+            // Hunt side below is guarded, so the bonus stays on exactly one button.
+            if (!player->HasAura(807797))
+                talent(681156, 681155);
             player->RemoveAurasDueToSpell(500102);
         }
         if (id == 802006)

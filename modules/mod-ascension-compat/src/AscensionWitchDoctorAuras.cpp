@@ -61,8 +61,11 @@ void SyncReplacements(Player* player)
             if (player->HasAura(TikiTalent) && (player->HasAura(Crystal) || player->HasAura(Beast)))
                 child = Tiki;
         }
-        else if (id == CallSseratus)
+        else if (id == CallSseratus || id == CallSseratusChannel)
         {
+            // The talent tree teaches CallSseratusChannel (681222), the channel that triggers the
+            // summon CallSseratus (572899); 572899 itself never reaches a player's spell map, so
+            // keying the replacement on it alone left Viper Ward unreachable.
             selected = true;
             if (player->HasAura(ViperTalent))
                 child = ViperWard;
@@ -215,12 +218,28 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
         if (Family(GetSpellInfo(), 0, 536870912))
         {
             _spirits = Spirits(player);
-            _splash = player->SpellDamageBonusDone(
+            uint32 splash = player->SpellDamageBonusDone(
                 target, GetSpellInfo(),
                 uint32(std::max(0, Amount(EclipseSplash)) +
                        std::max(0, player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_SHADOW)) * 0.15f +
                        player->GetTotalAttackPowerValue(RANGED_ATTACK) * 0.15f),
                 SPELL_DIRECT_DAMAGE, EFFECT_0);
+            // The explosion is delivered as a base point of EclipseSplash, which ApplyContracts marks
+            // SPELL_ATTR3_IGNORE_CASTER_MODIFIERS. SpellInfo::IsAffectedBySpellMod rejects every
+            // modifier but SPELLMOD_DURATION on such a record, so no ApplySpellMod call - the core's
+            // or ours - can ever deliver Bwonsamdi's Edge here. Read the talent's own aura instead,
+            // still gated on the record's own operation and class mask rather than on its id alone.
+            uint64 modified = splash;
+            if (AuraEffect const* edge = player->GetAuraEffect(BwonsamdiEdge, EFFECT_0))
+            {
+                SpellInfo const* talent = edge->GetSpellInfo();
+                SpellInfo const* explosion = sSpellMgr->GetSpellInfo(EclipseSplash);
+                if (explosion && talent->Effects[EFFECT_0].IsAura(SPELL_AURA_ADD_PCT_MODIFIER) &&
+                    talent->Effects[EFFECT_0].MiscValue == SPELLMOD_DAMAGE &&
+                    explosion->IsAffected(talent->SpellFamilyName, talent->Effects[EFFECT_0].SpellClassMask))
+                    modified += CalculatePct(modified, uint32(std::max(0, edge->GetAmount())));
+            }
+            _splash = uint32(std::min<uint64>(modified, UINT32_MAX));
         }
         if (id == SenjinBuff)
             GetAura()->SetCharges(2);
@@ -333,7 +352,11 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
             if (player->HasAura(VoljinBlessing))
             {
                 uint32 glaive = KnownRank(player, Glaive);
-                Reduce(player, Glaive, player->GetSpellCooldownDelay(glaive) / 5);
+                // Shadow Avatar's tooltip cites $706803s1 for the share removed on every tick.
+                int32 percent = std::clamp(Amount(AvatarCdr), 0, 100);
+                uint64 removed = uint64(player->GetSpellCooldownDelay(glaive)) * uint64(percent) / 100;
+                if (removed)
+                    Reduce(player, Glaive, int32(std::min<uint64>(removed, uint64(INT32_MAX) - 1)));
             }
         }
     }

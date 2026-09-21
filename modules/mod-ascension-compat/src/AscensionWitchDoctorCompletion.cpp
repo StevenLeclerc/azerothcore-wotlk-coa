@@ -214,6 +214,15 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
         info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT3)
         info->Effects[EFFECT_0].SpellClassMask = flag96(512, 0, 0); // Mimic Ward's summon count
+    // P-071: the record's flat SPELLMOD_EFFECT2 carries no class mask at all, so it raised the second
+    // effect of every family 19 spell by 20 - Spirit Glaive's resistance debuff, Amphibimorph's slow,
+    // Stasis' burst. The talent's real promise is the Shadow Avatar rider handled in the Avatar tick,
+    // which reads its percentage from AvatarCdr, the spell the tooltip itself cites. Nothing reads this
+    // effect as a modifier, so disarm it instead of guessing a mask.
+    if (id == VoljinBlessing && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT2 &&
+        info->Effects[EFFECT_0].SpellClassMask.IsEqual(0, 0, 0))
+        info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
     // "Summon a mimic ward" - one, with Chosen One adding the second. The record's summon count reads
     // as two once the core applies its base-point convention, so the ward always arrived doubled and
     // Chosen One pushed it to three.
@@ -581,7 +590,23 @@ class witch_doctor_scaling : public UnitScript
                                  : c.school == 12 ? std::max(player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_FIRE),
                                                              player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_NATURE))
                                                   : player->SpellBaseDamageBonusDone(SpellSchoolMask(c.school)));
-                value += std::max(0.0f, sp) * c.sp + player->GetStat(STAT_SPIRIT) * c.spirit +
+                // ApplyContracts zeroes the record's BonusMultiplier for every entry of this table.
+                // On the DAMAGE path the core then skips its own SPELLMOD_BONUS_MULTIPLIER step:
+                // Unit::SpellDamageBonusDone guards it with "if ((coeff || ...) && DoneAdvertisedBenefit)"
+                // and the coefficient is zero, so Overflowing Juju modified nothing. Replay that step
+                // here, on the spell power share only, in the same hundredths the core uses.
+                // The HEALING path has NO such guard - Unit::SpellHealingBonusDone runs the step on
+                // "if (DoneAdvertisedBenefit)" alone - so the core already applies Disciple of Sseratus
+                // to Loa's Brew, Spirit in a Bottle and Tiki Splash. Replaying it for a heal would
+                // count that talent twice.
+                float coefficient = c.sp;
+                if (!c.healing && coefficient != 0.0f)
+                {
+                    coefficient *= 100.0f;
+                    player->ApplySpellMod(info->Id, SPELLMOD_BONUS_MULTIPLIER, coefficient);
+                    coefficient /= 100.0f;
+                }
+                value += std::max(0.0f, sp) * coefficient + player->GetStat(STAT_SPIRIT) * c.spirit +
                          player->GetTotalAttackPowerValue(RANGED_ATTACK) * c.rap +
                          player->GetTotalAttackPowerValue(BASE_ATTACK) * c.ap;
             }

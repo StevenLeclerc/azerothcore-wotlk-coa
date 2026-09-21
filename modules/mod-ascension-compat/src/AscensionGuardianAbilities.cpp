@@ -18,6 +18,18 @@
 
 namespace
 {
+// Broad Sweep (805150 and its six higher ranks) is replaced by the Ballad of the
+// Dragonslayer while Inspiring Leader (505344) is carried; the ballad is the spell the
+// player actually casts, so the Broad Sweep callbacks have to recognise it. The same
+// substitution is already read this way for Pulverize and the Ballad of the Conqueror
+// in AscensionClassMechanics.cpp (Guardbreaker).
+bool IsBroadSweep(Player const* player, uint32 id)
+{
+    if (sSpellMgr->GetFirstSpellInChain(id) == 805150)
+        return true;
+    return player && player->HasAura(505344) && AscensionGuardian::BalladOfTheDragonslayer(id);
+}
+
 class GuardianLanding : public BasicEvent
 {
 public:
@@ -127,7 +139,17 @@ class spell_ascension_guardian_ability : public SpellScript
                 if (AscensionGuardian::HeavyBlow(pair.first) && player->HasActiveSpell(pair.first))
                     player->AddSpellCooldown(pair.first, 0, GetSpellInfo()->RecoveryTime, true);
         }
-        if (sSpellMgr->GetFirstSpellInChain(id) == 805150 && player->HasAura(805155))
+        // Earthsplitter. Only half of 806081 can reach a ballad. Its effect 1
+        // (ADD_PCT_MODIFIER, SPELLMOD_COST, -10%, class mask (16, 0, 0)) applies,
+        // because the nine Ballad of the Dragonslayer ranks carry Broad Sweep's family
+        // flag A = 16. Its effect 2 does not: ApplyAdditionalTargetContracts turns it
+        // into SPELL_AURA_MOD_MAX_AFFECTED_TARGETS, and the core only sums that aura
+        // inside `if (uint32 maxTargets = m_spellValue->MaxAffectedTargets)`
+        // (Spell.cpp:1283 and 1377, its only two readers). The ballads have Spell.dbc
+        // MaxAffectedTargets = 0 where Broad Sweep has 8, so the target half stays dead
+        // on the ballad. No tooltip, DBC field or upstream tracker entry gives the
+        // ballad a target count, so none is invented here.
+        if (player->HasAura(805155) && IsBroadSweep(player, id))
             player->CastSpell(player, 806081, true);
         if (id == 803963)
             player->CastSpell(player, 807140, true);
@@ -165,7 +187,14 @@ class spell_ascension_guardian_ability : public SpellScript
         if (!target->IsAlive() || GetHitDamage() <= 0)
             return;
         uint32 root = sSpellMgr->GetFirstSpellInChain(id);
-        if (player->HasAura(705341) && (root == 805150 || root == 800316 || root == 500463))
+        // Calculated Strike is a real cast, up to 200% weapon damage, and this hook runs
+        // once per target struck. Broad Sweep is capped at 8 targets (Spell.dbc
+        // MaxAffectedTargets = 8); the Ballad of the Dragonslayer that replaces it has 0,
+        // i.e. no cap at all, so on a wide pull this fires once per living enemy in the
+        // 8 yd radius. No cap is added here because no source gives one; bounding it, or
+        // restricting Calculated Strike to the 805150 chain, is an operator decision.
+        if (player->HasAura(705341) &&
+            (IsBroadSweep(player, id) || root == 800316 || root == 500463))
             player->CastCustomSpell(705342, SPELLVALUE_BASE_POINT0, int32(std::min(_energy, 1000u) * 2), target,
                 TRIGGERED_FULL_MASK);
         if (AscensionGuardian::Pulverize(id) || id == 801776 || (id >= 501068 && id <= 501074) || id == 574340)

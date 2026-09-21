@@ -376,8 +376,18 @@ class npc_ascension_witch_doctor : public ScriptedAI
             if (Unit* target = Enemy(player))
             {
                 me->CastSpell(target, SerpentAttackSpell, true, nullptr, nullptr, _owner);
-                float chance = player->HasAura(VoodooFireTwo) ? 40 : player->HasAura(VoodooFireOne) ? 20 : 0;
-                if (chance && roll_chance_f(chance))
+                // The rank's own record carries the chance (20 then 40); Spirit Striker raises it
+                // through SPELLMOD_CHANCE_OF_SUCCESS, which nothing else on this path reads.
+                uint32 rank = player->HasAura(VoodooFireTwo)   ? VoodooFireTwo
+                              : player->HasAura(VoodooFireOne) ? VoodooFireOne
+                                                               : 0;
+                float chance = 0.0f;
+                if (SpellInfo const* voodooFire = rank ? sSpellMgr->GetSpellInfo(rank) : nullptr)
+                {
+                    chance = float(voodooFire->ProcChance);
+                    player->ApplySpellMod(rank, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+                }
+                if (chance > 0.0f && roll_chance_f(chance))
                 {
                     uint32 cap = 3;
                     for (Unit* enemy : Nearby(target, 10.0f))

@@ -78,7 +78,7 @@ class witch_doctor_casts : public AllSpellScript
             (Family(info, 1, 32768) && !IsArrow(info) && id != HexfireWrath &&
              (player->HasAura(HexfireReady) || player->HasAura(Shadowhunter) || player->HasAura(ArrowTalent))) ||
             (IsBottle(info) && player->HasAura(TikiTalent) && (player->HasAura(Crystal) || player->HasAura(Beast))) ||
-            (id == CallSseratus && player->HasAura(ViperTalent)) ||
+            ((id == CallSseratus || id == CallSseratusChannel) && player->HasAura(ViperTalent)) ||
             (id == Allcure && player->HasAura(MassAllcureTalent)))
             result = SPELL_FAILED_CASTER_AURASTATE;
     }

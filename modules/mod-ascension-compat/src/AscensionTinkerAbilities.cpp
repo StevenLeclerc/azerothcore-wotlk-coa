@@ -15,6 +15,41 @@
 namespace
 {
 using namespace AscensionTinker;
+// Snipe has no spell_ranks chain, so Named() cannot walk it: GetFirstSpellInChain
+// returns each rank unchanged. These are the eight ranks read in Spell.dbc under the
+// name "Snipe", all with category 723, effect 121 and spell levels 13, 17, 25, 33, 41,
+// 49, 57 and 65. 560014, also named "Snipe" but with rank "NPC", is the movement slow
+// helper that 800345's description points at; it is deliberately excluded.
+bool Snipe(SpellInfo const* info)
+{
+    if (!info)
+        return false;
+    for (uint32 id : {800345u, 502500u, 502501u, 502502u, 502503u, 502504u, 502505u, 502506u})
+        if (info->Id == id)
+            return true;
+    return false;
+}
+// EventMap::EventId is a uint16, so every timer the class schedules with a spell id is
+// really kept under id & 0xFFFF: State().timers holds 801816 as 15384, 705810 as 50450,
+// and so on. Two ids that agree modulo 65536 would silently share one cooldown. This new
+// slot is therefore declared truncated on purpose and checked, at compile time, against
+// every other id the Tinker schedules today. The list is kept by hand: a timer added
+// anywhere in the class must be added here as well, or the static_assert below stops
+// proving anything. The slots in use are listed by
+//   /usr/bin/grep -rn "timers\.\|Chance(" AscensionTinker*.cpp
+constexpr uint32 TinkerTimerIds[] = {801816, 503534, 560785, 560786, 561267, 572367,
+                                     680975, 705803, 705810, 705815, 806627, 806629,
+                                     806758, 807499};
+constexpr bool TinkerTimerSlotIsFree(uint16 slot)
+{
+    for (uint32 id : TinkerTimerIds)
+        if (uint16(id) == slot)
+            return false;
+    return true;
+}
+constexpr uint16 MedicalOperativeCooldown = uint16(556500);
+static_assert(TinkerTimerSlotIsFree(MedicalOperativeCooldown),
+    "Medical Operative would share a truncated EventMap slot with another Tinker timer");
 bool Select(uint32 id, SpellInfo const* info)
 {
     switch (id)
@@ -213,6 +248,10 @@ public:
             if (info->SpellFamilyFlags & flag96(0,512,0))
                 if (player->HasAura(560782))
                     Reduce(player,560744,std::abs(Amount(560783)));
+            // Turbo Inventor: 560794 carries the amount, the duration and the five
+            // stack ceiling. The Repair Shot that spends them is in OnSpellHitResult.
+            if (player->HasAura(560795))
+                Cast(player,player,560794);
         }
         if ((id == 800349 || id == 806757) && player->HasAura(806758))
             Summon(player,target,806760);
@@ -269,6 +308,82 @@ public:
         if (damage && brilliance)
             player->CastCustomSpell(653244,SPELLVALUE_BASE_POINT0,
                 Amount(653244,0,player) + int32(player->GetTotalAttackPowerValue(RANGED_ATTACK) * .1f),target,true);
+        // Talents whose tooltip names the Tinker's own shot or heal. Owner() also answers
+        // for a device or a pet, and turrets fire copies of these spells, so the caster
+        // has to be the player himself. None of the spells cast below is a Snipe, a Scrap
+        // Shot or a Repair Shot, so this block cannot re-enter itself.
+        // These four talents could also have been expressed as spell_proc rows: Scrap Shot
+        // (500549 and its six ranks) and Repair Shot (801707 and its ten ranks) do carry
+        // selectable SpellFamilyFlags, (16,0,256) and (32768,2,0), read in Spell.dbc. Only
+        // Snipe is genuinely flagless, (0,0,0) on all eight ranks. The four are kept in C++
+        // and in one place because the two Barrel Choke halves need a guard - two talent ids
+        // for the same payload, one stack per cast - that no proc mask can express.
+        if (spell->GetCaster() != player)
+            return;
+        // Piercing Impact. 705756 is listed in TinkerDrivers, so ApplyContracts dummies its
+        // aura 42 and clears its ProcFlags before LoadSpellProcs runs: in the DBC that proc
+        // is armed with ProcFlags 0x4 at 100%, which would fire on every melee auto attack.
+        // The tooltip only promises a bleed on Snipe critical strikes, which is this path.
+        if (damage && critical && Snipe(info) && player->HasAura(705756))
+            Cast(player,target,705757); // 705757 holds the bleed and its ticks.
+        if (damage && Shot(info))
+        {
+            // Shot() is Any(info,{500549,500577}); Gatling Gun 500577 carries exactly the
+            // SpellFamilyFlags of the seven Scrap Shot ranks, (16,0,256), so the original
+            // data does not tell the two forms apart either and it is included on purpose.
+            // Barrel Choke, damage half. The data gives one payload per id - effect 0 of
+            // 705762 triggers 560071, effect 0 of 563251 triggers 513297 - but the tooltip
+            // of each id promises both halves, and the two tooltips disagree on what the
+            // Scrap Shot half does ("damage done" for 705762, "critical strike chance" for
+            // 563251) while 560071 is aura 271 MOD_DAMAGE_FROM_CASTER in both cases. Neither
+            // id is a rank of the other: they share a name and an icon and spell_ranks knows
+            // neither. Either aura therefore grants both halves, once.
+            if (player->HasAura(705762) || player->HasAura(563251))
+                Cast(player,target,560071); // damage taken from the Tinker, three stacks.
+            if (critical && player->HasAura(706813))
+                Cast(player,target,503561); // Shattering Shells: 503561 holds the bleed.
+        }
+        if (healing && Named(info,801707))
+        {
+            if (critical && player->HasAura(672336))
+                Cast(player,target,672335); // Healing Shells: periodic heal on the ally just healed.
+            // Barrel Choke, healing half; see the damage half above for the two ids. 513297
+            // holds the percentage, the ten seconds and the three stack ceiling, and its
+            // class mask (0,2,0) already names Repair Shot. One stack per Repair Shot used,
+            // not per ally healed, hence the per-cast marker; it is taken after the heal,
+            // so a cast never buffs itself.
+            if ((player->HasAura(563251) || player->HasAura(705762)) && !spell->GetScriptValue(563251))
+            {
+                spell->SetScriptValue(563251,1);
+                Cast(player,player,513297);
+            }
+            // Medical Operative. The talent aura is the passive 556500 ("SLS"); 556502 is its
+            // payload - aura 4, four stacks, fifteen seconds - applied by 556500's own effect
+            // 1 (aura 42 -> 556502, dormant today: DBC ProcFlags 0 and no spell_proc row,
+            // P-045) and removed by 542512's effect 1 (SPELL_EFFECT_REMOVE_AURA -> 556502).
+            // Either one on the player means the talent is taken, so both are accepted.
+            // Category 13, the Beacons, is read from 542512's first effect,
+            // SPELL_EFFECT_ASCENSION_RESTORE_SPELL_CHARGES. 542512 itself is not cast here
+            // because its second effect would strip 556502. The lockout is the tooltip's own.
+            if (critical && (player->HasAura(556500) || player->HasAura(556502)))
+            {
+                auto& state = State(player);
+                if (!state.timers.HasTimeUntilEvent(MedicalOperativeCooldown))
+                {
+                    state.timers.ScheduleEvent(MedicalOperativeCooldown,1000ms);
+                    player->RestoreSpellChargeCategory(13,1);
+                }
+            }
+            if (player->HasAura(560795))
+                if (SpellInfo const* stacking = sSpellMgr->GetSpellInfo(560794); stacking &&
+                    stacking->StackAmount && Count(player,560794) >= stacking->StackAmount)
+                    // Turbo Inventor spends the whole stack on one Repair Shot. 680360
+                    // ("Turbo Nerd") is the spell the data provides for exactly that: effect
+                    // 0 is SPELL_EFFECT_REMOVE_AURA on 560794 with TARGET_UNIT_CASTER, effect
+                    // 1 triggers 570150 with TARGET_UNIT_TARGET_ALLY. Casting it leaves the
+                    // order and the targets in the data instead of transcribing them here.
+                    Cast(player,target,680360);
+        }
     }
 };
 class spell_ascension_tinker_ability : public SpellScript

@@ -59,6 +59,12 @@ class aura_ascension_barbarian_event : public AuraScript
 {
     PrepareAuraScript(aura_ascension_barbarian_event);
     ObjectGuid _challenge;
+    // One Aura object carries N AuraApplication for an area aura (UnitAura::FillTargetMap,
+    // SpellAuras.cpp:2849), and scripts are loaded per Aura, so _executing is shared by
+    // every raid member holding 806229. The window is not empty: a lethal reflect runs
+    // Unit::Kill, which calls the victim AI's JustDied (Unit.cpp:14822) from inside this
+    // Proc, and any damage that death throe deals is silently skipped for the other
+    // holders too. That loses a share; it does not corrupt state.
     bool _executing = false;
     int32 _startingDuration = -1;
     int32 _extensionUsed = 0;
@@ -94,7 +100,9 @@ class aura_ascension_barbarian_event : public AuraScript
         uint32 id = GetId();
         Player* player = Owner(owner);
         bool ale = id == 805780 || id == 573064 || id == 573224 || id == 573225 || id == 573077;
-        if (!player && !ale && id != 805804)
+        // Ancestral Evolution is a raid-wide area aura: it is held by party and raid
+        // members of any class, so the Barbarian-only filter must not reject them.
+        if (!player && !ale && id != 805804 && id != 806229)
             return false;
         bool outgoing = event.GetActor() == owner;
         bool critical = event.GetHitMask() & PROC_HIT_CRITICAL;
@@ -146,6 +154,18 @@ class aura_ascension_barbarian_event : public AuraScript
             case 706821: return outgoing && Melee(event);
             case 705214: return outgoing && Direct(event) && Family(info, 1, 134217728);
             case 805821: return !outgoing && Damage(event) && owner->GetHealthPct() <= 35.0f;
+            // "reflect $m1% of all damage taken": any incoming damage from someone else.
+            // No reflect can feed another one -- but NOT because Unit::DealDamage is proc
+            // free, as an earlier note here claimed. It raises no DAMAGE proc, yet a
+            // lethal blow reaches Unit::Kill (Unit.cpp:1243), which fires PROC_FLAG_KILL
+            // and PROC_FLAG_KILLED (Unit.cpp:14696, 14702) and PROC_FLAG_DEATH
+            // (Unit.cpp:14706). Those three are passed no DamageInfo, so Damage() is
+            // false for them and this case cannot re-enter. The kill procs themselves are
+            // real: a reflect that lands the killing blow credits the kill to the aura
+            // holder and fires his own on-kill talents -- cases 800131 and 712468 of this
+            // very script -- rather than to whoever was actually fighting the victim.
+            case 806229: return !outgoing && Damage(event) && event.GetActor() &&
+                event.GetActor() != owner && sid != 806229;
             case 704240: return outgoing && Direct(event) && (sid == 800628 || sid == 355597);
             case 500061: return event.GetHealInfo() && event.GetHealInfo()->GetTarget() == owner &&
                 event.GetHealInfo()->GetEffectiveHeal() && Ancestor(player);
@@ -247,6 +267,41 @@ class aura_ascension_barbarian_event : public AuraScript
             case 705158: Bleed(owner, other, 300870, damage, 30); break;
             case 705214: cast(560125, false); break;
             case 805821: cast(805822); break;
+            case 806229:
+            {
+                // Raid-wide reflection. The share is the aura's own DBC amount, the
+                // school is the one that came in, and the payment deliberately skips
+                // armour, absorption and resistance: what it mirrors already paid them.
+                // Known and accepted side effects of paying through Unit::DealDamage with
+                // a damagetype other than NODAMAGE: Unit.cpp:1037 runs
+                // RemoveAurasWithInterruptFlags(AURA_INTERRUPT_FLAG_TAKE_DAMAGE) on the
+                // target, and 806229 has no SPELL_ATTR4_DAMAGE_DOESNT_BREAK_AURAS
+                // (AttributesEx4 = 0 in the DBC), so the reflect breaks sap, polymorph and
+                // the disorient of Skull Smash itself, raid-wide, for 20 s. Threat and
+                // kill credit are likewise left to the core's default handling. The other
+                // Unit::DealDamage sites in this module are no precedent for this: they
+                // are all self damage in DOT (AscensionChronomancerRipple.cpp:241,
+                // AscensionStarcaller.cpp:125, AscensionTemplarAuras.cpp:178).
+                // DealDamageShieldDamage is out of the picture: Unit.cpp:1033 guards it on
+                // DmgClass == SPELL_DAMAGE_CLASS_MELEE and 806229 is DmgClass 0.
+                AuraEffect const* share = GetEffect(EFFECT_0);
+                if (!share || !damage || !other || other == owner || !other->IsAlive() ||
+                    !other->IsInWorld() || !owner->IsInWorld() || !owner->IsValidAttackTarget(other))
+                    break;
+                SpellSchoolMask school = event.GetSchoolMask();
+                if (other->IsImmunedToDamageOrSchool(school))
+                    break;
+                uint32 reflected = uint32(std::min<uint64>(
+                    CalculatePct(uint64(damage), std::max(0, share->GetAmount())),
+                    std::numeric_limits<uint32>::max()));
+                Unit::DealDamageMods(other, reflected, nullptr);
+                if (!reflected)
+                    break;
+                uint32 dealt = Unit::DealDamage(owner, other, reflected, nullptr, SPELL_DIRECT_DAMAGE,
+                    school, GetSpellInfo(), false);
+                owner->SendSpellNonMeleeDamageLog(other, GetSpellInfo(), dealt, school, 0, 0, false, 0);
+                break;
+            }
             case 704240: cast(800645); break;
             case 500061:
                 if (Unit* pet = Ancestor(player))

@@ -27,6 +27,10 @@ enum DoctorSpells : uint32
     SpiritChance = 561361,
     SpiritVisual = 561298,
     SpiritSpeed = 561071,
+    // Spirit's tooltip gates the movement speed rider on "$?s707335" - knowing spell 707335. In the
+    // client DBC in service 707335 is "Pernicious", it belongs to no CoA talent node of any class and
+    // nothing in the module, the DBC or acore_world grants it, so the gate below can never be true and
+    // SpiritSpeed is never applied. Left as read rather than replaced by an invented gate (P-070).
     SpiritWalk = 707335,
     SpiritPickup = 561068,
     SpiritPickupBuff = 561067,
@@ -73,6 +77,10 @@ enum DoctorSpells : uint32
     Eclipse = 801607,
     EclipseHit = 802717,
     EclipseSplash = 802712,
+    // "Bwonsamdi's Edge": ADD_PCT_MODIFIER, MiscValue 0 (SPELLMOD_DAMAGE), +40, class mask
+    // (0, 8, 0) at Spell.dbc fields 122-124 - the bit EclipseSplash carries in its own
+    // SpellFamilyFlags (536870912, 8, 16).
+    BwonsamdiEdge = 712435,
     Frenzy = 560748,
     FrenzyHeal = 560747,
     FrenzyRegen = 561077,
@@ -275,6 +283,7 @@ enum DoctorSpells : uint32
     Residual = 706543,
     LesserAvatar = 706544,
     VoljinBlessing = 706577,
+    AvatarCdr = 706803, // "Avatar [CDR Reduc]": the percentage Shadow Avatar's tooltip cites as $706803s1
     SpiritWalkerOne = 504459,
     SpiritWalkerTwo = 504636,
     ArrowTalent = 707854,

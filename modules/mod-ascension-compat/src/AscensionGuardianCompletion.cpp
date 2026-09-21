@@ -67,6 +67,19 @@ int32 DynamicAmount(Unit* owner, uint32 id)
                 sSpellMgr->GetSpellInfo(id)->Effects[EFFECT_1].CalcRadius(owner))));
         case 705381: return int32(player->GetUInt32Value(PLAYER_FIELD_COMBAT_RATING_1 + CR_BLOCK));
         case 807794: return int32(player->GetStat(STAT_STAMINA) * 0.2f);
+        // 707662 Footman's Call. The flat 15 is sourced: Spell.dbc effect 0 has
+        // BasePoints 14 and DieSides 1. The 0.3 coefficient is NOT sourced anywhere --
+        // not in 707662's tooltip ("Damage dealt by Pulverize now scales with your
+        // block rating"), not in 705376's ("... plus an additional amount scaling with
+        // your block value"), not in any DBC field, and not upstream (707662 and 705376
+        // each have zero entries in the upstream issue tracker). It came in with the
+        // single-commit tree import, so git cannot attribute it either. And with the
+        // previous (4, 0, 0) class mask below the amount reached nothing, so this
+        // coefficient has never been live: MEASURE IT IN GAME BEFORE RELYING ON IT.
+        // The two tooltips also name different quantities. ShieldValue() reads
+        // GetShieldBlockValue(), i.e. block *value*, which follows 705376, the talent
+        // that puts this aura on the player; 705381 above reads CR_BLOCK, i.e. block
+        // *rating*, for a neighbouring case. Not arbitrated here.
         case 707662: return 15 + int32(ShieldValue(player) * 0.3f);
         default: return 0;
     }
@@ -266,6 +279,13 @@ void AscensionGuardian::ApplyContracts(SpellInfo* info)
     }
     if (id == 705377)
         info->ProcFlags = 0; // Honorable Demeanor belongs to the existing block callback.
+    if (id == 706636 && info->Effects[EFFECT_0].IsAura(SPELL_AURA_MOD_DEBUFF_RESISTANCE) &&
+        info->Effects[EFFECT_0].MiscValue == DISPEL_DISEASE)
+        // Little Drummer: "Allies within 20 yds of you now gain 20% chance to resist
+        // curses." Unit::MagicSpellHitResult matches this aura's MiscValue against the
+        // incoming spell's Dispel, and Spell.dbc stores 3 (disease), so the raid aura
+        // resisted the wrong school of debuff. Both tooltip lines say curses.
+        info->Effects[EFFECT_0].MiscValue = DISPEL_CURSE;
     if (id == 500673)
         // Advance's recast carries the Battle/Defensive Stance mask (forms 17/18), which a Guardian never has;
         // spell_ascension_guardian_ability::Check already limits the recast to a running Advance.
@@ -279,9 +299,31 @@ void AscensionGuardian::ApplyContracts(SpellInfo* info)
         info->Effects[EFFECT_2].Effect = 0;
     }
     if (id == 707662)
-        info->Effects[EFFECT_0].SpellClassMask = flag96(4, 0, 0);
+        // Footman's Call reads "Damage dealt by Pulverize now scales with your block
+        // rating". Pulverize carries SpellFamilyFlags (0, 8196, 8388608) and Spell.dbc
+        // gives this effect the mask (0, 8192, 0). The previous (4, 0, 0) selected
+        // Shieldforge (802195) alone and reached Pulverize on no rank; it is kept here
+        // so nothing that used to be covered stops being covered.
+        // What this mask actually covers, measured against Spell.dbc family 24:
+        //   - A 4    -> Shieldforge 802195 only. The modifier stays inert there: this
+        //              effect is SPELLMOD_EFFECT1 (MiscValue 3), which scales effect 0,
+        //              and Shieldforge's effect 0 is SPELL_EFFECT_TRIGGER_SPELL, whose
+        //              base points are not propagated to the triggered spell (only
+        //              SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE is, SpellEffects.cpp:1239).
+        //   - B 8192 -> the eight Pulverize ranks AND Shield Toss "Damage" 500461
+        //              (flags (0, 8196, 0)). Shield Toss is not collateral damage: it
+        //              documents itself "Scales with modifiers to Pulverize". But it is
+        //              a real SPELL_EFFECT_SCHOOL_DAMAGE on up to 5 targets, so the flat
+        //              bonus lands there too, once per target. With the previous
+        //              (4, 0, 0) override this amount reached nothing, so both Pulverize
+        //              and Shield Toss gain a bonus that has never been live before.
+        info->Effects[EFFECT_0].SpellClassMask = flag96(4, 8192, 0);
     if (id == 807794)
-        info->Effects[EFFECT_0].SpellClassMask = flag96(0, 4194320, 0);
+        // Shieldlord's Strength names Heavy Blow, Hammer of Kings and Hammer of the Law.
+        // Spell.dbc already holds all three: (0, 4194320, 8192), where 4194304 is Heavy
+        // Blow, 16 Hammer of Kings and the third component's 8192 Hammer of the Law
+        // (704418, 707710-707715). Dropping that component left Hammer of the Law out.
+        info->Effects[EFFECT_0].SpellClassMask = flag96(0, 4194320, 8192);
     if (id == 525043)
         for (uint8 i = 0; i < 2; ++i)
             info->Effects[i].BasePoints = 19;

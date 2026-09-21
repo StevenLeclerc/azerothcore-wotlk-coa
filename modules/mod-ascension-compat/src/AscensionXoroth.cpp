@@ -210,13 +210,16 @@ void Refresh(Player* player)
     // The fifth entry, Impcaller {706755, 804883, 707666}, was a mistake and is not
     // ported: 707666 is an aura, not a button. It has no power cost, no cooldown, no
     // cast time and no active effect - only SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS
-    // (+29% imp health) and a SPELL_AURA_DUMMY carrier - and it is flagged
-    // SPELL_ATTR0_NO_AURA_CANCEL. AscensionXorothAbilities.cpp:457 and
-    // AscensionXorothSummons.cpp:36 read it with HasAura(707666), never as a spell.
+    // (effect 0, aura 133, value 30: +30% imp health) and a SPELL_AURA_DUMMY carrier - and it
+    // is flagged SPELL_ATTR0_NO_AURA_CANCEL. AscensionXorothAbilities.cpp (Infernal Strike cast)
+    // and AscensionXorothSummons.cpp (Scale) read it with HasAura(707666), never as a spell.
     // Replacing Call: Hellfire Imp with it would have removed the summon button.
-    // Open defect, deliberately not fixed here: nothing applies aura 707666 (no caster
-    // in the module, no numeric reference in the 209 510 rows of Spell.dbc), so both
-    // HasAura(707666) tests are dead today.
+    // That defect - nothing applied aura 707666, so both HasAura(707666) tests were always
+    // false - was closed on 2026-09-20 in data alone: one spell_linked_spell row of type 2
+    // (SPELL_LINK_AURA) from 706755 to 707666, in
+    // data/sql/db-world/2026_09_20_18_ascension_xoroth_impcaller.sql. The aura now lives
+    // exactly as long as the talent is held, so the two tests below and in
+    // AscensionXorothSummons.cpp are reachable. Do not re-open it as a spell replacement.
     bool impTalent = player->HasAura(92101) || player->HasAura(704993);
     if (impTalent && !player->HasSpell(520661))
         player->learnSpell(520661);

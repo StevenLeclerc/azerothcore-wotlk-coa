@@ -146,6 +146,35 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[2].Effect = 0;
     if (id == 803380)
         info->Effects[0].Effect = 0; // Obsolete Overheat remover points to absent legacy ID 802565.
+    if (id == 806148 || id == 503229)
+    {
+        // Gaze of Ysera: "Direct damage dealt may interrupt this effect". Both records carry the
+        // same 40 s (DurationIndex 64) MECHANIC_SLEEP stun on effect 0 (SPELL_AURA_MOD_STUN) plus a
+        // SPELL_AURA_DUMMY on effect 1, and neither of them ever broke on damage.
+        // The two records differ, and only one of the two statements below is about both:
+        //   806148 (SkillLineAbility 89592, skill 86): ProcFlags 0x222A8 (melee, ranged and negative
+        //     spell hits taken, deliberately without PROC_FLAG_TAKEN_PERIODIC), ProcChance 100,
+        //     RecoveryTime 90000, AuraInterruptFlags 0x00480000.
+        //   503229 (rank "Sleep", SkillLineAbility 87635, skill 85): ProcFlags already 0,
+        //     ProcChance 80, RecoveryTime 30000, AuraInterruptFlags 0.
+        // On 806148 only, SpellMgr::LoadSpellProcs turns those flags into a default proc entry,
+        // because isTriggerAura[SPELL_AURA_DUMMY] is true, and that entry lands on a dummy nobody
+        // handles. Clearing ProcFlags spares a proc entry evaluated for nothing on every hit the
+        // sleeping target takes; on 503229 the same line is a no-op kept for idempotence.
+        // AURA_INTERRUPT_FLAG_DIRECT_DAMAGE is the core's own name for the tooltip rule:
+        // Unit::DealDamage removes it on DIRECT_DAMAGE and SPELL_DIRECT_DAMAGE only, never on a
+        // periodic tick. That flag is a new fact for both records (503229 had none).
+        // Two consequences, both deliberate and neither expressible through AuraInterruptFlags:
+        //   1. the break is now certain, where 503229's own ProcChance 80 said "may" at 80%. That
+        //      chance is not carried over: an interrupt flag has no chance field.
+        //   2. DIRECT_DAMAGE is not TAKE_DAMAGE, and Unit::HasBreakableByDamageAuraType tests only
+        //      TAKE_DAMAGE, so HasBreakableByDamageCrowdControlAura will not report this sleep as
+        //      breakable CC. Pets and combat AI (PetAI, CombatAI, pet_hunter, pet_mage) therefore
+        //      keep attacking a sleeping target and break it on their first direct hit. The flag
+        //      matching the tooltip was preferred over the flag protecting the sleep from pets.
+        info->AuraInterruptFlags |= AURA_INTERRUPT_FLAG_DIRECT_DAMAGE;
+        info->ProcFlags = 0;
+    }
     if (id == 706893)
         mod(1, SPELL_AURA_ADD_FLAT_MODIFIER, -500, SPELLMOD_DURATION, flag96(0, 0, 8388608));
     if (id == 807224)

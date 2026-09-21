@@ -13,6 +13,13 @@
 namespace
 {
 constexpr uint32 SPELL_TONIC_SUPPLY = 705497;
+// Just A Sip (705533) and Regenerative Elixirs (705528) are NOT handled here, on purpose. Their
+// DBC ProcFlags are 0, but P-045 needs both halves of its criterion: each already owns a
+// spell_proc row in acore_world - family 21, SpellFamilyMask2 0x200 (the Tonic bit
+// GetWitchHunterTonicRoot reads below), ProcFlags 81920, SpellPhaseMask 4, Chance 100 - authored
+// by data/sql/updates/pending_db_world/rev_20260907_12_witch_hunter_tonic_procs.sql. Every Tonic
+// is DmgClass 1 and Spell::finish emits DONE_SPELL_MAGIC_DMG_CLASS_* at PROC_SPELL_PHASE_FINISH,
+// so the proc path already pays them. Delivering them again from AfterCast would pay twice.
 constexpr std::array<uint32, 11> WITCH_HUNTER_TONIC_CASTS =
 {{
     680491, 572295, 572296, 572297, 572298,
@@ -50,12 +57,11 @@ class spell_ascension_witch_hunter_tonic_supply : public SpellScript
 {
     PrepareSpellScript(spell_ascension_witch_hunter_tonic_supply);
 
+    // The script must load for any Tonic record, so Tonic Supply's own record contract moved into
+    // ReduceOtherTonics, unchanged, rather than gating the whole script on one talent.
     bool Validate(SpellInfo const* spellInfo) override
     {
-        SpellInfo const* talent = sSpellMgr->GetSpellInfo(SPELL_TONIC_SUPPLY);
-        return GetWitchHunterTonicRoot(spellInfo) && talent &&
-            talent->SpellFamilyName == uint32(CLASS_WITCH_HUNTER) + 6 &&
-            talent->Effects[EFFECT_0].IsAura(SPELL_AURA_DUMMY);
+        return GetWitchHunterTonicRoot(spellInfo) != 0;
     }
 
     bool Load() override
@@ -66,7 +72,15 @@ class spell_ascension_witch_hunter_tonic_supply : public SpellScript
 
     void ReduceOtherTonics()
     {
-        Player* player = GetCaster()->ToPlayer();
+        Unit* caster = GetCaster();
+        Player* player = caster ? caster->ToPlayer() : nullptr;
+        if (!player)
+            return;
+        SpellInfo const* talent = sSpellMgr->GetSpellInfo(SPELL_TONIC_SUPPLY);
+        if (!talent || talent->SpellFamilyName != uint32(CLASS_WITCH_HUNTER) + 6 ||
+            !talent->Effects[EFFECT_0].IsAura(SPELL_AURA_DUMMY))
+            return;
+
         AuraEffect const* effect = player->GetAuraEffect(SPELL_TONIC_SUPPLY, EFFECT_0);
         if (!effect || effect->GetAmount() >= 0)
             return;

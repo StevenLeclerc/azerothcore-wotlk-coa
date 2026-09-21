@@ -133,7 +133,20 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].Effect = SPELL_EFFECT_DUMMY;
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ENEMY);
     }
-    if (id == 560595)
+    // 561363 is a stripped copy of Putrid Summoner that kept only effect 2, a SPELLMOD_EFFECT2 of
+    // -75 with an empty class mask. No advancement node grants it today, but an empty mask on a
+    // non-zero family is not a miss: the flag test at SpellInfo.cpp:1430 is skipped when the mask
+    // is empty, so the modifier takes the whole Necromancer family. The spellmod path that reaches
+    // it is Player::ApplySpellMod (Player.cpp:10286) -> Player::IsAffectedBySpellmod
+    // (Player.cpp:10171) -> SpellInfo::IsAffectedBySpellMod (SpellInfo.cpp:1457), whose last line
+    // 1534 calls IsAffected with mod->mask.
+    // A mask is not the fix here: the tooltip names "Undead: Protect" as the $s3 target, and the
+    // family flag those two spells carry, (0, 256, 0), also covers the five Corpse Explosion ranks
+    // and Command: Skeletal Mage - it would overshoot. The clean way to restore the talent one day
+    // is SpellModifier::targetSpellId (Player.h:191, honoured at SpellInfo.cpp:1476), as
+    // AscensionTinkerHacking.cpp:56 and :61 already do. Until someone does that, disarm it next to
+    // its twin.
+    if (id == 560595 || id == 561363)
         for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
             dummy(index);
     if (id == 302888 || id == 302920)

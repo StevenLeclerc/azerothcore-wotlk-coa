@@ -201,10 +201,45 @@ class aura_ascension_barbarian_volley : public AuraScript
             EFFECT_ALL, SPELL_AURA_PERIODIC_TRIGGER_SPELL);
     }
 };
+
+// Skull Smash 560532 carries its bleed cleanse as a third effect, a FORCE_CAST of
+// 560554 "Blood Loss" (DISPEL_MECHANIC, mechanic 15 BLEED), and fires it for every
+// caster. The client text gates it on the talent: "$?s561314[ Removes all bleed
+// effects on the target.][]". Suppress that effect for a Barbarian who has not
+// learned Plugging the Hole; any other caster keeps the stock behaviour.
+//
+// WARNING, measured not assumed: nothing on this server is known to grant 561314.
+// Every source that could teach or apply it was searched, all negative for 561314 and
+// 560532: ascension_custom_class_spell (class 12), talent_dbc (0 rows), Talent.dbc,
+// spell_linked_spell, spell_scripts and conditions, plus the core and module sources.
+// Decisive: across the 140 class-12 characters, character_spell has no row for either. Its PASSIVE attribute proves nothing about learning (P-070).
+// So this guard is inert today because 560532 is unlearnable too -- but the day 560532
+// becomes learnable while 561314 does not, it removes the bleed cleanse from every
+// Barbarian. Establish how 561314 is granted before relying on this.
+// Note also 560552 "Blood Loss" (family 18): the same unconditional FORCE_CAST of
+// 560554, referenced nowhere and known to nobody. It is not gated here.
+class spell_ascension_barbarian_skull_smash : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_barbarian_skull_smash);
+
+    void GateBleedCleanse(SpellEffIndex index)
+    {
+        Player* player = Owner(GetCaster());
+        if (player && !player->HasAura(561314))
+            PreventHitDefaultEffect(index);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_barbarian_skull_smash::GateBleedCleanse,
+            EFFECT_2, SPELL_EFFECT_FORCE_CAST);
+    }
+};
 }
 
 void AddAscensionBarbarianAbilityScripts()
 {
     RegisterSpellScript(spell_ascension_barbarian_ability);
     RegisterSpellScript(aura_ascension_barbarian_volley);
+    RegisterSpellScript(spell_ascension_barbarian_skull_smash);
 }

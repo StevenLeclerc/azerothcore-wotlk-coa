@@ -88,11 +88,17 @@ constexpr uint32 TinkerEvents[] = {
     704107, 704449, 705810, 705815, 705817, 705820, 705846, 706379, 706680, 707698,
     806627, 806629, 806758,
 };
+// ApplyContracts turns the aura 42 of every id below into a dummy and clears its
+// ProcFlags, so a talent driven from C++ cannot also fire from the default proc entry
+// SpellMgr::LoadSpellProcs generates for any spell with non-zero DBC ProcFlags.
+// 705756 (Piercing Impact) belongs here for that reason: its DBC ProcFlags are 0x4,
+// PROC_FLAG_DONE_MELEE_AUTO_ATTACK at 100%, while its tooltip only promises a bleed on
+// Snipe critical strikes, which AscensionTinkerAbilities.cpp applies.
 constexpr uint32 TinkerDrivers[] = {
     92140, 92141, 300636, 503534, 503569, 520022, 524834, 524979, 560734, 560782,
-    560787, 572545, 705786, 705803, 705831, 706695, 707237, 707240, 707244, 707249,
-    707256, 707259, 707260, 707262, 707265, 707271, 707273, 707277, 707395, 803074,
-    805314, 806631, 807388, 807499, 807500,
+    560787, 572545, 705756, 705786, 705803, 705831, 706695, 707237, 707240, 707244,
+    707249, 707256, 707259, 707260, 707262, 707265, 707271, 707273, 707277, 707395,
+    803074, 805314, 806631, 807388, 807499, 807500,
 };
 constexpr uint32 TinkerFinite[] = {
     503553, 537247, 653273, 680998, 681245, 707250, 707261, 707272,

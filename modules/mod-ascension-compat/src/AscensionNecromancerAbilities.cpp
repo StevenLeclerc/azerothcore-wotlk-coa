@@ -324,6 +324,11 @@ class necromancer_casts : public AllSpellScript
         }
         if ((Command(info) || (info->HasEffect(SPELL_EFFECT_SUMMON) && !Raised(info))) && player->HasAura(805674))
             BuffArmy(player, 805786, true);
+        // Freeze Dry (704680) deliberately keeps no branch here. Its Runic Power is already
+        // granted by AscensionCustomResourceData.h's NativePowerGainRules - three rows for
+        // class 23 covering the Glacial Impact rank chain (704355, 707399..707402, 707911),
+        // power type 6, 200 tenths, on the first successful hostile target, gated on this very
+        // aura. A cast of helper 804111 here would be a second, silent grant on top of it.
         if (id == 805029)
         {
             if (player->HasAura(805427))
@@ -369,6 +374,13 @@ class spell_ascension_necromancer_ability : public SpellScript
             for (Creature* minion : Minions(player))
             {
                 int32 heal = Amount(id, 0, player);
+                // P-070: 704684 "Sacrifice Undead" is never granted either. Nothing in Spell.dbc
+                // cites it, it is absent from CharacterAdvancement.dbc and ChrSpecs.dbc, and no
+                // world table carries it. Its single SkillLineAbility.dbc row (record 11367,
+                // ID 90126, SkillLine 84 "Animation", RaceMask 0, ClassMask 0, AcquireMethod 0)
+                // is part of a generic 112-entry line, not a class skill line, and teaches nobody.
+                // SPELL_ATTR0_PASSIVE (attributes 0x1c0) grants nothing by itself: a passive still
+                // has to be learned. Test always false, kept as the grid to hang the talent on.
                 if (player->HasAura(704684))
                     heal = player->CountPctFromMaxHealth(Amount(704684));
                 minion->DespawnOrUnsummon();
@@ -397,6 +409,8 @@ class spell_ascension_necromancer_ability : public SpellScript
             Cast(player, target, 573233);
             if (player->HasAura(300236))
                 ExtendWorms(player, target, Amount(300236) * 1000);
+            // P-070: 704598 "Corpseblaster" has no grantor at all - no DBC record cites it, no
+            // world table lists it. Test always false, kept as the grid to hang the talent on.
             if (target->HealthBelowPct(20) && player->HasAura(704598))
                 Spread(player, target, false, false, 3);
         }

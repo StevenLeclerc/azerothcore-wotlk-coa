@@ -115,6 +115,14 @@ class aura_ascension_necromancer_event : public AuraScript
                     BuffArmy(player, 301334, true);
                 if (player->HasAura(573223))
                     Copy(player, target, 573242, uint64(damage) * 20 / 100);
+                // P-070: 561319 "Parasite Plague" is never granted to anyone. It is absent from
+                // CharacterAdvancement.dbc, ChrSpecs.dbc and SkillLineAbility.dbc, no Spell.dbc
+                // field cites it, and spell_ranks / spell_linked_spell / spell_script_names /
+                // spell_proc / ascension_custom_class_spell / conditions have no row for it. Its
+                // SPELL_ATTR0_PASSIVE bit (attributes 0x1c0) grants nothing by itself: a passive
+                // still has to be learned by a node, a class-spell row or a learn effect. So this
+                // Chance(561319) and the HasAura(561319) below are dead branches - the disjunction
+                // here still lives through 560730. Kept as the grid to hang the talent on.
                 if (Chance(player, 561319) || Chance(player, 560730))
                     Cast(player, target, 560729);
                 if (Chance(player, 806086))
@@ -195,8 +203,13 @@ class aura_ascension_necromancer_event : public AuraScript
                 Cast(player, actor, 807653);
                 Cast(actor, actor, 504022);
             }
+            // P-070: second dead test on 561319, see the note in the periodic branch above.
             if (target->HasAura(560729, player->GetGUID()) && player->HasAura(561319))
                 Copy(actor, target, 561318, uint64(damage) * std::max(0, Amount(561319)) / 100);
+            // EventMap keys are EventId (uint16, SharedDefines.h:3647), so 704721 truncates to
+            // 49361 here and in Chance() (AscensionNecromancer.cpp:222/226). Both call sites
+            // truncate the same way, so the gate still works; measured: the 24 ids this class
+            // feeds to State().cooldowns have no collision modulo 65536. Latent, not active.
             if (player->HasAura(704721) &&
                 (!info || (info->SchoolMask & (SPELL_SCHOOL_MASK_NORMAL | SPELL_SCHOOL_MASK_FROST))) &&
                 !State(player).cooldowns.HasTimeUntilEvent(704721))

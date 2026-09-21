@@ -23,6 +23,14 @@ inline bool Ballad(std::uint32_t id)
         (id >= 572717 && id <= 572719) || (id >= 574340 && id <= 574341) ||
         (id >= 574363 && id <= 574364);
 }
+// Inspiring Leader (505344) turns Broad Sweep into the Ballad of the Dragonslayer and
+// Pulverize into the Ballad of the Conqueror. This list is the Dragonslayer half of
+// Ballad() above, and matches the replacement table in AscensionGuardianTalents.cpp.
+inline bool BalladOfTheDragonslayer(std::uint32_t id)
+{
+    return id == 801772 || (id >= 501066 && id <= 501067) ||
+        (id >= 572717 && id <= 572719) || id == 574341 || (id >= 574363 && id <= 574364);
+}
 void AddParagon(Player* player, std::uint8_t amount);
 void ApplyContracts(SpellInfo* info);
 }

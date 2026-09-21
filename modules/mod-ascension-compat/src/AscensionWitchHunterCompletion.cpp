@@ -241,6 +241,39 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == 681485)
         info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
+    // Guardbreaker rank 2 authors its advertised Pommel Smash damage bonus with an EMPTY
+    // EffectSpellClassMask. SpellInfo::IsAffected only tests the family flags when the mask is not
+    // empty, so the +50% reached every family-21 record the Witch Hunter owns instead of Pommel
+    // Smash alone. The replacement mask is read, not guessed: rank 1 of the same talent (681097)
+    // carries the same SPELLMOD_DAMAGE with flag96(0, 0, 0x2000000), and that is Pommel Smash's own
+    // SpellFamilyFlags (680515 = 0 / 0 / 0x2000000, the only family-21 record holding that bit).
+    // Effect 1 is the "applies an additional stack" trigger: its DBC ProcFlags are 0 and it has no
+    // spell_proc row, so it never fired. The cast script now owns that stack, and the dead trigger
+    // is disarmed here so the two can never both run.
+    if (id == 681493)
+    {
+        SpellEffectInfo& bonus = info->Effects[EFFECT_2];
+        if (bonus.IsAura(SPELL_AURA_ADD_PCT_MODIFIER) && bonus.MiscValue == SPELLMOD_DAMAGE &&
+            !bonus.SpellClassMask)
+            bonus.SpellClassMask = flag96(0, 0, 0x2000000);
+        SpellEffectInfo& stack = info->Effects[EFFECT_1];
+        if (stack.IsAura(SPELL_AURA_PROC_TRIGGER_SPELL) && stack.TriggerSpell == 582588)
+            stack.Effect = 0;
+    }
+    // "Hunt" (807797) is the hidden marker whose description reads "Transforms your Vault into
+    // Hunt"; the lifecycle script already owns its apply and remove. Its record has no
+    // SpellDuration row and no Passive attribute, so an applied aura would report duration 0 and
+    // Aura::IsExpired() would drop it on the very next owner update, which would turn the
+    // OnUnitUpdate that maintains it into a cast per tick. Give it both of the things Quickdraw
+    // 681181, the other marker this class maintains the same way, already carries: the Passive
+    // attribute - which alone makes Aura::CalcMaxDuration return -1 for a record with no duration
+    // row - and the infinite duration entry 21 (-1 ms). Its own rank string is "Passive".
+    if (id == 807797 && !info->DurationEntry && !info->IsPassive())
+    {
+        info->Attributes |= SPELL_ATTR0_PASSIVE;
+        if (SpellDurationEntry const* forever = sSpellDurationStore.LookupEntry(21))
+            info->DurationEntry = forever;
+    }
     if (Family(info, 0, 65536))
         info->Effects[EFFECT_1].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ENEMY);
     if (id == 681452 || id == 681457 || id == 681179 || id == 681177 || id == 681447)

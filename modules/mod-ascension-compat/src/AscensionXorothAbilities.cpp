@@ -213,8 +213,22 @@ class xoroth_casts : public AllSpellScript
     }
     void OnSpellCritChance(Spell* spell, Unit*, float& chance) override
     {
-        if (!Owner(spell->GetCaster()))
+        Player* player = Owner(spell->GetCaster());
+        if (!player)
             return;
+        // Chop Shop (704953): "Each stack of Demon's Blood now increases the critical strike chance of
+        // Brimstone Bludgeon and Meatsaw by $s2%." $s2 is this talent's own Effects[1] value; Demon's
+        // Blood is the 800999 stack. Sever() covers Sever and its Brimstone Bludgeon transform alike.
+        // Known and deliberate gap, on the Meatsaw side only: when Dread's 712294 is up, Auras.cpp
+        // does Replace(player, 800340, 504581) and the button casts Annihilation 504581, which is not
+        // in Meatsaw's spell_ranks chain (800340, 501508, 501509, 501510, 578119), so Named() is false
+        // and this bonus silently stops applying. Nothing written says Chop Shop should follow it: the
+        // official tooltip quoted by upstream issue 486 names "Brimstone Bludgeon and Meatsaw", and no
+        // tracker entry mentions 504581 with Chop Shop. Adding `|| Named(info, 504581)` would be an
+        // extrapolation, so it is left out and recorded here instead.
+        if (player->HasAura(704953))
+            if (SpellInfo const* info = spell->GetSpellInfo(); Sever(info) || Named(info, 800340))
+                chance += float(Count(player, 800999)) * float(Amount(704953, 1));
         if (spell->GetScriptValue(524913) || spell->GetScriptValue(802618))
             chance = 100;
     }
@@ -331,6 +345,12 @@ class xoroth_casts : public AllSpellScript
             Cast(player, player, 804886);
             Gain(player, 1);
         }
+        // Carver (707390): "Critical strikes with Gore now generate 1 additional Demonfire."
+        // Its DBC effect is a PROC_TRIGGER_SPELL towards 524912 ("Add 1 Demonfire") with ProcFlags 0
+        // and no spell_proc row, so the native path never fires (P-045). Gore is single target, and
+        // this whole block already returned for triggered casts, so one crit means one Demonfire.
+        if (critical && Named(info, 805555) && player->HasAura(707390))
+            Gain(player, 1);
         if (Named(info, 805671))
         {
             if (player->HasActiveSpell(SPELL_DEMONIC_VISAGE))
@@ -439,6 +459,13 @@ class xoroth_casts : public AllSpellScript
             {
                 if (player->HasAura(SPELL_WARPATH))
                     Cast(player, player, SPELL_WARPATH_PROTECTION);
+                // Hellbreaker (680216): "Casting Unleash Pestilence now removes all active movement
+                // impairing effects from you." Its own DBC effect is a PROC_TRIGGER_SPELL towards
+                // 680217 with ProcFlags 0 and no spell_proc row, and - being SpellFamilyName 21, not
+                // 23 - ApplyContracts never sees it either, so nothing ever cast 680217. 680217 is
+                // DISPEL_MECHANIC of MECHANIC_SNARE plus MECHANIC_IMMUNITY to snare and root.
+                if (player->HasAura(680216))
+                    Cast(player, player, 680217);
                 Unleash(player, player);
                 if (player->HasAura(704961))
                     if (Pet* pet = player->GetPet(); pet && pet->GetEntry() == 510100)

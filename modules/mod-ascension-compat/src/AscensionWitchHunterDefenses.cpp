@@ -216,12 +216,11 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
         }
         if (id == 707230 && player)
             Replacement(player, 1, 536870912, 803333);
+        // The Hunt marker is now kept in step with knowing Hunt itself (see witch_hunter_state),
+        // which is what the talent grants, so it must not hand out or take back that ability: a
+        // learnSpell here was harmless but a removeSpell below would have stripped the talent.
         if (id == 807797 && player)
-        {
-            if (!player->HasSpell(802006))
-                player->learnSpell(802006, true);
             player->SetTemporarySpellReplacement(500085, 802006);
-        }
         if (id == 803166 && player)
             player->ModifyAuraState(AURA_STATE_DEFENSE, true);
     }
@@ -298,8 +297,9 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
                 player->removeSpell(803333, SPEC_MASK_ALL, true);
                 break;
             case 807797:
+                // Only the replacement is undone: Hunt itself belongs to the talent, not to this
+                // marker, and removing it here would unlearn a purchased ability.
                 player->SetTemporarySpellReplacement(500085, 0);
-                player->removeSpell(802006, SPEC_MASK_ALL, true);
                 break;
             case 803166:
                 player->ModifyAuraState(AURA_STATE_DEFENSE, false);
@@ -372,6 +372,36 @@ class witch_hunter_state : public UnitScript
             return;
         if (!player->HasAura(681181))
             Cast(player, player, 681181);
+        // "Hunt" (807797) reads "Transforms your Vault into Hunt", and the lifecycle script has
+        // always carried its apply and remove, but nothing ever applied it: it is in no talent
+        // tree, in no class spell list, in no spell_linked_spell row, and no DBC record triggers,
+        // learns or names it. The talent grants the Hunt ability 802006 itself, which is also the
+        // condition Strategist's own description tests - "Your $?s807797[Hunt][Vault] ..." - so
+        // knowing Hunt is what the marker records. The client still reads that condition from its
+        // own spell book and will keep printing "Vault" until the data grants 807797.
+        // Evidence that points the other way, and is recorded here so it is not rediscovered as a
+        // contradiction: 807797's description ends with the client annotation "@s:802006:0@",
+        // which in Ascension descriptions marks the spell a passive GRANTS - i.e. the original
+        // intent was probably that something applies 807797 and 807797 hands out Hunt. Nothing
+        // parses "@s:" server side (no hit in the core or this module), and 807797 appears in no
+        // CharacterAdvancement.dbc entry, in ascension_custom_class_spell, in
+        // playercreateinfo_spell_custom or in spell_linked_spell, so that direction cannot be
+        // wired without changing the data. Deriving the marker from knowing Hunt is the only
+        // direction that works today.
+        bool const hunt = player->HasSpell(802006);
+        if (hunt != player->HasAura(807797))
+        {
+            if (hunt)
+                Cast(player, player, 807797);
+            else
+                player->RemoveAurasDueToSpell(807797);
+        }
+        // SetTemporarySpellReplacement refuses a pair the player does not have active yet, so the
+        // one-shot call in the aura's apply handler is silently lost when Vault is bought after
+        // Hunt. Reassert it while the marker is up; it only sends a packet when it actually changes.
+        else if (hunt && player->HasActiveSpell(500085) && player->HasActiveSpell(802006) &&
+                 player->GetTemporarySpellReplacement(500085) != 802006)
+            player->SetTemporarySpellReplacement(500085, 802006);
         if (!player->HasAura(706240))
             player->RemoveAurasDueToSpell(706241);
         if (Hound(player))
