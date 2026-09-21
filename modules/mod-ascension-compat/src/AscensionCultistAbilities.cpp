@@ -226,6 +226,15 @@ public:
         }
         if (spell->IsTriggered())
             return;
+        // Do not add an Insanity gain for Twilight's Call 301180, Twilight Incarnate 681087 or
+        // Whispers of C'Thun 807512 here. Their DBC proc is indeed inert (aura 42 with
+        // ProcFlags 0 and no spell_proc row, P-045), but the promise is already kept by the
+        // shared, data-driven engine: AscensionCustomResourceData.h lists one ResourceGainRule
+        // per rank range with the amount and the required talent aura, and
+        // AscensionResourceService in AscensionCompat.cpp runs them from AscensionCompatAllSpellScript,
+        // which declares the same ALLSPELLHOOK_ON_CAST and ALLSPELLHOOK_ON_HIT_RESULT hooks as this
+        // script, then goes through ModifyAuraStacks into AscensionCultist::Resource. Granting them
+        // again here would pay every one of these talents twice.
         if (Named(info, 500720) && damage)
         {
             if (player->HasAura(300275))

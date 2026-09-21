@@ -110,6 +110,21 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == 300287)
         aura(0, SPELL_AURA_MOD_DISPEL_RESIST, 25, 0, TARGET_UNIT_CASTER);
+    if (id == 804633)
+    {
+        // "Void-Enchanted Armor": its own DBC description reads "Increases your chance to
+        // resist dispel effects by $s1%.", yet the shipped record stores BasePoints -21 with
+        // DieSides 1, so the aura resolves to -20, and Aura::CalcDispelChance sums
+        // SPELL_AURA_MOD_DISPEL_RESIST straight into resistChance: as shipped the talent removes
+        // the resistance it advertises, and cancels most of the +25 of Forbidden Resilience
+        // 300287 when both are worn. The sign, not the magnitude, is what is wrong: of the 21
+        // APPLY_AURA effects of aura 235 in Spell.dbc, 17 are positive and only two negative,
+        // this one and Pyromancer 706650, which is itself rewritten to a positive amount in
+        // AscensionPyromancerContracts.cpp. Blizzard records also keep the direction in the
+        // wording and the magnitude in $s (Demoralizing Shout 1160, Mortal Strike 12294).
+        // Restored to abs() of the shipped value, authored like 300287.
+        aura(0, SPELL_AURA_MOD_DISPEL_RESIST, 20, 0, TARGET_UNIT_CASTER);
+    }
     if (id == 300290)
         aura(1, SPELL_AURA_MOD_MINIMUM_SPEED, 100, 0, TARGET_UNIT_CASTER);
     if (id == 681106 || id == 707753)

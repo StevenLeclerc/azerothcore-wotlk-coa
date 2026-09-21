@@ -248,6 +248,28 @@ public:
                 Copy(player, player, 707522, copied);
                 if (player->HasAura(HolyForm) && player->HasAura(300353))
                     Copy(player, player, 805489, copied);
+                // Holy Knight (301011): "Gavel of Light now additionally heals up to 5 nearby
+                // allies for $s1% of the amount it heals you." Its own effect carries Ascension
+                // aura 354, whose core handler is nullptr, so the mirror heal 301012 was never
+                // cast. The share, the reach and the target cap are all read from the records:
+                // 301011 effect 0 (100%), 301012's radius (20 yd) and MaxAffectedTargets (5).
+                SpellInfo const* mirror = sSpellMgr->GetSpellInfo(301012);
+                if (copied && mirror && player->HasAura(301011))
+                {
+                    uint32 share = CalculatePct(copied, Amount(301011));
+                    uint32 count = mirror->MaxAffectedTargets;
+                    if (share && count)
+                    {
+                        auto allies = Allies(player, player, Radius(301012));
+                        allies.remove(player);
+                        for (Unit* ally : allies)
+                        {
+                            if (!count--)
+                                break;
+                            Copy(player, ally, 301012, share);
+                        }
+                    }
+                }
             }
             if (player->HasAura(HolyForm) && player->HasAura(300353))
             {

@@ -16,8 +16,25 @@ enum FelswornSpells : uint32
 {
     BurningCommander = 92089,
     MannorothFelfury = 801043,
+    Annihilation = 803904,
     Unphased = 803645
 };
+
+// Spell.dbc ProcCharges of Annihilation (803904), field 36, read from the client record: 5.
+// ApplyContracts zeroes ProcFlags and ProcCharges on the loaded SpellInfo copy, but that does NOT
+// switch the native proc system off for this spell: acore_world.spell_proc has a row for 803904
+// (ProcFlags = 1048575, Charges = 0) and Aura::CalcMaxCharges (SpellAuras.cpp:909-918) reads the
+// row, never the SpellInfo. The authored value is kept here because the SpellInfo copy no longer
+// carries it, and because this script - not the core - owns the count of guaranteed critical
+// strikes.
+constexpr uint32 AnnihilationAuthoredCharges = 5;
+
+// EventMap::EventId is uint16 (src/common/Utilities/EventMap.h:27), so a spell id used as an event
+// id is STORED TRUNCATED: ScheduleEvent(807727) keeps 807727 & 0xFFFF = 21295 and ExecuteEvent
+// hands that truncated value back. Comparing it to the untruncated literal is always false. Every
+// site that schedules, cancels, probes or matches the Agonizing Presence debt tick must therefore
+// go through this single already-truncated constant.
+constexpr uint16 FelswornDebtEvent = uint16(807727);
 
 struct Debt
 {
@@ -54,6 +71,7 @@ bool Twin(SpellInfo const* info);
 bool Inner(Unit const* player);
 bool Triggered(Spell const* spell);
 int32 Amount(uint32 spell, uint8 effect = 0, Unit* caster = nullptr);
+uint32 AnnihilationCharges(Player* player);
 uint32 Fury(Unit const* player);
 void Gain(Player* player, uint32 amount);
 void Generated(Player* player, uint32 amount);

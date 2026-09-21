@@ -245,7 +245,77 @@ bool Consume(Player* player, Unit* target)
     stars->ModStackAmount(-1);
     Cast(player, target, 804995);
     float effectiveness = (player->HasAura(807659) ? 1.5f : 1) * (player->HasAura(805524) ? 1.5f : 1);
-    Mana(player, uint32(player->GetMaxPower(POWER_MANA) * .08f * effectiveness * (player->HasAura(574360) ? 2 : 1)));
+    // Celestial Shot (574348) authors its "increases the effectiveness of consuming Scattered Stars
+    // by 40%" as two native spell modifiers: SPELLMOD_EFFECT1 on 804995, the hit, which stays native
+    // and needs nothing here; and SPELLMOD_EFFECT2 on effect 1 of 804994 "Scattered Star CD
+    // Reduction", the mana share this line pays. 804994 is never cast -- the module only reads its
+    // effects -- so the literal .08f that used to stand here bypassed that modifier and half the
+    // talent was dead. Reading the share through the modifier chain applies it.
+    //
+    // FOUR Spell.dbc records, not three, carry an aura 107/108 with SPELLMOD_ALL_EFFECTS (op 8) or
+    // SPELLMOD_EFFECT2 (op 12) on family 32 whose EffectSpellClassMask (fields 122+3e, P-064)
+    // reaches this effect (804994 SpellFamilyFlags, fields 209-211, are 0/65536/1048576):
+    // 574348 (+40, EFFECT2, mask 0/0/1048576, left native), 574360 "Aspect of the Moonwell"
+    // (+100, EFFECT2, mask 0/0/1048576) and 807659 "Dancing in the Moonlight" (+50, ALL_EFFECTS,
+    // mask 0/67584/0), both dummied in ApplyContracts, and 805850 "Celestial Glaives" /
+    // "SpecializationSLS" (+50, EFFECT2, mask 0/0/1048576).
+    //
+    // WHICH BUCKET A MODIFIER LANDS IN DECIDES WHETHER IT ADDS OR MULTIPLIES.
+    // Unit::ApplyEffectModifiers makes two separate Player::ApplySpellMod calls, SPELLMOD_ALL_EFFECTS
+    // then SPELLMOD_EFFECT2, so those two buckets MULTIPLY one another. Inside a single bucket
+    // Player::ApplySpellMod accumulates percentages ADDITIVELY (`totalmul += CalculatePct(1.0f,
+    // mod->value)`); only SPELLMOD_DAMAGE and SPELLMOD_DOT take the multiplicative branch. Hence:
+    //  - 807659 is ALL_EFFECTS, a bucket of its own, so its reimplemented x1.5 in `effectiveness`
+    //    multiplies exactly as the engine would have -- correct where it stands;
+    //  - 574360 is EFFECT2, the SAME bucket as 574348, so its +100 must be ADDED to that +40, never
+    //    multiplied by it. It is added below as one more `base`. The x2 that used to close this
+    //    expression gave 8 * 1.40 * 2 = 22.4 where the DBC authors 8 * (1 + .40 + 1.00) = 19.2.
+    //    Abilities.cpp keeps a separate x2 on 804995: that one reimplements 574360 effect 0, a
+    //    SPELLMOD_DAMAGE, which the engine really does multiply -- correct, and not a double count,
+    //    because effect 0 (mask 8388608/0/0) reaches 804995 and effect 1 reaches 804994, not both.
+    // 805850 is left native on purpose: nothing can grant it -- no SkillLineAbility.dbc row, no
+    // other Spell.dbc record naming it in any of the 234 fields, and no spell_script_names,
+    // spell_proc, spell_linked_spell, npc_trainer or item_template row in acore_world -- and its own
+    // tooltip (upstream issue 3580, closed, filed against the Chronomancer) authors intellect from
+    // strength, nothing about Scattered Stars, so there is no share to guess. Were it ever granted
+    // it would join the same additive bucket: 8 * (1 + .40 + 1.00 + .50) = 23.2.
+    //
+    // The share is read as a float on purpose: SpellEffectInfo::CalcValue truncates its own result
+    // with `return int32(value)`, which would turn the 11.2 the +40% authors into 11.
+    // Unit::ApplyEffectModifiers is the very call CalcValue makes for those modifiers, so going
+    // through it keeps the fraction. Two measured consequences of taking that route rather than the
+    // literal:
+    //  - it skips sScriptMgr->ModifySpellEffectBaseValue, an identity for this pair today: 804994
+    //    has no StarcallerCoefficients row (only 804995 has one), no ScalingBaseSpells row, and no
+    //    other branch of the module's hooks names it;
+    //  - Player::ApplySpellMod redirects to m_spellModTakingSpell when the player is mid-cast, and
+    //    Player::ApplyModToSpell then registers the carrying aura in Spell::m_appliedMods, which is
+    //    how the proc system drops charges. Inert today: the four modifiers above all have
+    //    ProcCharges = 0 (Spell.dbc field 36), so there is no charge to consume. The .08f literal
+    //    had neither behaviour; this is written down so the next reader does not rediscover it.
+    //
+    // EXPOSURE, stated plainly because what follows is a measurement and not a barrier: this call
+    // runs the WHOLE realm's modifier chain, not just the module's. SpellInfo::IsAffected opens on
+    // `if (!familyName) return true;`, so a modifier carried by a family 0 spell reaches this effect
+    // whatever its mask. Spell.dbc holds 22 such records with aura 107/108 and op 8 or 12, the worst
+    // being 968469-968476 "Primary Stat Food Buff", ADD_FLAT_MODIFIER SPELLMOD_EFFECT2 of
+    // +15/+20/+25 with an EMPTY mask: ApplySpellMod ends on `basevalue = (basevalue * totalmul) +
+    // totalflat`, so a single +20 would take the share from 11.2 to 31.2. None of the 22 is
+    // reachable by a Starcaller today -- measured: no SkillLineAbility.dbc row, no Spell.dbc record
+    // naming one in any of the 234 fields except 281180 -> 281182 and 707100's EffectMiscValue, and
+    // zero rows in item_template.spellid_*, spell_linked_spell, spell_script_names, spell_proc and
+    // npc_trainer. No ceiling written anywhere in the DBC would separate a legitimate share from
+    // such a runaway, so none is invented here: the clamp below is the one real invariant, an
+    // energize can never hand back more than the player's own mana pool. Revisit if any of the 22
+    // ever becomes grantable.
+    SpellInfo const* energize = sSpellMgr->GetSpellInfo(804994);
+    float base = energize ? float(energize->Effects[EFFECT_1].CalcValue(nullptr)) : 8.0f;
+    float share = energize ? player->ApplyEffectModifiers(energize, EFFECT_1, base) : base;
+    if (player->HasAura(574360))
+        share += base; // Same additive SPELLMOD_EFFECT2 bucket as 574348, never a factor on top.
+    double mana = double(player->GetMaxPower(POWER_MANA)) * double(std::clamp(share, 0.0f, 100.0f)) /
+                  100.0 * effectiveness;
+    Mana(player, uint32(std::clamp(mana, 0.0, double(INT32_MAX))));
     for (uint32 helper : {804994, 504024, 706573})
         if (SpellInfo const* info = sSpellMgr->GetSpellInfo(helper))
             for (auto const& effect : info->Effects)

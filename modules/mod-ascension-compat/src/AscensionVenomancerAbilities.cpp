@@ -13,9 +13,46 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <algorithm>
+#include <vector>
 namespace
 {
 using namespace AscensionVenomancer;
+// Word 1 bit 0x1000 of SpellFamilyFlags is the authored "Pheromone" group of family 35.
+// It is carried by exactly nineteen spells -- Spider Pheromones (six ranks + Greater),
+// Beetle Pheromones (six ranks + Greater) and Toxic Pheromones (four ranks + Greater) --
+// and by nothing else in the family. It is also the mask that both modifiers of
+// Empowering Pheromones (705996) select, which is what identifies it as the group.
+constexpr uint32 PheromoneFamilyFlag1 = 4096;
+bool Pheromone(SpellInfo const* info)
+{
+    return info && info->SpellFamilyName == 35 && info->SpellFamilyFlags.HasFlag(0,PheromoneFamilyFlag1,0);
+}
+// The rule comes from upstream tracker entry 4264 (in-game bug-report form, class 29,
+// level 39, core 7f7131c76ac3), which is the only text that states it: "Only 1 Pheromone
+// can be applied on a character by each Venomancer. If there is 2 venomancers in a group,
+// they can ally 1 different pheromone on the same character." That is a player report, not
+// a maintainer statement.
+// Beetle Pheromones' "Does not stack with other similar effects." is an indication only:
+// it is the standard wording for same-type buffs (Blessing of Kings, Mark of the Wild), it
+// is carried by the armour-and-stats line alone, and the Spider (803177) and Toxic (707689)
+// tooltips say nothing at all. If the intent was "one per line" rather than "one in total",
+// this is too strict and needs settling in game.
+// Pheromones from another Venomancer are left alone: they are that caster's own single slot.
+void KeepOnePheromone(Player* player, Unit* target, uint32 applied)
+{
+    std::vector<uint32> stale;
+    for (auto const& pair : target->GetAppliedAuras())
+    {
+        Aura const* aura = pair.second->GetBase();
+        SpellInfo const* other = aura->GetSpellInfo();
+        if (aura->GetCasterGUID() == player->GetGUID() && other->Id != applied && Pheromone(other))
+            stale.push_back(other->Id);
+    }
+    // Remove by identity, never through an iterator into a container that each removal
+    // callback may change.
+    for (uint32 id : stale)
+        target->RemoveAurasDueToSpell(id,player->GetGUID());
+}
 bool Select(uint32 id, SpellInfo const* info)
 {
     switch (id)
@@ -263,6 +300,10 @@ public:
         }
         if (info->Id == 805097 && spell->GetScriptValue(805097))
             ApplyVenoms(player,target);
+        // Runs after CallScriptAfterHitHandlers, so the pheromone just cast is already on
+        // the target; it is excluded by id and the others from this caster are cleared.
+        if (Pheromone(info))
+            KeepOnePheromone(player,target,info->Id);
     }
 };
 class spell_ascension_venomancer_ability : public SpellScript
@@ -294,6 +335,11 @@ class spell_ascension_venomancer_ability : public SpellScript
             {
                 Cast(player,target,803208);
                 stinger->Remove();
+                // Redundant since the lifecycle script clears 680854 whenever 803206 goes
+                // away, and kept on purpose: it still holds if the spell_script_names row
+                // binding the AuraScript to 803206 is ever missing. 803208 has Speed 0
+                // (Spell.dbc field 47), so its damage is already resolved here and still
+                // saw the stacks.
                 target->RemoveAurasDueToSpell(680854,player->GetGUID());
             }
             else
@@ -305,6 +351,34 @@ class spell_ascension_venomancer_ability : public SpellScript
                     added->SetMaxDuration(duration);
                     added->SetDuration(duration);
                 }
+                // Slot 2 of 803196 natively triggers 803220, whose effect 165 takes 19 s off
+                // Barbed Stinger's own 20 s recovery; ApplyContracts turns every 803196 effect
+                // into a dummy, so that authored trigger is replayed here. Without it the rip-out
+                // is unreachable: the stinger lasts 10 s (+1 s per cleared Exposed Flesh stack)
+                // against a 20 s cooldown. The refund is withheld on the rip-out itself, so the
+                // authored recovery stands there -- refunding both would pin the ability to a
+                // permanent 1 s cooldown and make Empowered Exoskeleton's -5 s (705981) pointless.
+                // The DBC authors the trigger unconditionally; that restriction is ours.
+                // The recovery is already running when this hook fires: SendSpellCooldown()
+                // is called from Spell::cast() (Spell.cpp:3983), before the immediate/delayed
+                // split (Spell.cpp:4075-4080). 803196 carries Speed 45.0 (Spell.dbc field 47),
+                // so it takes the delayed branch and never reaches handle_immediate().
+                // Two consequences, measured and deliberately left as they are, to be settled
+                // in game rather than guessed at here:
+                //  - the refund keys on "no stinger from THIS caster on THIS target", so a
+                //    plant on a fresh target always refunds. Bare, that leaves
+                //    20000 - 19000 = 1000 ms of recovery. With Empowered Exoskeleton (705981
+                //    effect 1, aura 107 ADD_FLAT_MODIFIER, MiscValue 11 SPELLMOD_COOLDOWN,
+                //    -5000, class mask (0,0,0x20000000) = 803196's SpellFamilyFlags) only
+                //    15000 ms remain, which is less than the 19000 reduction, so
+                //    ModifyAscensionCooldown takes its reset branch and planting on a new
+                //    target is free.
+                //  - Cast() skips the cast unless the target is alive, although effect 1 of
+                //    803220 is TARGET_UNIT_CASTER and nothing in the refund reads the enemy.
+                //    Accepted: this hit hook cannot run on a dead target, and casting 803220
+                //    on the player instead would leave its effect 0 (DUMMY,
+                //    TARGET_UNIT_TARGET_ENEMY) without a legal target.
+                Cast(player,target,803220);
             }
         }
         if (id == 805102)

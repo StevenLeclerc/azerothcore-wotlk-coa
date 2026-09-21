@@ -1,0 +1,210 @@
+-- =====================================================================================
+-- mod-ascension-compat — Sun Cleric (classe 27, famille de sorts 33)
+-- Relevé et correctif du 2026-09-21. Lecture seule en base côté enquête : ce fichier
+-- n'a PAS été appliqué.
+--
+-- CE QU'IL Y A DEDANS : deux lignes `spell_script_names` qui manquaient (P-051), et
+-- huit `spell_proc.Chance` laissés à 0, qui font tirer la probabilité DEUX FOIS (§ 3,
+-- ajouté le 2026-09-21 après revue adverse). La réparation principale de cette session
+-- — le talent « Holy Knight » (301011) — est entièrement en C++
+-- (AscensionSunClericAbilities.cpp + AscensionSunClericData.h) et n'a besoin d'aucune
+-- ligne en base.
+--
+-- -------------------------------------------------------------------------------------
+-- 1. LA LACUNE, MESURÉE EN BASE LE 2026-09-21
+--
+-- `aura_ascension_sun_cleric_lifecycle` (AscensionSunClericAuras.cpp) branche sur
+-- 56 ids ; `spell_script_names` en enregistre 89. Deux ids sur lesquels le script
+-- branche explicitement n'y figurent pas :
+--
+--     SELECT spell_id FROM spell_script_names
+--      WHERE ScriptName = 'aura_ascension_sun_cleric_lifecycle'
+--        AND spell_id IN (680888, 803238);
+--   -> 0 ligne.
+--
+-- Sans ligne, l'AuraScript n'est jamais attaché (P-051) et la branche ne tourne jamais,
+-- sans une seule ligne de journal.
+--
+-- 680888 « Blessing of Retribution » (Spell.dbc : famille 33, effet 0 = APPLY_AURA
+--   aura 287 DEFLECT_SPELLS). Il est bien enregistré sur
+--   `aura_ascension_sun_cleric_event`, mais pas sur le lifecycle. La branche manquante
+--   est AscensionSunClericAuras.cpp:70-71 :
+--       if (id == 680888) GetAura()->SetUsingCharges(false);
+--   Elle existe parce que `ApplyContracts` pose ProcCharges = 1 sur ce sort
+--   (AscensionSunClericContracts.cpp:138-139) et que la consommation de la charge est
+--   assurée par le script d'événement lui-même (`case 680888: GetAura()->Remove();`,
+--   AscensionSunClericEvents.cpp:354). Sans le lifecycle, la charge est dépensée DEUX
+--   FOIS sur le même déclenchement : par le cœur, puis par le script. Le résultat
+--   observable est aujourd'hui le même (l'aura part au premier déviement), donc ce
+--   n'est pas une promesse rompue — c'est un double comptage latent, qui mordrait dès
+--   qu'un import donnerait plus d'une charge au sort.
+--
+-- 803238 « Sun Ray » (Spell.dbc : famille 33, AUCUN effet — c'est `ApplyContracts`
+--   qui lui injecte une aura DUMMY et une durée, AscensionSunClericContracts.cpp:105-110).
+--   Les branches manquantes sont AscensionSunClericAuras.cpp:83-84 et :128-129 :
+--       if (id == 803238) Refresh(player);
+--   `Refresh` est ce qui pose ou retire le remplacement temporaire de Radiant Cascade
+--   par 504764 (AscensionSunCleric.cpp:356-363). Sans ces deux lignes, l'apparition et
+--   la disparition du bouton attendent le PREMIER de ces trois rattrapages, et non le
+--   seul tick de classe :
+--     * le tick de classe, inconditionnel dans OnPlayerUpdate, toutes les 500 ms
+--       (AscensionSunCleric.cpp:384-387) ;
+--     * la fin de CHAQUE lancer de sort de la classe (AscensionSunClericAbilities.cpp:218,
+--       `Refresh(player);` en fin de OnSpellCast) ;
+--     * l'application de l'une des quatre auras 561328 / 704585 / 805267 / 300314
+--       (AscensionSunClericAuras.cpp:57-58).
+--   « Au plus une demi-seconde » reste donc une borne SUPÉRIEURE correcte, mais le tick
+--   n'est pas le seul chemin : en combat, le prochain sort lancé rattrape presque
+--   toujours avant lui. Ce n'est pas un talent mort, et le défaut réparé est plus petit
+--   que ce que la seule mention du tick laisserait croire.
+--
+-- -------------------------------------------------------------------------------------
+-- 2. CE QUE CE FICHIER NE FAIT PAS, ET POURQUOI
+--
+-- « Solar Guardian » (704581), le talent que le tracker amont signale comme non
+--   implémenté (issue #502, open) : RIEN à faire. Son infobulle ne promet qu'une chose,
+--   « Reduces the duration of stun effects on you by $s2% », et $s2 désigne l'effet 2
+--   (slot 1), qui est une aura 232 SPELL_AURA_MECHANIC_DURATION_MOD, MiscValue 12
+--   (MECHANIC_STUN, SharedDefines.h:1414), valeur -20. Le cœur l'applique tout seul,
+--   dans Unit::CalculateSpellDuration (Unit.cpp:12140,
+--   GetTotalAuraModifierByMiscValue). L'issue amont est un FAUX POSITIF pour nous.
+--   Reste, non implémenté et volontairement : son slot 0, une aura 4 DUMMY de valeur
+--   -25 avec MiscValue 5 (= MECHANIC_FEAR). AUCUNE source ne la décrit — ni l'infobulle
+--   (muette), ni le tracker amont, ni une table du module. Rien n'est inventé ici.
+--
+-- « An'she's Blessing » (520778), trouvé par la chasse aux auras 354 : son infobulle est
+--   complète (« You now restore health equal to $s1% of all damage you deal. », $s1 = 5
+--   lu dans Spell.dbc) et son sort de soin 520921 existe, mais AUCUN JOUEUR NE PEUT
+--   L'OBTENIR. Vérifié : absent de CharacterAdvancement.dbc (les 219 nœuds de talent de
+--   la famille 33), absent de SkillLineAbility.dbc, et absent de toute table
+--   `%spell%`/`%trainer%`/`%createinfo%`/`%coa%` d'`acore_world`. Câbler ce talent
+--   serait câbler du code que rien n'atteint. Signalé, pas écrit.
+--
+-- « Sunlight » (92136 -> 704911), point À INSTRUIRE, rien n'est changé. Son infobulle
+--   (Spell.dbc champ 170) dit « ...restoring ${$704911m1+$BH*0.15} health to up to
+--   $704911i allies within $704911a1 yds, prioritizing the lowest health allies. »
+--   $704911i = MaxAffectedTargets de 704911 = 5 (champ 212). Or le code
+--   (AscensionSunCleric.cpp:282-284) passe ce plafond de 5 À Allies(), et Allies()
+--   (AscensionSunCleric.cpp:135-152) pousse le centre — ici le LANCEUR — dans la liste
+--   AVANT le resize(count). Le lanceur consomme donc l'une des 5 places, et seuls
+--   4 alliés sont soignés. C'est exactement le motif corrigé dans Holy Knight (301012),
+--   où l'infobulle de 301011 tranche (« additionally heals up to 5 nearby allies ...
+--   of the amount it heals you » : le lanceur est soigné par le Gavel, les 5 sont
+--   d'autres). Ici l'infobulle est AMBIGUË sur le statut du lanceur : « up to 5 allies »
+--   peut l'inclure. On ne devine pas, on signale.
+--   À NE PAS confondre avec une divergence de style : chaque soin de zone de la classe
+--   suit SON infobulle, et elles diffèrent. 807547 « Vow of Light » trie par DISTANCE
+--   (AscensionSunClericEvents.cpp:191-195) parce que son texte dit « heals the NEAREST
+--   nearby ally ». 534267 « Heat Wave » trie par points de vie autour de la CIBLE et
+--   l'exclut (Events.cpp:300-310) parce que son texte dit « up to $801215i of the
+--   TARGET's lowest health nearby allies ». Il n'y a pas de sémantique de classe
+--   unique à invoquer.
+--
+-- P-071 (modificateur à masque VIDE sur toute la famille) : relevé au BON index
+--   (P-064 : mot j de l'effet e = champ 122+3e+j). Sur 242 effets 107/108 de la
+--   famille 33, QUATRE ont un masque vide, et aucun ne mord aujourd'hui :
+--     * 301242 « Hot Spot », effets 1 et 2 : masque vide mais valeur 0 — un
+--       ADD_PCT_MODIFIER de 0 % ne change rien. L'effet 0, lui, reçoit déjà son masque
+--       en dur (AscensionSunClericContracts.cpp:118-119) ;
+--     * 704394 « Dawn Hidden », effet 1 : aura 108, MiscValue 14 SPELLMOD_COST,
+--       valeur -50, masque VIDE. Celui-là diviserait par deux le coût en mana de TOUS
+--       les sorts de la classe — mais RIEN NE LE POSE : aucun sort du DBC ne le
+--       déclenche ni ne le nomme en aura de lanceur/cible (champs 24-27), le module ne
+--       le lance pas, il n'est ni dans SkillLineAbility.dbc ni dans
+--       CharacterAdvancement.dbc, et la base n'a ni `spell_linked_spell` ni
+--       `spell_script_names` pour lui. Aucun masque n'est deviné ici, et le sort n'est
+--       pas désarmé non plus : il est inerte.
+--
+-- -------------------------------------------------------------------------------------
+-- 3. HUIT PROCS TIRÉS DEUX FOIS — CORRECTIF AJOUTÉ LE 2026-09-21
+--
+-- Une première version de ce relevé affirmait que « les 54 sorts branchés sur
+-- aura_ascension_sun_cleric_event ont tous leur ligne spell_proc à ProcFlags 1048575,
+-- Chance 100 ». C'était FAUX, et la base le dit :
+--
+--     SELECT ProcFlags, Chance, COUNT(*) FROM spell_proc
+--      WHERE SpellId IN (SELECT spell_id FROM spell_script_names
+--                         WHERE ScriptName = 'aura_ascension_sun_cleric_event')
+--      GROUP BY ProcFlags, Chance;
+--   -> 1048575 | 100 | 45
+--      1048575 |   0 |  9
+--
+-- LE MÉCANISME (lu, pas supposé). Une ligne `spell_proc` à Chance = 0 et
+-- ProcsPerMinute = 0 n'est pas neutre : le cœur y substitue la ProcChance du DBC —
+-- SpellMgr.cpp:2114-2115, « if (!procEntry.Chance && !procEntry.ProcsPerMinute)
+-- procEntry.Chance = float(spellInfo->ProcChance); ». Il y a ensuite DEUX barrières,
+-- et les deux doivent passer : SpellAuras.cpp:2216 appelle CallScriptCheckProcHandlers
+-- (notre Check(), donc notre Chance()), puis SpellAuras.cpp:2276-2278 tire
+-- roll_chance_f(CalcProcChance(...)). Notre Chance() (AscensionSunCleric.cpp:182-191)
+-- tire roll_chance_i(info->ProcChance) — la MÊME valeur. Le talent proc donc au CARRÉ
+-- de son taux annoncé.
+--
+-- LE TAUX ANNONCÉ EST ÉCRIT, il n'est pas deviné : sept des huit infobulles portent le
+-- jeton $h / $h1, qui EST la ProcChance du sort (Spell.dbc champ 35). Rien n'est inventé
+-- ici, la colonne « annoncé » est la lecture du champ 35 que l'infobulle référence :
+--
+--   id      nom                   ProcChance  appel Chance()          annoncé  effectif
+--   707629  Sunflare Aegis            30      Events.cpp:83            30 %     9,00 %
+--   680663  Blessed Bulwark           25      Events.cpp:75            25 %     6,25 %
+--   805647  Knight of Dawn            20      Events.cpp:104           20 %     4,00 %
+--   806699  Odyn's Vanguard           20      Events.cpp:100           20 %     4,00 %
+--   804629  Spears of Glory           15      Events.cpp:91            15 %     2,25 %
+--   802935  Sunsworn                  10      Events.cpp:100           10 %     1,00 %
+--   806058  Herald of Purity           8      Events.cpp:106            8 %     0,64 %
+--   300369  Fire from the Heavens     10      Events.cpp:91         (muette)    1,00 %
+--
+--   300369 est le seul dont l'infobulle ne porte AUCUN taux (son texte décrit l'effet
+--   de 300370, pas une chance). Le seul chiffre écrit pour lui est la ProcChance 10 du
+--   DBC ; le tracker amont est muet sur les huit (recherche des huit ids dans
+--   audit-coa-issues.jsonl : 0 entrée, sauf #82 pour 704920 qui ne parle pas de taux).
+--
+-- LA CONVENTION DE LA MAISON EST BIEN 100, et un témoin le prouve : 92137
+-- « Angelic Presence » est dans la MÊME LIGNE de code que 680663
+-- (AscensionSunClericEvents.cpp:74-75, « if (id == 92137 || id == 680663)
+--  return avoided && Chance(player, id); »), sa ProcChance vaut 20 comme les autres, et
+-- sa ligne spell_proc porte Chance = 100. Les 45 autres lignes du script aussi. Le 0 de
+-- ces huit-là est un oubli, pas un choix : la ligne `spell_proc` cède le tirage au
+-- script, qui le fait au taux du DBC. Les dix lignes sont par ailleurs IDENTIQUES champ
+-- à champ (ProcFlags 1048575, SpellTypeMask 7, SpellPhaseMask 2, HitMask 32767,
+-- AttributesMask 2, ProcsPerMinute 0) : seul `Chance` diffère.
+--
+-- LE NEUVIÈME, 704920 « Cultivate Divinity », RESTE À 0, ET C'EST VOLONTAIRE.
+-- Son Chance = 0 n'est pas inerte : c'est lui qui donne le taux promis. Son infobulle
+-- dit « has a $h% chance », donc 20 % (champ 35), et son branchement
+-- (AscensionSunClericEvents.cpp:111, « case 704920: return healing && direct &&
+-- Any(info,{500141,500143}); ») n'appelle PAS Chance(). Le repli du cœur tire donc une
+-- fois, à 20 % : exactement ce que l'infobulle promet. Le mettre à 100 le ferait proc à
+-- tous les coups — ce serait une régression. NE PAS Y TOUCHER.
+--
+-- LE CHOIX FAIT ICI, et pourquoi c'est celui-là : deux réparations étaient possibles,
+-- mettre la ligne à 100 (le script garde le tirage) ou retirer le Chance() du script
+-- (le cœur garde le tirage). On prend la première parce que c'est la convention des
+-- 45 autres lignes et du témoin 92137, parce qu'elle ne touche que de la donnée, et
+-- parce que le Chance() du script porte AUSSI le cooldown interne (ScheduleEvent) pour
+-- les sorts qui en ont un — le retirer perdrait ce garde-fou.
+--
+-- PRISE D'EFFET DE CE BLOC : `spell_proc` est rechargeable à chaud
+-- (`.reload spell_proc`) ; contrairement au § 1, il n'exige pas de redémarrage.
+-- RETOUR ARRIÈRE : remettre les huit à 0.
+--
+-- -------------------------------------------------------------------------------------
+-- PRISE D'EFFET : pas de rechargement à chaud. `spell_script_names` n'est lu qu'une
+-- fois, par ObjectMgr::LoadSpellScriptNames ; il faut redémarrer le worldserver — ce
+-- qui est de toute façon nécessaire, la réparation de Holy Knight étant du C++.
+-- RETOUR ARRIÈRE : le DELETE seul, puis redémarrage.
+-- =====================================================================================
+
+DELETE FROM `spell_script_names`
+ WHERE `ScriptName` = 'aura_ascension_sun_cleric_lifecycle'
+   AND `spell_id` IN (680888, 803238);
+
+INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
+(680888, 'aura_ascension_sun_cleric_lifecycle'),  -- Blessing of Retribution : SetUsingCharges(false)
+(803238, 'aura_ascension_sun_cleric_lifecycle');  -- Sun Ray : Refresh() a l'application et au retrait
+
+-- § 3 : rendre au cœur son tirage neutre (Chance = 100) pour les huit sorts dont le
+-- script refait déjà le tirage au taux du DBC. 704920 est DÉLIBÉRÉMENT absent : sa
+-- ligne à 0 est ce qui lui donne les 20 % de son infobulle.
+UPDATE `spell_proc` SET `Chance` = 100
+ WHERE `SpellId` IN (300369, 680663, 707629, 802935, 804629, 805647, 806058, 806699)
+   AND `Chance` = 0;

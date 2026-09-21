@@ -1,0 +1,120 @@
+-- =====================================================================================
+-- mod-ascension-compat — VENOMANCER (classe 29, famille de sorts 35)
+--
+-- BARBED STINGER : le dard planté ne grossissait jamais, donc l'arrachage ne montait
+-- jamais en dégâts. Motif P-070 / P-051 : le gestionnaire existe, complet et correct,
+-- et l'aura qu'il pose n'était posée par RIEN — parce que le script qui la pose n'était
+-- pas enregistré sur le sort.
+--
+-- Chaîne mesurée le 2026-09-21 dans /opt/coa/server/data/dbc/Spell.dbc (lecture seule) :
+--
+--   803196 « Barbed Stinger »  recovery 20000 ms, catégorie 1099, portée 5 (40 yd)
+--       effet 0 = 64 TRIGGER_SPELL -> 803191 « Venomtip »
+--                    -> 803192 -> 803208 (dégâts d'arrachage) + 803206 (le dard)
+--       effet 1 = 3 DUMMY, MiscValueB 1, Trigger 680854
+--       effet 2 = 64 TRIGGER_SPELL -> 803220 « Reset Effect »
+--       infobulle : « Clears Exposed Flesh stacks and flings a Barbed Stinger into an
+--       enemy for $803206d, plus an additional $/1000;805095s2 sec per cleared stack.
+--       Recasting this ability on the same target will rip the stinger out, pulling them
+--       to you and dealing Nature damage, scaling based on how long the stinger was left
+--       in them. »
+--
+--   803206 « Barbed Stinger » (le dard) durée index 1 = 10 000 ms
+--       effet 0 = 3 DUMMY, aura 271, masque (0, 262144, 0)
+--       effet 1 = 6 APPLY_AURA, aura 23 PERIODIC_TRIGGER_SPELL, période 1000 ms,
+--                 Trigger 803207
+--
+--   803207 effet 0 = 175 ASCENSION_MODIFY_AURA_STACKS, Trigger 680854, MiscValue 0,
+--       MiscValueB 1. Le gestionnaire du cœur (SpellEffects.cpp, EffectAscensionModify-
+--       AuraStacks) lit le delta dans MiscValue, PAS dans MiscValueB : 0 pile ajoutée.
+--       C'est pour cela que le module pilote cette étape lui-même.
+--
+--   680854 « Barbed Stinger » durée index 18 = 20 000 ms, StackAmount 15,
+--       effet 0 = aura 271, +50 %, masque (0, 262144, 0) = les SpellFamilyFlags de
+--       803208. Infobulle : « The stinger will deal ${$w1}% increased damage when ripped
+--       out. » C'est l'aura qui fait monter l'arrachage.
+--
+-- Côté module, AscensionVenomancerContracts.cpp (branche `id == 803206`) remplace l'aura 23 de l'effet 1
+-- de 803206 par une PERIODIC_DUMMY sans trigger, et AscensionVenomancerAuras.cpp
+-- (aura_ascension_venomancer_lifecycle::Tick, branche `id == 803206 && slot == 1`) pose
+-- 680854 à chaque tick :
+--
+--   if (id == 803206 && slot == 1) { PreventDefaultAction(); Cast(player,target,680854); }
+--
+-- MAIS 803206 n'était lié qu'à `spell_ascension_venomancer_ability` (un SpellScript).
+-- Sans ligne pour l'AuraScript, `AuraEffect::PeriodicTick` appelait bien
+-- `CallScriptEffectPeriodicHandlers` (SpellAuraEffects.cpp:1224) sans qu'aucun script y
+-- soit accroché : le tick ne faisait rien, 680854 n'était posée par personne, et
+-- l'arrachage 803208 ne montait jamais. Le `RemoveAurasDueToSpell(680854, ...)` de
+-- AscensionVenomancerAbilities.cpp retirait donc une aura toujours absente.
+--
+-- Vérifié comme posé par RIEN d'autre. Balayage complet des 234 champs de Spell.dbc pour
+-- la valeur 680854 : QUATRE sorts la nomment, et aucun ne la pose.
+--   803196      effet 1 : 3 DUMMY (et ApplyContracts neutralise de toute façon 803196) ;
+--   803207      effet 0 : 175, inerte tant que le cœur lit MiscValue au lieu de MiscValueB ;
+--   803209 « Rip Out Effect » effet 1 : 164 REMOVE_AURA — il l'ENLÈVE, et rien ne lance
+--               803209 (aucun EffectTriggerSpell vers lui, aucun `Cast` du module, aucune
+--               ligne `spell_linked_spell`) ;
+--   803284 « Barbed Stinger » rang « NPC » effet 1 : 3 DUMMY, donc aucun déclenchement.
+-- Les deux autres occurrences de la valeur 680854 dans le fichier (2151240 et 2151358,
+-- champ 131) sont des SpellVisual, pas des références de sort.
+-- Aucun CasterAuraSpell / TargetAuraSpell ne la nomme, aucune ligne `spell_linked_spell`,
+-- aucun autre `Cast` du module.
+--
+-- À SIGNALER, hors périmètre de ce fichier : 803284 est un jumeau NON TRAITÉ de 803196.
+-- Famille 35, SpellFamilyFlags (0x0,0x0,0x20000000) — exactement celles de 803196 — donc
+-- le -5 s d'Empowered Exoskeleton (705981 effet 1, masque relu aux champs 122+3e) le vise
+-- aussi ; son infobulle décrit tout le mécanisme d'arrachage. Il n'est dans aucune liste
+-- d'ApplyContracts, n'a aucune ligne `spell_script_names`, et est absent de
+-- SkillLineAbility.dbc (803196 y figure, ligne de compétence 105) : injouable en l'état.
+--
+-- Une seule ligne suffit : lier 803206 à l'AuraScript déjà écrit. Les deux scripts
+-- coexistent sur le même id (SpellScript + AuraScript), comme 800921, 806154 et 807244
+-- le font déjà dans ce même module.
+--
+-- Effet de bord contrôlé : lier `aura_ascension_venomancer_lifecycle` à 803206 active
+-- aussi ses hooks Apply / Remove / Calculate / Period / UpdateTick pour ce sort. Relus
+-- un par un : Apply ne fait que poser une valeur de script ; Calculate, Period et
+-- UpdateTick n'ont aucun branchement qui teste 803206 ni une chaîne dont il ferait partie
+-- (803206 n'a pas de rang) ; Remove en a un, AJOUTÉ EXPRÈS avec ce fichier, qui retire
+-- 680854 quand le dard disparaît — voir ci-dessous.
+--
+-- CONSÉQUENCE DE CYCLE DE VIE, traitée en C++ : une fois 680854 réellement posée, plus
+-- rien ne la retirait à la fin du dard. Elle dure 20 000 ms contre 10 000 ms pour 803206
+-- et chaque tick la rafraîchit, donc les piles d'un dard expiré étaient héritées par le
+-- suivant (`Unit::_TryStackingOrRefreshingExistingAura` rafraîchit l'aura existante du
+-- même lanceur au lieu de la repartir à zéro) : on pouvait arracher à 15 piles, +750 %,
+-- une seconde après une replantation, alors qu'un dard seul n'autorise que 10 ticks.
+-- `AscensionVenomancerAuras.cpp`, `aura_ascension_venomancer_lifecycle::Remove`, retire
+-- désormais 680854 dès que 803206 s'en va (expiration, dissipation ou arrachage), ce qui
+-- reprend l'appariement voulu par 803209, dont les deux effets 164 REMOVE_AURA visent
+-- justement 803206 et 680854 ensemble.
+--
+-- Trouvaille indépendante, confirmée ensuite par l'entrée 1459 du tracker amont
+-- (jealous-sound/azerothcore-wotlk-coa), qui porte le même diagnostic et la même
+-- correction ; toutes les valeurs ci-dessus ont été relues dans le DBC ici.
+--
+-- Le nom de ce fichier est la clé d'update : NE PLUS LE RENOMMER.
+-- Prise d'effet à chaud : AUCUNE. Aucune commande de rechargement ne couvre
+-- `spell_script_names` sur ce cœur — la table `command` ne porte que `reload all scripts`,
+-- `reload event_scripts`, `reload smart_scripts`, `reload spell_scripts` et
+-- `reload waypoint_scripts`, `reload all scripts` n'appelle que ces trois-là, et
+-- `reload spell_scripts` vise la table `spell_scripts`, qui n'a rien à voir. Un
+-- redémarrage du worldserver est donc nécessaire.
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUI N'EST PAS RÉPARÉ ICI
+--
+--   * L'effet 175 du cœur lit MiscValue au lieu de MiscValueB : correctif générique,
+--     hors du périmètre d'un module, non touché. Tant qu'il reste, 803207 est inerte et
+--     c'est le module qui pose 680854.
+--   * L'accessibilité de l'arrachage (803196 recovery 20 s contre un dard de 10 s) est
+--     traitée en C++ dans AscensionVenomancerAbilities.cpp, pas ici.
+--   * Rien de ce fichier n'a été éprouvé en jeu.
+-- =====================================================================================
+
+DELETE FROM `spell_script_names`
+    WHERE `spell_id` = 803206 AND `ScriptName` = 'aura_ascension_venomancer_lifecycle';
+
+INSERT INTO `spell_script_names` (`spell_id`, `ScriptName`) VALUES
+(803206, 'aura_ascension_venomancer_lifecycle');

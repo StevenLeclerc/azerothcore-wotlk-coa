@@ -133,6 +133,44 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].MiscValue = SPELLMOD_CRIT_DAMAGE_BONUS;
     if (id == 806522)
         info->Effects[1].SpellClassMask = flag96(0, 8388608, 0);
+    if (id == 804926)
+    {
+        // Runes of War raises "all the effects of your Follow Ups" by 30%, and the client ships
+        // that modifier with an EMPTY class mask. SpellInfo::IsAffected (SpellInfo.cpp:1422)
+        // only tests the flags when the mask is non-empty, so the buff raised every family 25
+        // spell instead, healing and Testaments included (P-071).
+        // The module's own Follow Up branch is `Family(info, 2, 1) || info->Id == 500689`
+        // (AscensionTemplarAbilities.cpp:141, and the same pairing at :79 and :287), so the set
+        // is word 2 bit 0 - the 34 ranks of Righteous Lunge, Holy Cleave, Vindication and
+        // Condemn - PLUS Divine Fury 500689, which 563269 installs as the temporary replacement
+        // for Vindication (AscensionTemplarAuras.cpp:156). A Templar holding 563269 casts
+        // Divine Fury in place of Vindication, so leaving it out would drop the bonus on his
+        // main Follow Up. Its own client description says it "Scales with modifiers to
+        // Vindication": this is the client's statement, not an inference.
+        // 500689 does not carry word 2 bit 0; it carries word 0 bit 0x80000, the Vindication
+        // bit. Spell.dbc scan of all 880 family 25 spells: word 0 bit 0x80000 is carried by the
+        // seven Vindication ranks - already in the set through word 2 bit 0 - and by 500689,
+        // and by nothing else. Adding it therefore widens the mask by exactly one spell.
+        // Deliberately NOT used: word 2 bit 0x2000, which 500689 also carries. That bit is
+        // shared with 501567/501568/501569, a different ability that merely shares the name
+        // "Divine Fury": all three carry word 2 bit 0x80, so Breaker() (AscensionTemplar.h:33)
+        // counts them as Oath Breakers, not Follow Ups. IsAffected ORs across words, so that
+        // bit would hand the 30% to three Oath Breaker ranks the tooltip never mentions.
+        if (info->Effects[0].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
+            info->Effects[0].MiscValue == SPELLMOD_ALL_EFFECTS && !info->Effects[0].SpellClassMask)
+            info->Effects[0].SpellClassMask = flag96(0x80000, 0, 1);
+        // "Lasts 8 sec or until you use 5 Follow Ups": the client carries no charges, so the
+        // second half of that sentence never happened. Charges are what Player::RemoveSpellMods
+        // spends, one per cast the modifier above actually touched - so exactly one per Follow
+        // Up, and the fifth still gets its bonus before the buff goes. Nothing else can spend
+        // them: the spell owns no proc aura and has no spell_proc row.
+        // Note that charges belong to the AURA, not to the effect: Aura::ModCharges removes the
+        // whole aura at zero, so the fifth Follow Up also ends effect 1 (aura 138
+        // MOD_MELEE_HASTE, MiscValue 127, +20%), which the tooltip's "Lasts 8 sec or until you
+        // use 5 Follow Ups" covers as one buff.
+        if (!info->ProcCharges)
+            info->ProcCharges = 5;
+    }
     if (id == 806523)
     {
         dummy(0);

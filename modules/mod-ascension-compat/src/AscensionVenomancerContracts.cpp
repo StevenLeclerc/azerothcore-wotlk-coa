@@ -74,6 +74,20 @@ void ApplyContracts(SpellInfo* info)
         // Guarded on the three fields it depends on, so a DBC import that authors something else
         // here is left alone rather than silently neutered. -> P-071
         dummy(EFFECT_0);
+    if (id == 630887 && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT1 &&
+        info->Effects[EFFECT_0].SpellClassMask == flag96())
+        // Same failure as 680800 above, second occurrence in this family: "Deadly Neurotoxins"
+        // rank "Creeping Poison Ticks" authors -15 flat on SPELLMOD_EFFECT1 with an EMPTY
+        // EffectSpellClassMask, which subtracts 15 from Effect[0] of EVERY family-35 spell the
+        // holder casts. Its sibling 630886 carries a real mask (0, 0, 0x10000000); this one has
+        // neither description nor tooltip, so nothing names the spell its mask should hold and a
+        // guessed mask would not miss its target either. Nothing on the server grants it today
+        // (no DBC trigger, no CasterAura/TargetAuraSpell, no SkillLineAbility row, no
+        // spell_linked_spell, no spell_script_names, no cast in the module), so this is a
+        // disarmed landmine rather than a measured repair. Guarded on the three fields it
+        // depends on. -> P-071
+        dummy(EFFECT_0);
     if (id == 504796 || id == 504803)
         info->Effects[1].Effect = 0; // Explicit self-heal follows both damage and healing copies.
     if (id == Brood)
@@ -299,6 +313,13 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].ApplyAuraName = SPELL_AURA_PERIODIC_DUMMY;
         info->Effects[1].TriggerSpell = 0;
     }
+    // 807153 "Spore" (rank "Dummy") is applied by nothing: a sweep of all 234 fields of
+    // Spell.dbc finds no other spell holding its id, it is absent from SkillLineAbility.dbc
+    // and from ascension_custom_class_spell, no spell_linked_spell row names it, and the
+    // only Cast sites in this module are the ones keyed on 804983. The mushroom it used to
+    // carry runs through effect 2 of 804983 above instead. It stays in the data because
+    // 804983's description reads "$807153t1" for the ten-second timer, so this contract and
+    // the 807153 branches of the lifecycle script are kept inert rather than deleted.
     if (id == 807153)
     {
         info->Effects[0].ApplyAuraName = SPELL_AURA_PERIODIC_DUMMY;

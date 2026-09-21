@@ -1,0 +1,160 @@
+-- =====================================================================================
+-- mod-ascension-compat — Felsworn (classe 14, CLASS_DEMON_HUNTER, famille de sorts 20)
+-- Passe « talents et mécaniques mortes », 2026-09-21.
+--
+-- ⚠ CE FICHIER NE CONTIENT AUCUNE INSTRUCTION SQL, ET C'EST LE RÉSULTAT.
+-- La revue n'a trouvé AUCUN correctif à faire en donnée pour cette classe. Le fichier
+-- existe pour que la prochaine session ne refasse pas l'enquête — et surtout pour
+-- qu'elle n'implémente pas une seconde fois cinq talents qui marchent déjà.
+--
+-- -------------------------------------------------------------------------------------
+-- 1. LES CINQ TALENTS « CATÉGORIE B » DU RECENSEMENT SONT VIVANTS. NE PAS LES CÂBLER.
+-- -------------------------------------------------------------------------------------
+-- Le triage des 199 talents « promesse sans handler » (docs/ANALYSE-triage-199-talents.md,
+-- outils/sonde-triage-talents.py) classe cinq sorts Felsworn en (B). Son critère est
+-- MÉCANIQUE : « le sort porte un effet DUMMY ou des ProcFlags, et son id n'apparaît ni
+-- dans spell_script_names, ni dans les sources ». Ce critère ne voit pas les talents
+-- implémentés PAR LA DONNÉE, avec des types d'aura que le cœur gère nativement. Les cinq
+-- sont dans ce cas. Vérifié effet par effet contre Spell.dbc et contre le cœur :
+--
+--   807430 « Suffering »  — infobulle (tracker amont #961, identique au champ 170 du DBC) :
+--       « Increases the duration of Skull of Gul'dan by 5 sec. »
+--     Effet 0 = aura 107 ADD_FLAT_MODIFIER, MiscValue 1 = SPELLMOD_DURATION, +5000 ms,
+--     EffectSpellClassMask (0, 0, 64) — champs 122/123/124, index P-064.
+--     Skull of Gul'dan 800225 : famille 20, SpellFamilyFlags (0, 0, 64) → le masque tombe
+--     exactement dessus. DurationIndex 1 = 10 000 ms, donc 10 s → 15 s. SpellInfo.cpp:1467
+--     saute même le test IsAffectedBySpellMods pour SPELLMOD_DURATION. Aucun code requis.
+--     L'effet 2 (Effect=3 SPELL_EFFECT_DUMMY portant une aura 108 inerte, masque (0,0,1))
+--     est ce qui a fait classer le talent en (B) : un effet DUMMY sur un passif ne fait
+--     rien, et l'infobulle ne lui promet rien. Laissé tel quel, à dessein.
+--
+--   804609 « Gul'dan's Gift » — infobulle (#3417) : « Increases the effectiveness of your
+--       Skull of Gul'dan by 50%, but its cooldown is increased by 30 sec. »
+--     Effet 0 = aura 108, MiscValue 8 = SPELLMOD_ALL_EFFECTS, +50 %, masque (0,0,64).
+--     Effet 1 = aura 107, MiscValue 11 = SPELLMOD_COOLDOWN, +30 000 ms, masque (0,0,64).
+--     800225 a RecoveryTime = 90 000 ms (champ 29) et ses deux effets sont des auras 133
+--     et 132 (santé et énergie max, +25 %) : les deux modificateurs mordent. Même effet 2
+--     DUMMY inerte que Suffering.
+--
+--   804611 / 807901 / 807914 « Azzinoth's Rage » rangs 1-2-3 — infobulle (#1073) :
+--       « Increases your Armor penetration by 10/20/30% and your expertise by 4/8/12. »
+--     Effet 0 = aura 280 SPELL_AURA_MOD_ARMOR_PENETRATION_PCT (valeurs 10/20/30),
+--     effet 1 = aura 240 SPELL_AURA_MOD_EXPERTISE (4/8/12). L'aura 240 a un vrai handler
+--     (SpellAuraEffects.cpp:305, HandleAuraModExpertise). L'aura 280 est consommée dans
+--     Unit.cpp:2289 (Unit::CalcArmorReducedDamage), et la condition d'éligibilité y est
+--     EquippedItemClass == -1 : les trois rangs le portent (champ 68 = -1). Rien à écrire.
+--     Les rangs ne se cumulent pas : AscensionCompat.cpp SetTalentRank retire TOUS les
+--     SpellIds du nœud avant d'apprendre le rang choisi (vérifié, pas supposé).
+--
+-- Les 55 sorts Felsworn que le tracker amont signale « Spell Script / Aura Handler Not
+-- Implemented » et qui n'apparaissent nulle part dans les sources relèvent presque tous
+-- de la même illusion : modificateurs de sort, auras de statistique, absorption de soin.
+-- Trois exemples vérifiés au hasard :
+--   803903 « Fel Haze » (« Blood of Mannoroth ... ignore all enemy Armor ») : aura 107
+--     SPELLMOD_EFFECT1 +100 sur le masque (0x200000,0,0) ; Blood of Mannoroth 802075 a ce
+--     drapeau, et son effet 0 est une aura 280 de valeur 0 → +100 = 100 % d'armure ignorée.
+--   500067 « Fel Monstrosity » (« +Stamina, +Agility, +size ») : les deux statistiques sont
+--     des auras 137, et la taille passe par un PERIODIC_TRIGGER_SPELL (9 999 ms) de 500076,
+--     qui porte une aura 61 MOD_SCALE +10 et dure 11 000 ms — entretenue en continu.
+--   561201 « Oppressive Ruin » : n'ajoute qu'une durée ; l'absorption de soin est l'aura 301
+--     de Ruin 801895 et de ses huit rangs.
+--
+-- -------------------------------------------------------------------------------------
+-- 2. CE QUI ÉTAIT VRAIMENT MORT EST CORRIGÉ EN C++, PAS EN DONNÉE
+-- -------------------------------------------------------------------------------------
+--   802076 / 802110 « Pit Lord's Strength » rangs 1 et 2 :
+--       « Your Annihilation now affects $s1 additional attack (1 puis 2) and your Physical
+--         damage dealt is now increased by $s2% (3 puis 6). »
+--     La moitié « dégâts physiques » est une aura 79 native : elle marchait.
+--     La moitié « attaque supplémentaire » était morte. C'est une aura 107 de MiscValue 4
+--     (SPELLMOD_CHARGES) dont le masque (0x20000000, 0, 0) est exactement le
+--     SpellFamilyFlags d'Annihilation 803904. Le cœur l'aurait donnée à
+--     Aura::CalcMaxCharges — or le script du module tient SON PROPRE compteur, écrit en dur
+--     à 5, et ne lisait jamais cette valeur. Le talent était donc sans effet.
+--     Pire : spell_proc.Charges vaut 0 pour 803904 (= pas de limite de charges), et le
+--     modificateur transformait ce 0 en 1, si bien qu'un Felsworn AYANT le talent voyait
+--     son aura tomber au premier proc natif — l'inverse de la promesse.
+--     Réparé dans AscensionFelsworn.cpp (AnnihilationCharges) et AscensionFelswornAuras.cpp.
+--     Le 5 vient de Spell.dbc (803904 ProcCharges = 5, champ 36 relu ; l'infobulle le cite :
+--     « Your next $n direct instances of damage ») ; aucun chiffre n'est inventé.
+--     Entrée amont correspondante : tracker #1017, « Felsworn: "Pit Lord's Strength"
+--     (Spell ID: 802076) — Spell Script / Aura Handler Not Implemented », état closed, pr=false,
+--     qui cite la même infobulle mot pour mot et relève « Zero occurrences of 802076 across all
+--     280 source files ». La passe précédente avait écrit que ce talent n'avait AUCUNE entrée au
+--     tracker : c'est faux, elle ne l'y avait pas cherché.
+--     Autre rectification de comptage : le tracker porte 101 entrées dont le titre contient
+--     « Felsworn » (102 sans égard à la casse, 123 en comptant les corps), et non 108.
+--     Le SetCharges(0) d'AscensionFelswornAuras.cpp N'EST PAS redondant et ne doit pas être
+--     retiré : ApplyContracts remet bien ProcFlags/ProcCharges du SpellInfo à zéro, mais la ligne
+--     spell_proc de 803904 (ProcFlags = 1048575, Charges = 0, relue en base) les rétablit, et
+--     Aura::CalcMaxCharges (SpellAuras.cpp:909-918) lit cette ligne, pas le SpellInfo. Le système
+--     de proc natif reste donc actif pour 803904 et consommerait la charge que le talent crée.
+--
+-- -------------------------------------------------------------------------------------
+-- 3. SIGNALÉ, NON CORRIGÉ — à établir avant d'y toucher
+-- -------------------------------------------------------------------------------------
+--   800222 « The Demon Within » : aura 42 PROC_TRIGGER_SPELL → 804216 (Inner Demon),
+--     ProcChance 100, ExcludeCasterAura 804216, infobulle « If you reach 6 Felfury, you
+--     will consume it to enter Demon Form ». ProcFlags = 0 dans le DBC, AUCUNE ligne
+--     spell_proc, aucune mention dans le cœur ni dans le module : le mécanisme est mort
+--     (P-045 + P-070). Il n'est PAS réparé ici parce qu'il n'est plus censé être accordé :
+--     800222 ne figure que dans AscensionCustomClassData.h::LegacyGeneratedClassSpells,
+--     la liste que AscensionCompat.cpp RETIRE à la connexion quand l'octroi courant ne
+--     l'autorise pas ; il est absent de ClassSpells, de l'arbre CharacterAdvancement.dbc,
+--     de AscensionLiveBaseline::Spells et de UnresolvedTrainerSpells. 20 personnages le
+--     connaissent encore en base (character_spell). Le réparer rendrait vivant un passif
+--     que la réconciliation efface : décider d'abord s'il doit revenir.
+--
+--   Les identifiants d'événement de EventMap sont des uint16 (src/common/Utilities/EventMap.h:27,
+--     using EventId = uint16). Le module y range des ids de sort : 807727 devient 21295,
+--     804822 devient 18390, etc. Les quatorze ids employés par la classe ont été tronqués et
+--     comparés : AUCUNE collision. Mais deux talents dont les ids diffèrent de 65 536
+--     partageraient silencieusement leur temps de recharge interne : vérifier à chaque nouvel id.
+--
+--     ⚠ RECTIFICATION (revue adverse du 2026-09-21). La rédaction précédente concluait
+--     « c'est cohérent aujourd'hui » et c'était FAUX. Le défaut n'était pas une collision entre
+--     deux ids, c'était l'écart entre l'id STOCKÉ (tronqué) et le littéral NON tronqué auquel on
+--     le comparait : EventMap::ExecuteEvent rend un uint16 (EventMap.cpp:86-105, return
+--     itr->second._id), donc 21295, et le test « event == 807727 » d'AscensionFelsworn.cpp était
+--     TOUJOURS faux. Conséquence mesurable : le tick de dette d'Agonizing Presence (807727) ne
+--     s'exécutait jamais, state.debt croissait sans borne tant que le joueur encaissait du mêlée
+--     PvE, et le total tombait d'un seul coup à la déconnexion via SettleDebt. Le motif est celui
+--     de P-070 : le code existait, complet, et n'était jamais atteint.
+--     Corrigé en C++ uniquement : AscensionFelsworn.h définit
+--     « constexpr uint16 FelswornDebtEvent = uint16(807727); » et les cinq sites
+--     (AscensionFelsworn.cpp CancelEvent / ExecuteEvent / ScheduleEvent,
+--     AscensionFelswornAuras.cpp HasTimeUntilEvent / ScheduleEvent) passent par cette constante ;
+--     la boucle dépile désormais dans un uint16, du type que le cœur rend. Les quatre
+--     avertissements -Wconstant-conversion de la passe précédente sont éteints par là même.
+--     Reste à CONSTATER EN JEU, ce qu'aucune de ces deux passes n'a pu faire : que la dette
+--     retombe par tranches d'une seconde au lieu de tomber à la déconnexion.
+--
+--   ⚠ RECTIFICATION (même revue) — réentrance de Aura::SetStackAmount.
+--     AscensionFelswornAbilities.cpp incrémente le compteur de Bane of Betrayal (712483) puis
+--     appelle SetStackAmount. Or SetStackAmount (SpellAuras.cpp:943-967) rejoue
+--     ChangeAmount(..., onStackOrReapply = true), seul point du cœur qui produise
+--     AURA_EFFECT_HANDLE_REAPPLY ; REAPPLY re-entre dans aura_ascension_felsworn_lifecycle::Apply,
+--     enregistré en AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK, qui remettait le compteur à 0 juste
+--     après l'avoir incrémenté. La marque restait donc éternellement à 1 pile et son coup
+--     d'expiration (807554) valait 0, c'est-à-dire rien du tout (Copy sort sur amount == 0).
+--     Corrigé en C++ : Apply nomme son paramètre de mode et la seule ligne fautive devient
+--     « if (id == 712483 && (mode & AURA_EFFECT_HANDLE_REAL)) ».
+--     Le garde n'a DÉLIBÉRÉMENT PAS été posé en tête du handler, contrairement à ce que la revue
+--     proposait en premier : elle affirmait que les autres initialisations du bloc (707902,
+--     Annihilation, 807163, 800206, 804823) « ne sont pas atteintes aujourd'hui » au motif
+--     qu'aucun SetStackAmount du module ne les vise. C'est le cœur qui les atteint, pas le module.
+--     Spell.dbc champ 49 (StackAmount) relu pour les vingt-deux ids initialisés dans Apply :
+--     706269 = 5, 705146 = 5, 807424 = 10, 800206 = 12, 804823 = 100 ; or Unit.cpp:4969
+--     (_TryStackingOrRefreshingExistingAura) appelle ModStackAmount(1) quand le MÊME lanceur
+--     relance le MÊME sort, donc SetStackAmount, donc REAPPLY. Ces cinq-là rejouent le bloc à
+--     chaque pile aujourd'hui, et trois d'entre eux y réétiquettent leur jeton de séquence 800058
+--     que AscensionFelswornAbilities.cpp:221 compare pour choisir le buff à consommer. Un garde
+--     global aurait donc changé, sans mesure possible ici, un comportement qui n'est pas en cause.
+--     À CONSTATER EN JEU : que les piles de Bane of Betrayal montent, et que 807554 devient non
+--     nul à l'expiration.
+--
+-- -------------------------------------------------------------------------------------
+-- Sondes de cette passe (lecture seule, à la racine du dépôt projet, ignorées par git) :
+--   sonde-felsworn.py, sonde-felsworn-p070.txt, sonde-fw-census.txt, sonde-fw-55.txt,
+--   sonde-fw-tree.txt, sonde-fw-tracker.txt, sonde-fw-syntax.sh
+-- =====================================================================================

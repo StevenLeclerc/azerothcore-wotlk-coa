@@ -88,7 +88,7 @@ void SettleDebt(Player* player)
     for (auto const& debt : state.debt)
         amount += debt.remaining;
     state.debt.clear();
-    state.timers.CancelEvent(807727);
+    state.timers.CancelEvent(FelswornDebtEvent);
     if (player->IsAlive() && amount)
         Unit::DealDamage(player, player, uint32(std::min<uint64>(amount, UINT32_MAX)), nullptr, NODAMAGE,
                          SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
@@ -132,6 +132,30 @@ int32 Amount(uint32 spell, uint8 effect, Unit* caster)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(spell);
     return info ? info->Effects[effect].CalcValue(caster) : 0;
+}
+uint32 AnnihilationCharges(Player* player)
+{
+    // Annihilation's tooltip counts its uses with $n, the record's ProcCharges: "Your next $n
+    // direct instances of damage are guaranteed to critically strike" (Spell.dbc 803904,
+    // ProcCharges = 5). The script owns that counter rather than the native proc system.
+    // ApplyContracts zeroes ProcFlags and ProcCharges on every Felsworn event spell, which is why
+    // the authored value has to be repeated here - but it does NOT disarm the native proc system
+    // for 803904: acore_world.spell_proc holds a row for it (ProcFlags = 1048575, Charges = 0) and
+    // Aura::CalcMaxCharges (SpellAuras.cpp:909-918) reads that row, not the SpellInfo copy.
+    //
+    // Pit Lord's Strength - "Your Annihilation now affects $s1 additional attack" - is pure data:
+    // rank 1 (802076) and rank 2 (802110) are SPELL_AURA_ADD_FLAT_MODIFIER with SpellModOp 4
+    // (SPELLMOD_CHARGES), +1 and +2, and an EffectSpellClassMask of (0x20000000, 0, 0) that is
+    // exactly Annihilation's SpellFamilyFlags. The core would feed that modifier to
+    // Aura::CalcMaxCharges, a value this script never reads, so the talent had no effect on the
+    // number of guaranteed critical strikes. Running the same modifier over the authored count is
+    // what connects it; no rank, value or condition is invented here.
+    int32 charges = int32(AnnihilationAuthoredCharges);
+    if (player)
+        player->ApplySpellMod(uint32(Annihilation), SPELLMOD_CHARGES, charges);
+    // A hostile modifier must never leave the aura with zero uses: it would be applied and
+    // immediately consumed, which is worse than ignoring the modifier altogether.
+    return uint32(std::clamp<int32>(charges, 1, 100));
 }
 uint32 Fury(Unit const* player)
 {
@@ -230,10 +254,13 @@ void Reduce(Player* player, uint32 root, int32 milliseconds)
 {
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
+        {
+            // Braces only: the else belongs to the INT32_MAX test, which -Wdangling-else could not tell.
             if (milliseconds == INT32_MAX)
                 player->RemoveSpellCooldown(pair.first, true);
             else
                 player->ModifySpellCooldown(pair.first, -milliseconds);
+        }
 }
 void Replace(Player* player, uint32 root, uint32 replacement)
 {
@@ -369,8 +396,10 @@ class felsworn_player : public PlayerScript
         auto& state = State(player);
         state.timers.Update(diff);
         state.scheduler.Update(diff);
-        while (uint32 event = state.timers.ExecuteEvent())
-            if (event == 807727)
+        // ExecuteEvent returns an EventMap::EventId, i.e. a uint16: it can only ever be matched
+        // against the truncated constant, never against the raw spell id.
+        while (uint16 event = state.timers.ExecuteEvent())
+            if (event == FelswornDebtEvent)
             {
                 uint64 amount = 0;
                 for (auto& debt : state.debt)
@@ -387,7 +416,7 @@ class felsworn_player : public PlayerScript
                     Unit::DealDamage(player, player, uint32(std::min<uint64>(amount, UINT32_MAX)), nullptr, NODAMAGE,
                                      SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
                 if (!state.debt.empty())
-                    state.timers.ScheduleEvent(807727, 1s);
+                    state.timers.ScheduleEvent(FelswornDebtEvent, 1s);
             }
         if (!player->IsAlive())
         {

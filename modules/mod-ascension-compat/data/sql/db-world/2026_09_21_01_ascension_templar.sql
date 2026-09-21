@@ -1,0 +1,167 @@
+-- =====================================================================================
+-- mod-ascension-compat — TEMPLAR (classe 19, famille de sorts 25)
+-- Quatre talents dont l'aura 42 PROC_TRIGGER_SPELL ne pouvait JAMAIS se declencher
+-- (P-045). Quatre lignes `spell_proc`, rien d'autre.
+--
+-- Mesure du 2026-09-21, LECTURE SEULE avant toute ecriture :
+--
+--   Recensement : 122 sorts de la famille 25 portent un effet d'aura 42/43/231 avec un
+--   EffectTriggerSpell qui existe. 27 d'entre eux ont deja une ligne `spell_proc`
+--   (dont 560835 Lightkeeper et 803163 Might of Aggramar, poses le 2026-09-20).
+--   Parmi les 95 restants, 43 sont dans `TemplarCastDrivers` et 30 dans `TemplarEvents`
+--   (AscensionTemplarData.h) : le module les desamorce volontairement
+--   (`routed()` dans AscensionTemplarContracts.cpp passe l'aura 42 en DUMMY) et les
+--   rejoue en C++. Restent 48 sorts sans ligne `spell_proc`, ProcFlags DBC = 0 :
+--   SpellMgr.cpp « Skip if no proc flags in DBC » -> le coeur ne fabrique aucune
+--   SpellProcEntry par defaut, l'aura ne procera jamais. C'est exactement P-045.
+--
+--   Ce fichier en repare QUATRE, ceux dont la condition d'infobulle s'exprime
+--   entierement avec ProcFlags / SpellTypeMask / SpellPhaseMask / HitMask / SchoolMask
+--   / SpellFamilyMask, sans avoir a ecrire une ligne de C++.
+--
+--   Noms et valeurs des drapeaux lus dans src/server/game/Spells/SpellMgr.h
+--   (enum ProcFlags, ProcFlagsSpellType, ProcFlagsSpellPhase, ProcFlagsHit) et la
+--   semantique dans SpellMgr::CanSpellTriggerProcOnEvent (SpellMgr.cpp:896-966).
+--   Deux regles de cette fonction ont dicte les colonnes ci-dessous :
+--     * la phase n'est EXIGEE que pour REQ_SPELL_PHASE_PROC_FLAG_MASK
+--       (= SPELL_PROC_FLAG_MASK & DONE_HIT_PROC_FLAG_MASK, donc les drapeaux DONE
+--       « de sort » uniquement) — et sans garde `if (procEntry.SpellPhaseMask)` :
+--       une phase a 0 sur un drapeau DONE de sort REJETTE le proc ;
+--     * PROC_FLAG_DONE_MELEE_AUTO_ATTACK (4) n'appartient NI a SPELL_PROC_FLAG_MASK
+--       NI a REQ_SPELL_PHASE_PROC_FLAG_MASK : ni le type ni la phase ne sont testes
+--       pour une attaque blanche, une phase 2 ne la bloque donc pas.
+--
+-- Le nom de ce fichier est la cle d'update : NE PLUS LE RENOMMER.
+-- Prise d'effet a chaud : `.reload spell_proc`.
+-- RIEN N'A ETE APPLIQUE : ce fichier est livre non execute.
+--
+-- -------------------------------------------------------------------------------------
+-- CE QUI N'EST PAS ICI, ET POURQUOI
+--
+--   * Les cinq talents « categorie B » du triage (300529 Light's Ward, 560649 Tyr's
+--     Guard, 705263 Deep Secrets, 705272 Chivalric, 705283 Oath Flow) ne sont PAS
+--     dans ce fichier : la relecture du DBC montre qu'ils FONCTIONNENT deja. Voir le
+--     rapport de session ; aucune ligne n'est due pour eux.
+--     RECTIFICATIF 705263 « Deep Secrets » : le talent fonctionne bien en natif (effet 0,
+--     aura 107 ADD_FLAT_MODIFIER, MiscValue 1 = SPELLMOD_DURATION, +10000 ms), mais la
+--     liste des sorts qu'il allonge, donnee ailleurs comme « verifiee bit a bit », est
+--     INCOMPLETE. Masque de l'effet 0 relu aux champs 122-124 (P-064) :
+--     (0xa0, 0x0, 0x40200800). Confronte aux 880 sorts de la famille 25 :
+--       mot0 0x20       -> 801455 Testament of Will ET 13976911 « Mortal Abdication »
+--                          (rank « Test ») ;
+--       mot0 0x80       -> 1397742 Testament of Hope, seul ;
+--       mot2 0x800      -> les neuf Librams (801441, 803890-803893, 801461, 801463,
+--                          801466, 805423), exactement ;
+--       mot2 0x200000   -> 500678 Testament of Fortitude ET les six « Ascetic Abdication »
+--                          500699, 500743, 500806, 500902, 501054, 501131
+--                          (DurationIndex 31 = 8000 ms : ils sont reellement allonges) ;
+--       mot2 0x40000000 -> 804228 Testament of Resolve, seul.
+--     Aucun changement de code n'est du : c'est la description qui etait fausse.
+--   * 301253 « Warrior of Tyr » n'est PAS ici, et c'est le retrait le plus important de
+--     ce fichier. Le talent est DEJA implemente, en donnee, hors des fichiers
+--     AscensionTemplar* : AscensionCustomResourceData.h:510 porte la regle
+--     `{19, 0, 0, 3, 10, ResourceGainEvent::PeriodicDamageTick, 301253}`
+--     (NativePowerGainRule : ClassId 19 = Templar, PowerType 3 = POWER_ENERGY
+--     — src/server/shared/SharedDefines.h:328 —, InternalAmount 10, aura requise
+--     301253, FirstSpellId = LastSpellId = 0 donc TOUS les sorts). Elle est vivante :
+--     SpellAuraEffects.cpp:6593/6689/7063 -> sScriptMgr->OnPeriodicDamageResult ->
+--     AscensionCompat.cpp:5957 (UNITHOOK_ON_PERIODIC_DAMAGE_RESULT, declare l.5935)
+--     -> OnPeriodicDamageTick (AscensionCompat.cpp:2697) -> ModifyPower(POWER_ENERGY, 10)
+--     (AscensionCompat.cpp:2736). Le declencheur DBC de la ligne `spell_proc` envisagee,
+--     524987, porte effet 30 ENERGIZE MiscValue 3, BasePoints 9 -> 10 : exactement le
+--     meme montant, sur exactement le meme evenement. La ligne aurait donc rendu
+--     20 Energy par tic au lieu de 10. Le recensement P-045 ci-dessus reste vrai du
+--     MOTEUR DE PROC — l'aura 42 de 301253 ne proque effectivement jamais — mais faux
+--     du TALENT, qui passe par un autre chemin. Ne pas reintroduire la ligne sans avoir
+--     d'abord retire la regle de AscensionCustomResourceData.h : jamais les deux.
+--   * 43 des 48 sorts du recensement restent sans ligne : leur condition n'est pas
+--     exprimable en `spell_proc` (fin de chaine de Follow Up, portee, sort nomme sans
+--     bit de famille propre) ou leur infobulle est muette. Ne rien inventer.
+--   * 804926 « Runes of War » : son modificateur a masque VIDE (P-071) est corrige en
+--     C++ dans AscensionTemplarContracts.cpp, pas ici — un masque ne se pose pas dans
+--     `spell_proc`.
+-- =====================================================================================
+
+-- -------------------------------------------------------------------------------------
+-- (1) Les quatre lignes `spell_proc`. Le DELETE couvre une reapplication du fichier.
+-- -------------------------------------------------------------------------------------
+DELETE FROM `spell_proc` WHERE `SpellId` IN (705289, 705292, 705301, 805414);
+INSERT INTO `spell_proc`
+    (`SpellId`, `SchoolMask`, `SpellFamilyName`, `SpellFamilyMask0`, `SpellFamilyMask1`,
+     `SpellFamilyMask2`, `ProcFlags`, `SpellTypeMask`, `SpellPhaseMask`, `HitMask`,
+     `AttributesMask`, `DisableEffectsMask`, `ProcsPerMinute`, `Chance`, `Cooldown`, `Charges`)
+VALUES
+-- 705289 « Wind Dancer » — « Dodging an attack grants you Follow Up. Cannot occur more
+--   than once every 8 sec. »
+--   Declencheur DBC : 704574 « Oath Chain Extender » (effet 177
+--   SPELL_EFFECT_ASCENSION_MODIFY_AURA_DURATION, implemente dans le coeur,
+--   SpellEffects.cpp:249 -> EffectAscensionModifyAuraDuration ; MiscValue 704576
+--   = Oath Chain, +2000 ms).
+--   ProcFlags 40 = TAKEN_MELEE_AUTO_ATTACK (8) | TAKEN_SPELL_MELEE_DMG_CLASS (32).
+--   HitMask 16 = PROC_HIT_DODGE. Cooldown 8000 ms = l'ICD de l'infobulle.
+--   SpellTypeMask 0 : une esquive ne fait ni degat ni soin, un masque de type la
+--   rejetterait. Phase 0 : les drapeaux TAKEN n'exigent pas de phase.
+--   DisableEffectsMask 2 = effet 1, une aura 4 DUMMY (P-052).
+(705289, 0,  0,          0,        0, 0,     40, 0, 0, 16, 0, 2, 0, 0, 8000, 0),
+
+-- 705292 « Thrashing Blade » — « Gives physical damage effects a 10% chance to trigger
+--   Thrashing Blade. » L'infobulle d'aura du client ajoute « in melee range ».
+--   Les deux lectures sont prises a leur INTERSECTION, la plus prudente :
+--   ProcFlags 20 = DONE_MELEE_AUTO_ATTACK (4) | DONE_SPELL_MELEE_DMG_CLASS (16),
+--   donc la melee seule, et SchoolMask 1 = physique.
+--   SpellTypeMask 1 = DAMAGE (ignore pour l'attaque blanche, voir l'en-tete),
+--   phase 2 = HIT. ProcChance DBC = 10, donc Chance reste a 0.
+--   Declencheur DBC : 806515 « Judgement » (effet 2 SCHOOL_DAMAGE, 6 points).
+--   DisableEffectsMask 6 = effets 1 et 2, deux auras 4 DUMMY (P-052).
+(705292, 1,  0,          0,        0, 0,     20, 1, 2,  0, 0, 6, 0, 0,    0, 0),
+
+-- 705301 « Dissonance » — « Gain 6% increased dodge chance for 6s after activating
+--   Benediction or Tranquil Circle. »
+--   Declencheur DBC : 705302 (aura 49 MOD_DODGE_PERCENT +6, duree index 32 = 6000 ms) :
+--   les deux chiffres de l'infobulle sont bien ceux du DBC, rien n'est invente.
+--   Masque de famille 25, mot 0 = 1073774592 = 0x40000000 | 0x8000 :
+--     0x40000000 = Benediction, rangs 801448 / 803373-803378 / 578276 ;
+--     0x00008000 = Tranquil Circle, 801205 et 524667.
+--   Recensement des 880 sorts de la famille 25 : ces deux bits ne sont portes que par
+--   les neuf sorts ci-dessus PLUS 521052 « TEST AREA VISUAL », copie exacte de Tranquil
+--   Circle (DmgClass 0, memes trois effets 27). Aucun joueur ne le connait ; s'il etait
+--   lance il declencherait Dissonance, ce qui est assume et signale plutot que masque.
+--   ProcFlags 87040 = DONE_SPELL_NONE_DMG_CLASS_POS (1024) | _NEG (4096)
+--                   | DONE_SPELL_MAGIC_DMG_CLASS_POS (16384) | _NEG (65536).
+--   Les quatre drapeaux sont necessaires : Spell::prepare (Spell.cpp:2266-2300) ne
+--   remplit m_procAttacker que pour DmgClass MELEE et RANGED ; pour MAGIC (Benediction,
+--   DmgClass 1) et NONE (Tranquil Circle, DmgClass 0) c'est Spell.cpp:4018-4030 qui
+--   choisit POS ou NEG selon SpellInfo::IsPositive(). Poser les deux polarites evite de
+--   parier sur ce calcul ; le masque de famille rend le doublon inoffensif.
+--   Phase 1 = CAST (« after activating »). HitMask 0 : SpellMgr.cpp:946-948 saute
+--   entierement le test de resultat pour une phase CAST sans HitMask explicite.
+--   DisableEffectsMask 2 = effet 1, une aura 4 DUMMY (P-052).
+(705301, 0, 25, 1073774592,        0, 0,  87040, 0, 1,  0, 0, 2, 0, 0,    0, 0),
+
+-- 805414 « Burn Wounds » — « Chastise now reduces all healing received by an enemy by
+--   50% for 8 sec. »
+--   Declencheur DBC : 801203 « Burn Wound » (aura 118 MOD_HEALING_PCT -50, MiscValue
+--   127 = toutes ecoles, cible 6 = TARGET_UNIT_TARGET_ENEMY, duree index 31 = 8000 ms).
+--   Les deux chiffres de l'infobulle sont ceux du DBC.
+--   Masque de famille 25, mot 1 = 67108864 = le bit Chastise. Il est LU, pas deduit :
+--   AscensionTemplarContracts.cpp le nomme deja pour 520034 (« Pious Sweep's bonus …
+--   belongs to Chastise », flag96(0, 67108864, 0)), et les huit rangs de Chastise
+--   (803157, 503135-503141) portent tous (0, 67108865, 128).
+--   ATTENTION, le masque seul ne suffit pas : 704573 « Chakram » porte des drapeaux de
+--   famille IDENTIQUES a ceux de Chastise, et 560370 « Chastise Dot Increase » porte le
+--   meme bit. Ce sont les ProcFlags qui tranchent, et c'est voulu :
+--   ProcFlags 16 = DONE_SPELL_MELEE_DMG_CLASS, et Chastise est le seul des trois en
+--   DmgClass 2 = MELEE (Chakram est DmgClass 1 = MAGIC, 560370 est DmgClass 0 et n'est
+--   qu'une aura de remplissage).
+--   SpellTypeMask 1 = DAMAGE, phase 2 = HIT. ProcChance DBC = 100, Chance reste a 0.
+--   Un seul effet d'aura sur 805414 : pas de DisableEffectsMask.
+(805414, 0, 25,          0, 67108864, 0,     16, 1, 2,  0, 0, 0, 0, 0,    0, 0);
+
+-- -------------------------------------------------------------------------------------
+-- Aucune ligne `spell_script_names` : les cinq talents ci-dessus n'ont besoin d'aucun
+-- script, et 804926 « Runes of War » est traite entierement dans
+-- AscensionTemplarContracts.cpp (masque de classe + ProcCharges). Une premiere version
+-- de ce fichier l'accrochait au script de cycle de vie pour lui poser 5 charges a la
+-- main ; la relecture a montre que ProcCharges suffit et que la consommation est deja
+-- native (Player::RemoveSpellMods, Player.cpp:10447-10498).
+-- -------------------------------------------------------------------------------------

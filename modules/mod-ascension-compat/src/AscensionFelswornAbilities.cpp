@@ -189,14 +189,26 @@ class felsworn_casts : public AllSpellScript
     }
     void OnSpellCast(Spell* spell, Unit* caster, SpellInfo const* info, bool) override
     {
-        if (!Triggered(spell))
+        // This hook runs for every cast in the world. HasAura is a keyed lookup and answers no for
+        // all but a marked victim, so the applied-aura walk below stays off the common path.
+        if (!Triggered(spell) && caster->HasAura(712483))
+        {
+            // Aura::SetStackAmount replays HandleAuraSpecificMods and every effect's ChangeAmount,
+            // which may add or remove auras on this same unit. Collect the owners first, then look
+            // each mark up again: iterating the container while it mutates would invalidate the
+            // iterator, and a pointer taken before the first call may already be freed.
+            std::vector<ObjectGuid> owners;
             for (auto const& pair : caster->GetAppliedAuras())
                 if (Aura* aura = pair.second->GetBase(); aura->GetId() == 712483 && Owner(aura->GetCaster()))
+                    owners.push_back(aura->GetCasterGUID());
+            for (ObjectGuid guid : owners)
+                if (Aura* aura = caster->GetAura(712483, guid))
                 {
                     uint64 count = std::min<uint64>(30, aura->GetScriptValue(712483) + 1);
                     aura->SetScriptValue(712483, count);
-                    aura->SetStackAmount(std::max<uint64>(1, count)); // don't refresh its deadline
+                    aura->SetStackAmount(uint8(std::max<uint64>(1, count))); // don't refresh its deadline
                 }
+        }
         Player* player = Owner(caster);
         if (!player || info->SpellFamilyName != 20 || Triggered(spell))
             return;

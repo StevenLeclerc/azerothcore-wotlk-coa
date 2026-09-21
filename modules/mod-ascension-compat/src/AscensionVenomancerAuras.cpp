@@ -179,6 +179,20 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
         }
         if (Named(GetSpellInfo(),804983))
             target->RemoveAurasDueToSpell(807153,player->GetGUID());
+        // The growth aura outlives the stinger that feeds it: 680854 lasts 20 s
+        // (DurationIndex 18 -> SpellDuration.dbc[18] = 20000) and every 1 s tick of 803206
+        // refreshes it, while 803206 itself lasts 10 s (DurationIndex 1 -> 10000). Nothing
+        // else clears it: the authored 803209 "Rip Out Effect" carries the two REMOVE_AURA
+        // effects for 803206 and 680854 as one pair, and 803209 is triggered by nothing.
+        // Left alone, the stacks of a stinger that simply ran out are inherited by the next
+        // one -- Unit::_TryStackingOrRefreshingExistingAura refreshes the existing aura of
+        // the same caster instead of restarting it -- which contradicts 803196's tooltip
+        // ("scaling based on how long the stinger was left in them") and puts the 15 stack
+        // cap within reach without a single Exposed Flesh stack, where a lone stinger
+        // authors 10 ticks. Pairing the removal with the stinger's own end covers expiry,
+        // dispel and rip-out alike.
+        if (id == 803206)
+            target->RemoveAurasDueToSpell(680854,player->GetGUID());
         if (Named(GetSpellInfo(),706962) && expired && player->HasAura(807243))
             Cast(player,target,807342);
         if (id == 707234 && expired)
@@ -276,6 +290,8 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
             player->ModifyPower(POWER_RAGE,-cost);
             player->CastCustomSpell(805932,SPELLVALUE_BASE_POINT0,Amount(802325)*stacks,player,true);
         }
+        // Effect 2 of 804983 is the live path; the 807153 arm is vestigial and never runs,
+        // because nothing applies 807153 (see AscensionVenomancerContracts.cpp).
         if (id == 807153 || (Named(GetSpellInfo(),804983) && slot == 2))
         {
             PreventDefaultAction();

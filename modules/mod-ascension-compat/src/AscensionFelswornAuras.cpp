@@ -37,7 +37,7 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
         if (GetId() == 807424 && effect->GetEffIndex() == EFFECT_1)
             amount = 0; // extra targets are selected explicitly once
     }
-    void Apply(AuraEffect const* effect, AuraEffectHandleModes)
+    void Apply(AuraEffect const* effect, AuraEffectHandleModes mode)
     {
         if (!First(effect))
             return;
@@ -56,7 +56,19 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
             for (Aura* aura : remove)
                 aura->Remove();
         }
-        if (id == 712483)
+        // This hook is registered with AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK, and REAPPLY reaches
+        // it through exactly one path: Aura::SetStackAmount, whose loop calls
+        // AuraEffect::ChangeAmount(..., onStackOrReapply = true) (SpellAuras.cpp:960, the core's
+        // only such call), which re-enters this very AuraScript. AscensionFelswornAbilities.cpp
+        // raises the mark's counter and then calls SetStackAmount on it, so an unguarded reset
+        // here zeroed the counter it had just incremented: the mark stayed at one stack for ever
+        // and its expiry blow (807554) read 0 and dealt nothing. Seed the counter on a genuine
+        // application only.
+        // The guard is deliberately NOT applied to the whole handler: Spell.dbc StackAmount is
+        // non-zero for 706269, 705146, 807424 (sequence tags), 800206 and 804823, and a same-
+        // caster recast of those goes Unit.cpp:4969 -> ModStackAmount -> SetStackAmount -> REAPPLY,
+        // so they legitimately re-run this block on every stack today.
+        if (id == 712483 && (mode & AURA_EFFECT_HANDLE_REAL))
             GetAura()->SetScriptValue(id, 0);
         if (id == 707902)
             GetAura()->SetScriptValue(id, 3);
@@ -65,8 +77,17 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
         for (uint32 sid : {706269, 705146, 300486, 525027, 555277, 807424, 806128, 801902})
             if (id == sid)
                 GetAura()->SetScriptValue(800058, ++State(player).sequence);
-        if (id == 803904)
-            GetAura()->SetScriptValue(id, 5);
+        if (id == Annihilation)
+        {
+            GetAura()->SetScriptValue(id, AnnihilationCharges(player));
+            // Aura::CalcMaxCharges starts from this spell's spell_proc row, whose Charges is 0 -
+            // "no charge limit" - and then applies Pit Lord's Strength's SPELLMOD_CHARGES to it. A
+            // talented Felsworn therefore ended up with exactly one native charge and the core
+            // dropped the aura on its first proc, the opposite of the additional attack the talent
+            // promises. Only the script counter above decides how many strikes remain; zero here
+            // means "no charge limit" and is what an untalented Felsworn already had.
+            GetAura()->SetCharges(0);
+        }
         if (id == 807163)
             GetAura()->SetScriptValue(id, 10);
         if (id == 800206)
@@ -292,8 +313,8 @@ class aura_ascension_felsworn_stagger : public AuraScript
         {
             auto& state = State(player);
             state.debt.push_back({amount, 5});
-            if (!state.timers.HasTimeUntilEvent(807727))
-                state.timers.ScheduleEvent(807727, 1s);
+            if (!state.timers.HasTimeUntilEvent(FelswornDebtEvent))
+                state.timers.ScheduleEvent(FelswornDebtEvent, 1s);
         }
     }
     void Register() override

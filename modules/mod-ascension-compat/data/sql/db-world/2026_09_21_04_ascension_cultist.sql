@@ -1,0 +1,265 @@
+-- =====================================================================================
+-- mod-ascension-compat — Cultist (classe 25, famille de sorts 31)
+--
+-- Session du 2026-09-21. CE FICHIER NE RÉPARE RIEN À LUI SEUL : la seule correction de
+-- la session est en C++ (`AscensionCultistContracts.cpp`, talent 804633), et la base ne
+-- pouvait apporter ici qu'un garde-fou, écrit en fin de fichier avec sa raison.
+-- Le reste de ce fichier est ce qui a été MESURÉ et ce qui a été ÉCARTÉ, pour que la
+-- prochaine session ne repaie pas les mêmes vérifications — ni la même erreur.
+--
+-- -------------------------------------------------------------------------------------
+-- 1. LA SEULE VRAIE PANNE TROUVÉE : « Void-Enchanted Armor » 804633, SIGNE INVERSÉ
+-- -------------------------------------------------------------------------------------
+-- La donnée : effet 0 = APPLY_AURA, aura 235 SPELL_AURA_MOD_DISPEL_RESIST,
+-- BasePoints -21 avec DieSides 1, donc une valeur de **-20**.
+-- `Aura::CalcDispelChance` (`src/server/game/Spells/Auras/SpellAuras.cpp:1152-1158`)
+-- additionne sans valeur absolue :
+--     resistChance += auraTarget->GetTotalAuraModifier(SPELL_AURA_MOD_DISPEL_RESIST);
+-- Le talent retranche donc la résistance qu'il promet. Seul, il est simplement borné à 0
+-- par le `resistChance < 0 ? 0` qui suit ; porté avec « Forbidden Resilience » 300287
+-- (+25, que le module écrit déjà à la main dans `ApplyContracts`), il en mange 20.
+--
+-- CE QUI PROUVE LE SIGNE — et ce qui NE LE PROUVE PAS.
+-- Une première rédaction de cette fiche donnait pour preuve décisive l'issue amont #787,
+-- « qui cite le texte client ». C'est FAUX, et l'erreur est instructive : l'« expected
+-- result » de #787 est exactement la concaténation `<Name champ 136> | <Description
+-- champ 170 avec $s1 substitué>` de NOTRE PROPRE enregistrement, et sa section preuve ne
+-- contient qu'un vidage d'effet DBC et un comptage de grep. Son « 20 » est abs(-20)
+-- recalculé sur la donnée même qu'on met en cause. Le tracker n'apporte donc AUCUNE
+-- autorité indépendante sur un signe. (Voir la règle générale en fin de fichier.)
+-- Les trois preuves réellement indépendantes, toutes relues dans les sources :
+--   (1) le champ Description de 804633 lui-même dit « Increases your chance to resist
+--       dispel effects by $s1%. » : la donnée se contredit, mot contre valeur ;
+--   (2) balayage des 209 510 sorts de `Spell.dbc` sur aura 235 en APPLY_AURA : 21 effets,
+--       17 positifs, 2 nuls, **2 négatifs seulement** — 804633 et « Lava-Drenched » 706650
+--       (famille 30, Pyromancer, -30), et ce second-là a DÉJÀ reçu le même verdict d'un
+--       autre auteur : `AscensionPyromancerContracts.cpp:110` le réécrit en
+--       `dummy(0), Effects[0].BasePoints = 29` — aura 4 DUMMY de valeur **+30**, lue par
+--       la branche dédiée du cœur. Le signe négatif y a donc été jugé faux aussi.
+--       Tous les autres customs Ascension sont positifs (Warpstriker 707556/707830 =
+--       +15/+30, Stormcloak 280110/805161 = +60, Divine Infusion 292504 = +60,
+--       Volcanic Shell 805477 et
+--       807620-807623 = +70), comme les originaux Blizzard (Barkskin 63408/63409 = +30/+60,
+--       Pain Suppression 33206 = +65) ;
+--   (3) la convention Blizzard « le MOT porte la direction, $s porte la magnitude » est
+--       établie par quatre témoins du même fichier : Demoralizing Shout 1160
+--       « Reduces the attack power ... by $s1 » val -35 ; Curse of Weakness 702 val -21 ;
+--       Thunder Clap 6343 « increasing the time between their attacks by $s2% » val -10 ;
+--       Mortal Strike 12294 « reducing the effectiveness of any healing by $s1% » val -50.
+--       Le client affiche donc « 20 % » pendant que le serveur en retranche 20.
+-- Réparé dans `AscensionCultistContracts.cpp` avec l'assistant `aura()` employé deux
+-- lignes plus haut pour 300287 : +20, la valeur absolue de celle du DBC. Aucun chiffre
+-- inventé — aucune des trois preuves n'introduit de nombre qui ne soit déjà dans le DBC.
+-- Vérifié avant d'écrire, et pas supposé : 804633 n'apparaît NULLE PART ailleurs —
+-- ni dans `modules/mod-ascension-compat/src/**`, ni dans `core-main/src/**`, ni dans
+-- `spell_proc`, `spell_script_names`, `spell_linked_spell`, `spell_dbc` ; et aucune
+-- table à plages de la classe 25 ne le couvre. Il reste donc sans double traitement.
+-- RECTIFICATION : le cœur compte DEUX lectures de la résistance au dissipel, pas une.
+-- `Aura::CalcDispelChance` somme les auras 235 de la cible (l. 1155), mais porte aussi,
+-- l. 1147-1149, une branche dédiée gardée par `getClass() == CLASS_PYROMANCER` qui lit
+-- `GetAuraEffect(706650, EFFECT_0)` et ajoute `std::max(0, GetAmount())`. Elle ne touche
+-- pas la classe 25, et elle n'est pas morte : le contrat Pyromancer lui sert +30 (voir
+-- ci-dessus), le `std::max` n'y est qu'une garde. Sans effet ici, mais l'affirmation
+-- « aucun handler générique hors du cœur » était trop large.
+-- Il reste un résidu non touché : 804633 porte `ProcFlags = 4` et `ProcChance = 33`
+-- sans le moindre effet d'aura capable de procer. Inerte, signalé, laissé tel quel.
+--
+-- -------------------------------------------------------------------------------------
+-- 2. L'ERREUR QUE J'AI FAITE, ET QUI EST LE VRAI ENSEIGNEMENT DE CETTE SESSION
+-- -------------------------------------------------------------------------------------
+-- J'avais d'abord conclu que TROIS talents à gain d'Insanity étaient morts (P-045) :
+--   301180 « Twilight's Call »    « Critical strikes with Hammer of Twilight now refund
+--                                   10 Insanity. »
+--   681087 « Twilight Incarnate » « Damage dealt by Twilight Shieldtoss now generates
+--                                   3 Insanity. »  — DÉJÀ CONNU DE 4 PERSONNAGES VIVANTS
+--   807512 « Whispers of C'Thun » « Your Gaze of C'Thun now generates 10 Insanity. »
+-- Le raisonnement semblait complet : chacun porte son unique promesse dans une aura 42
+-- PROC_TRIGGER_SPELL vers un auxiliaire « Add N Insanity » (804210, 520773), avec
+-- `ProcFlags = 0` dans le DBC **et** aucune ligne `spell_proc` — donc, par P-045, le
+-- cœur ne fabrique aucune `SpellProcEntry` et l'aura ne proc jamais. J'avais écrit le
+-- code, et il compilait.
+--
+-- C'ÉTAIT FAUX, ET ÇA AURAIT PAYÉ CHAQUE TALENT DEUX FOIS. Ma relecture adverse l'a
+-- rattrapé en faisant ce que la première passe n'avait pas fait : chercher les ids dans
+-- TOUT le module, pas seulement dans les fichiers de ma classe. Les trois talents sont
+-- déjà implémentés par un moteur générique piloté par la donnée :
+--   `AscensionCustomResourceData.h:331-350` — une `ResourceGainRule` par plage de rangs,
+--      avec la ressource (500706), le montant (10, 10, 3), l'événement
+--      (`Cast`, `EachCriticalDamagingHit`, `EachSuccessfulDamagingHit`) et
+--      `RequiredAuraSpellId` = l'id du talent ;
+--   `AscensionCompat.cpp`, `AscensionResourceService::OnSpellCast` (l. 2460+) et
+--      `::OnSpellHitResult` (l. 2547+), appelés par `AscensionCompatAllSpellScript`
+--      qui déclare bien `ALLSPELLHOOK_ON_CAST` et `ALLSPELLHOOK_ON_HIT_RESULT` ;
+--   puis `ApplyGainRule` → `ModifyAuraStacks` → `AscensionCultist::Resource`.
+--   Le `ChancePercent` du `struct ResourceGainRule` vaut **100 par défaut** (l. 113) :
+--   les lignes qui ne le précisent pas sont bien actives, ce n'est pas un piège.
+-- La couverture du moteur est d'ailleurs MEILLEURE que ce que j'allais écrire : il liste
+-- les plages de rangs à la main (805116, 806498-806499, 806829-806833, 503487-503488,
+-- 524876, 572140-572141, 572715, 804208) là où je passais par `Named()`.
+-- `AscensionClassContracts19To25Data.h:89-96` porte les mêmes règles, mais ce fichier se
+-- décrit lui-même comme « an integration manifest, not a second runtime resource table »
+-- et aucun `.cpp` ne le lit : ce n'est pas une seconde source de double paiement.
+--
+-- LA RÈGLE À RETENIR : dans ce module, un talent peut être câblé SANS QUE SON FICHIER DE
+-- CLASSE LE MENTIONNE. Avant de conclure qu'un talent est mort, chercher son id dans
+-- `modules/mod-ascension-compat/src/**` ENTIER et dans `core-main/src/**`, pas seulement
+-- dans `Ascension<Classe>*`. Un `grep` restreint ne prouve rien (règle du projet).
+--
+-- -------------------------------------------------------------------------------------
+-- 3. LES QUATRE TALENTS (B) DU RECENSEMENT : TROIS FONCTIONNENT DÉJÀ
+-- -------------------------------------------------------------------------------------
+-- Les issues amont #518, #517 et #3020 les déclarent « Spell Script / Aura Handler Not
+-- Implemented ». **Elles se trompent** : leur preuve est un `grep` de l'id dans les
+-- sources, or ces talents n'ont besoin d'aucun code — leurs auras sont natives et
+-- implémentées dans ce cœur. Vérifié effet par effet, index DBC de P-064 :
+--   301255 « Blessing of C'Thun » — eff1 aura 220 MOD_RATING_FROM_STAT, MiscValue 128
+--          (CR_HIT_SPELL), MiscValueB 3 (STAT_INTELLECT), +5 % : c'est la moitié de
+--          l'infobulle. eff2 aura 286 ABILITY_PERIODIC_CRIT, masque (64, 2097152, 0)
+--          résolu contre les SpellFamilyFlags = Darkwither rangs 1-9 + Eldritch
+--          Devastation : c'est l'autre moitié. Handler à `AuraEffect::PeriodicTick`
+--          (`SpellAuraEffects.cpp:1173`). eff0 : relu, ce n'est PAS un SPELL_EFFECT_DUMMY
+--          mais un SPELL_EFFECT_APPLY_AURA (Effect=6) d'aura 4 SPELL_AURA_DUMMY, BasePoints 0
+--          DieSides 1 donc valeur 1, MiscValue 0, masque vide. Inerte dans les deux cas :
+--          rien ne lit cette aura pour 301255. La correction est de description, pas de code.
+--   680500 « Oblivion's Embrace » — eff1 aura 108 ADD_PCT_MODIFIER, MiscValue 15
+--          SPELLMOD_CRIT_DAMAGE_BONUS, +25 %, masque (0, 0, 540672) NON vide = Hammer of
+--          Twilight rangs 1-8. eff0 est un SPELL_EFFECT_DUMMY inerte sur un passif.
+--   706180 / 706181 « Darkward » — eff0 aura 317
+--          SPELL_AURA_ASCENSION_MOD_ABSORB_AMOUNT_PCT, +10 / +20, MiscValue 127
+--          (toutes écoles), consommée à `SpellAuraEffects.cpp:641`, avec un cas Cultist
+--          explicite (`getClass() == CLASS_CULTIST && SpellFamilyName == 31`) qui reporte
+--          l'absorption sur le lanceur. C'est exactement l'infobulle.
+--          eff1 : OMIS de la première rédaction, qui se disait pourtant « vérifiée effet
+--          par effet ». C'est une aura 108 ADD_PCT_MODIFIER, MiscValue 8
+--          SPELLMOD_ALL_EFFECTS, +10 / +20 %, masque (0, 536870912, 67371008) NON vide —
+--          donc native, fonctionnelle, et hors P-071. Résolu par
+--          `outils/sonde-masque-famille.py 31 0 536870912 67371008` : 29 sorts de la
+--          famille, Void Shield rangs 1-8, Forbidden Ritual rangs 1-10 + palier
+--          « 40 Insanity », C'Thun's Blade rangs 1-9 et Dark Veil. Aucune infobulle du
+--          talent ne le mentionne. Vivant et non documenté : signalé, NON touché.
+-- Les toucher n'aurait fait que doubler un effet déjà appliqué.
+--
+-- Non implémenté, volontairement : le `-15 SPELLMOD_COST` porté en effet DUMMY par
+-- 706180, 706181, 706186, 706192 et 706273, tous sur le même masque (0, 64, 0) =
+-- « Gaze of C'Thun ». **Aucune de leurs infobulles ne le mentionne.** Cinq nœuds portant
+-- le même triplet, c'est un gabarit d'auteur recopié, pas une promesse. Le tracker est
+-- muet, donc je le suis.
+--
+-- -------------------------------------------------------------------------------------
+-- 4. P-071 — BALAYAGE COMPLET DE LA FAMILLE 31, INDEX JUSTE (122+3e, P-064)
+-- -------------------------------------------------------------------------------------
+-- 1 212 sorts balayés, **3 effets** 107/108 à masque vide, et aucun ne mord :
+--   807877 « Ancient Rituals » eff1, aura 107 SPELLMOD_CHARGES +1 — le module le désarme
+--          déjà (`ApplyContracts` : `if (id == 807877) dummy(1);`).
+--   806249 « Psychic Trauma »  eff1, aura 107 SPELLMOD_CHANCE_OF_SUCCESS — valeur 0.
+--   504617 « Terrorbolt »      eff1, aura 108 SPELLMOD_DAMAGE +15 % posée sur la CIBLE
+--          ennemie — mais 504617 n'est ni un nœud de `CharacterAdvancement.dbc`, ni une
+--          ligne d'`ascension_custom_class_spell`, ni un rang de `spell_ranks` : aucun
+--          Cultist ne peut le lancer. Signalé, non désarmé.
+--
+-- -------------------------------------------------------------------------------------
+-- 5. P-070 — QUATRE MÉCANIQUES QUE LE MODULE PILOTE ET QUE RIEN NE PEUT ATTEINDRE
+-- -------------------------------------------------------------------------------------
+-- Aucune n'est réparable par une ligne, contrairement à l'Impcaller 707666 : là-bas il
+-- manquait une AURA à poser sur un talent apprenable ; ici c'est le SORT LUI-MÊME qui
+-- n'est apprenable par aucun chemin. Les trois chemins ont été vérifiés pour chacune :
+-- `CharacterAdvancement.dbc` — en-tête relu, et non recalculé : magic WDBC,
+-- recordCount 10 255, **fieldCount 179**, recordSize 692 octets, stringBlock 231 383.
+-- L'en-tête est incohérent avec lui-même (179 × 4 = 716 ≠ 692) et c'est le recordSize
+-- qui décrit le fichier : la taille totale, 7 327 863 octets, vaut exactement
+-- 20 + 10 255 × 692 + 231 383. Un enregistrement porte donc **173 entiers 32 bits
+-- lisibles**, et les balayer tous donne le même verdict. La première rédaction écrivait
+-- « 173 champs » en le présentant comme l'en-tête : c'était 692/4, pas fieldCount.
+-- `ascension_custom_class_spell` (classe 25 : 13 lignes, listées), `spell_ranks`,
+-- `Spell.dbc` entier (champs 116-118 EffectTriggerSpell et 24-27), les sources du module
+-- et du cœur, et `acore_characters.character_spell` sur 140 Cultists vivants.
+--   255281 « Voidrider » + 255282 « Voidcleave » + 255283 « Voidrider SLS » — le module
+--          porte le talent ENTIER : application, `Cast(255283)`, drain de 1 Insanity par
+--          seconde, retrait automatique sous 20 Insanity, remplacement de Twilight
+--          Shieldtoss par Voidcleave, proc de soin au critique. 255281 n'est posée par
+--          rien. C'est une capacité ACTIVE : aucun `spell_linked_spell` ne peut la rendre
+--          lançable, il faudrait lui inventer un niveau d'apprentissage.
+--   704892 « Horrorbolt Volley » (rang « Passive ») — même constat, avec un indice de
+--          plus : son `Attributes` vaut 0x180 quand les 27 autres pilotes passifs de la
+--          classe valent 0xc0 ou 0x1c0, c'est-à-dire qu'il lui manque exactement le bit
+--          0x40 SPELL_ATTR0_PASSIVE. Mais AJOUTER CE BIT NE SUFFIRAIT PAS : un passif
+--          n'est lancé qu'à l'apprentissage, et 704892 n'est apprenable par aucun chemin.
+--          Toute la chaîne Horrorbolt ×3 → 255020 → 255070 → 504719, écrite dans
+--          `AscensionCultistAbilities.cpp` et dans `Refresh`, est donc du code mort.
+--          À noter : `ascension_custom_class_spell` n'est PAS une voie d'apprentissage —
+--          seul `mod-playerbots` la lit (`src/Ai/Class/Coa/CoaAiObjectContext.h`).
+--          Y insérer une ligne n'accorderait rien.
+--   706192 « Wrathful Slam » rang 2 — son infobulle promet « reduces its cooldown by
+--          4 sec » et l'effet 1 du DBC est un SPELL_EFFECT_DUMMY qui transporte une aura
+--          107 SPELLMOD_COOLDOWN -4000 jamais créée. Mais 706192 n'est pas plus
+--          apprenable que les précédents. Réparer un sort que personne ne peut obtenir
+--          aurait été du travail affiché, pas du travail rendu.
+--
+-- -------------------------------------------------------------------------------------
+-- 6. VÉRIFICATIONS NÉGATIVES, pour ne pas les refaire
+-- -------------------------------------------------------------------------------------
+--   * P-051 : `CultistEvents[]` compte 72 ids, `spell_script_names` compte exactement
+--     72 lignes pour `aura_ascension_cultist_event`, et les deux ensembles sont
+--     IDENTIQUES (différence symétrique vide). Aucun script orphelin.
+--   * Les 72 portent toutes une ligne `spell_proc` (forme attrape-tout :
+--     ProcFlags 1048575, SpellTypeMask 7, SpellPhaseMask 2, HitMask 32767,
+--     AttributesMask 2), donc P-045 ne les touche pas.
+--   * P-053 : 14 talents Cultist portent une aura à handler `nullptr` (340, 353, 354).
+--     Toutes sont soit scriptées, soit lues par `HasAura` dans le module. Le seul cas
+--     non cité, 300309 « Absolute Horror » (aura 340, valeur 0), délivre sa promesse par
+--     son AUTRE effet : aura 107 ADD_FLAT_MODIFIER, MiscValue 10 SPELLMOD_CASTING_TIME,
+--     -300 ms, masque (0, 48, 0) = Horrorbolt + Wrath of the Black Empire. Conforme.
+--   * Double traitement avec `AscensionClassMechanics.cpp:1370`
+--     (`IsCultistTwilightShieldtoss` → `CastSpell(524880)`) : aucun. 524880 « Slow » est
+--     hors de la chaîne de rangs de 524876 et ne fait aucun dégât ; rien de ce qui est
+--     écrit ici ne le recoupe. Ce fichier n'est pas modifié.
+--   * `AscensionCultist.cpp:144`, mécanique Insanity : `Resource()` pose elle-même
+--     l'aura 500706 par `AddAura`, et le moteur générique y entre par `ModifyAuraStacks`.
+--     Aucun cas P-070.
+--
+-- -------------------------------------------------------------------------------------
+-- LE SEUL GARDE-FOU QUE LA BASE APPORTE
+-- -------------------------------------------------------------------------------------
+-- Les trois talents du §2 reçoivent leur Insanity du moteur générique, depuis les
+-- crochets de sort. Leur enregistrement DBC conserve pourtant son aura 42
+-- PROC_TRIGGER_SPELL vers « Add N Insanity », aujourd'hui inerte faute de `ProcFlags` et
+-- de ligne `spell_proc`. Si une telle ligne leur était ajoutée plus tard — et c'est
+-- exactement ce que produit une correction de masse inspirée de P-045, « donner une
+-- ligne à toute aura 42 sans ProcFlags » — le cœur réveillerait ce proc et le sort
+-- auxiliaire partirait EN PLUS du gain du moteur : le talent paierait deux fois.
+-- Les trois lignes sont VÉRIFIÉES ABSENTES au 2026-09-21
+-- (`SELECT COUNT(*) FROM spell_proc WHERE SpellId IN (301180,681087,807512)` = 0).
+-- RECTIFICATION, car la première rédaction lui prêtait une vertu qu'elle n'a pas :
+-- cette instruction N'EST PAS « une garantie à la réapplication ». Il n'y a pas de
+-- réapplication. L'updater d'AzerothCore inscrit chaque fichier une fois dans
+-- `acore_world.updates` (clé primaire sur `name`, colonne `hash`, état MODULE — 3 168
+-- lignes au 2026-09-21, dont les fichiers des classes sœurs 2026_09_20_20_ascension_
+-- guardian.sql, 2026_09_20_24_ascension_barbarian.sql…) et ne le rejoue plus tant que
+-- son contenu ne change pas. Le DELETE s'exécutera donc UNE SEULE FOIS, sur une table
+-- déjà vide pour ces trois ids, puis jamais. Si une session ultérieure ajoute une ligne
+-- `spell_proc` pour 301180, 681087 ou 807512, ce fichier ne l'empêchera pas.
+-- Il est conservé pour la trace et pour l'ordre des migrations, pas comme garde-fou.
+-- LE VRAI GARDE-FOU est le commentaire de huit lignes posé dans
+-- `AscensionCultistAbilities.cpp` (crochet `OnSpellHitResult`) : il est lu par qui
+-- touchera au code. Un second, équivalent, à côté du bloc `ResourceGainRules` de
+-- `AscensionCustomResourceData.h:331-350`, ferait plus que ce DELETE — il n'a pas été
+-- écrit ici parce que ce fichier est hors du périmètre de la classe 25.
+-- Prise d'effet à chaud : `.reload spell_proc`. Retour arrière : rien à défaire.
+--
+-- -------------------------------------------------------------------------------------
+-- LA RÈGLE MÉTHODOLOGIQUE QUE CETTE SESSION LAISSE (§1) — elle vaut pour les autres classes
+-- -------------------------------------------------------------------------------------
+-- Sur le tracker amont, une « infobulle officielle citée » dont le chiffre est exactement
+-- abs() de la valeur du DBC est un GABARIT, pas un témoin. Le corps de ces entrées est
+-- engendré : « expected result » = `<Name champ 136> | <Description champ 170, $s substitué>`
+-- du même enregistrement que l'on met en cause. Compté sur les 4 436 entrées du fichier :
+-- 3 303 corps portent « Filed as part of a larger AI-assisted audit », et 3 302 portent
+-- en plus « not reproduced on a live running server ».
+-- Conséquence pratique : le tracker peut confirmer qu'un talent EXISTE et ce qu'il promet
+-- EN MOTS, jamais trancher un SIGNE ni valider une MAGNITUDE — puisque mots et magnitude
+-- viennent de la donnée examinée. Pour un signe, il faut des preuves extérieures à
+-- l'enregistrement : le verbe de la Description, la distribution de la même aura dans tout
+-- le DBC, la convention $s = magnitude. Les entrées `pr=true` échappent à cette limite :
+-- elles portent du code, du SQL et des mesures.
+
+DELETE FROM `spell_proc` WHERE `SpellId` IN (301180, 681087, 807512);

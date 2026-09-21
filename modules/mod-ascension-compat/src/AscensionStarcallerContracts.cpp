@@ -271,6 +271,22 @@ void ApplyContracts(SpellInfo* info)
     for (uint32 sid : {801148, 100250, 680790, 706436})
         if (id == sid)
             info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+    if (id == 802862 && info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
+        info->Effects[EFFECT_1].MiscValue == SPELLMOD_EFFECT1 &&
+        info->Effects[EFFECT_1].SpellClassMask == flag96())
+        // "Sea Witch" authors a +33% SPELLMOD_EFFECT1 with an EMPTY EffectSpellClassMask on family
+        // 32, and the aura stacks to 5. SpellInfo::IsAffected only tests the flags when the mask is
+        // not empty, so an empty mask does not miss its target: it takes the WHOLE Starcaller
+        // family, up to +165% on effect 0 of every spell the holder casts (P-071). The tooltip
+        // names "Soothing Splash", which no family 32 record carries -- effect 0's own mask
+        // resolves to 574154 "Eclipsing Arrows" and effect 2 points at 802863 "Forked Lightning",
+        // family 22 -- so the record is misfiled and there is no mask to narrow onto without
+        // guessing one. Nothing in Spell.dbc, in the module or in acore_world applies 802862 today
+        // (searched: every Spell.dbc field, spell_linked_spell, spell_proc, spell_script_names),
+        // so this is a dormant landmine: disarmed rather than guessed, the way
+        // AscensionNecromancerContracts.cpp:28 disarms 552011. Guarded on the three fields it
+        // depends on, so a DBC import that authors something else here is left alone.
+        dummy(EFFECT_1);
     info->_InitializeExplicitTargetMask();
 }
 } // namespace AscensionStarcaller
@@ -282,6 +298,17 @@ enum StarfireSpells : uint32
     SPELL_STARFIRE_SHOT = 801978,
     SPELL_STARFIRE_FLAT_DAMAGE = 801977
 };
+
+// Huntress of Elune ships as two unrelated Spell.dbc records: 704769 "Rank 1" (effect 1 = 5) and
+// 704770 "Rank 2" (effect 1 = 10). Lowest rank first; the strongest one actually applied wins.
+constexpr uint32 StarcallerHuntressRanks[] = {704769, 704770};
+
+// Lunar Blessing has the same shape and the same missing chain: 704756 "Rank 1" (effect 1 = 3) and
+// 704757 "Rank 2" (effect 1 = 6), both granted by SkillLineAbility.dbc (skill line 92), neither
+// named in acore_world.spell_ranks. Upstream issue 1301, still open, quotes rank 2's tooltip:
+// "Increases your healing done by 6%, plus an additional 6% on Poisoned or Diseased targets." The
+// flat 6% is effect 0's native aura 136; only the conditional half is read here.
+constexpr uint32 StarcallerLunarBlessingRanks[] = {704756, 704757};
 
 class starcaller_scaling : public UnitScript
 {
@@ -336,10 +363,19 @@ class starcaller_scaling : public UnitScript
         Player* player = Owner(caster);
         if (!player || !target || Derived(info))
             return 1;
-        if (player->GetDistance(target) > 30)
-            if (Aura* aura = player->GetAuraOfRankedSpell(704769))
-                return 1 + Amount(aura->GetId(), 1) / 100.0f;
-        return 1;
+        if (player->GetDistance(target) <= 30)
+            return 1;
+        // acore_world.spell_ranks carries no chain for 704769/704770, and
+        // Unit::GetAuraApplicationOfRankedSpell walks GetFirstSpellInChain/GetNextSpellInChain, so
+        // GetAuraOfRankedSpell(704769) only ever found rank 1: a player who took rank 2 alone got
+        // no bonus at all, and one holding both got 5% instead of 10%. Read the ranks directly.
+        // Effect 1 is read without a caster, as before, so no spell modifier reshapes the tooltip
+        // value; only the highest rank present counts, never their sum.
+        int32 bonus = 0;
+        for (uint32 rank : StarcallerHuntressRanks)
+            if (player->HasAura(rank))
+                bonus = std::max(bonus, Amount(rank, EFFECT_1));
+        return bonus > 0 ? 1 + bonus / 100.0f : 1.0f;
     }
     void ModifySpellDamageTaken(Unit* target, Unit* caster, int32& damage, SpellInfo const* info) override
     {
@@ -361,12 +397,21 @@ class starcaller_scaling : public UnitScript
         float factor = 1;
         if (player->HasAura(801989) && target->GetHealthPct() < 20)
             factor *= 1.3f;
-        if (Aura* aura = player->GetAuraOfRankedSpell(704756))
+        // Same defect as Huntress of Elune above: with no spell_ranks chain,
+        // Unit::GetAuraApplicationOfRankedSpell walks GetFirstSpellInChain/GetNextSpellInChain and
+        // GetAuraOfRankedSpell(704756) only ever found rank 1, so a holder of rank 2 alone got
+        // nothing and a holder of both got 3% instead of 6%. Read the ranks directly; effect 1 is
+        // read without a caster, as before, and only the highest rank present counts, never the sum.
+        int32 blessing = 0;
+        for (uint32 rank : StarcallerLunarBlessingRanks)
+            if (player->HasAura(rank))
+                blessing = std::max(blessing, Amount(rank, EFFECT_1));
+        if (blessing > 0)
             for (auto const& pair : target->GetAppliedAuras())
                 if (pair.second->GetBase()->GetSpellInfo()->Dispel == DISPEL_POISON ||
                     pair.second->GetBase()->GetSpellInfo()->Dispel == DISPEL_DISEASE)
                 {
-                    factor *= 1 + Amount(aura->GetId(), 1) / 100.0f;
+                    factor *= 1 + blessing / 100.0f;
                     break;
                 }
         heal = uint32(heal * factor);
