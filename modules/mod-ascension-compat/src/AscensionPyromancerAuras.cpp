@@ -157,14 +157,16 @@ class aura_ascension_pyromancer_lifecycle : public AuraScript
         }
         if ((id == 680962 || id == 807403 || id == 520826) && !effect->GetEffIndex())
         {
-            uint32 total = GetEffect(EFFECT_1) ? std::max(0, GetEffect(EFFECT_1)->GetAmount()) : 0;
-            uint32 ticks = GetEffect(EFFECT_2) ? std::max(0, GetEffect(EFFECT_2)->GetAmount()) : 0;
-            if (ticks)
+            AuraEffect* budget = GetEffect(EFFECT_1);
+            AuraEffect* remaining = GetEffect(EFFECT_2);
+            uint32 total = budget ? uint32(std::max(0, budget->GetAmount())) : 0;
+            uint32 ticks = remaining ? uint32(std::max(0, remaining->GetAmount())) : 0;
+            if (budget && remaining && ticks)
             {
                 uint32 amount = total / ticks;
                 const_cast<AuraEffect*>(effect)->SetAmount(amount);
-                GetEffect(EFFECT_1)->SetAmount(total - amount);
-                GetEffect(EFFECT_2)->SetAmount(ticks - 1);
+                budget->SetAmount(total - amount);
+                remaining->SetAmount(ticks - 1);
                 GetAura()->SetScriptValue(id, total - amount);
                 GetAura()->SetScriptValue(id + 1, ticks - 1);
             }

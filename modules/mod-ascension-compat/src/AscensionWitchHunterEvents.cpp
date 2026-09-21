@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionWitchHunterCompletion.h"
+#include "AscensionSpellSafe.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -68,8 +69,14 @@ void CarryDamage(Unit* caster, Unit* target, uint32 id, uint64 amount)
 {
     if (!caster || !target)
         return;
-    SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-    uint32 ticks = std::max(1, info->GetDuration() / int32(info->Effects[EFFECT_0].Amplitude));
+    // `id` arrive d'un appelant : il n'est garanti ni present au Spell.dbc, ni periodique.
+    // Sans ce garde, un sort disparu du DBC dereferencait nullptr et une Amplitude a 0
+    // divisait par zero — les deux sur un fil de MapUpdate, plusieurs secondes apres le sort.
+    SpellInfo const* info = AscensionSpellSafe::Get(id);
+    if (!info)
+        return;
+    int32 amplitude = int32(info->Effects[EFFECT_0].Amplitude);
+    uint32 ticks = amplitude > 0 ? uint32(std::max(1, info->GetDuration() / amplitude)) : 1u;
     if (AuraEffect* previous = target->GetAuraEffect(id, EFFECT_0, caster->GetGUID()))
         amount += uint64(std::max(0, previous->GetAmount())) *
                   std::max(0, int32(previous->GetTotalTicks()) - int32(previous->GetTickNumber()));
@@ -122,7 +129,7 @@ class aura_ascension_witch_hunter_event : public AuraScript
                 return outgoing && Direct(event) && Family(info, 1, 1073741824) && info && info->Id != 520865 &&
                        roll_chance_i(GetSpellInfo()->ProcChance +
                                      (owner->HasAura(803422)
-                                          ? sSpellMgr->GetSpellInfo(803422)->Effects[EFFECT_2].CalcValue(owner)
+                                          ? AscensionSpellSafe::EffectValue(803422, EFFECT_2, owner, 10)
                                           : 0));
             case 504470:
                 return outgoing && Direct(event) && critical && Family(info, 2, 1024) && event.GetProcSpell() &&
@@ -304,8 +311,14 @@ class aura_ascension_witch_hunter_event : public AuraScript
             case 680528:
             {
                 Cast(owner, other, 680517);
-                SpellInfo const* dot = sSpellMgr->GetSpellInfo(680532);
-                uint32 ticks = std::max(1, dot->GetDuration() / int32(dot->Effects[EFFECT_0].Amplitude));
+                // 680532 lu au Spell.dbc le 2026-09-21 : duree 3000 ms, Amplitude[0] 1000 ms,
+                // soit 3 ticks. Le repli couvre les deux facons dont cette ligne pouvait tuer
+                // le fil de carte : le sort absent du DBC (dereferencement nul, P-047) et une
+                // Amplitude a 0 (division entiere par zero).
+                int32 amplitude = int32(AscensionSpellSafe::EffectAmplitude(680532, EFFECT_0, 1000));
+                uint32 ticks = amplitude > 0
+                    ? uint32(std::max(1, AscensionSpellSafe::Duration(680532, 3000) / amplitude))
+                    : 3u;
                 CarryDamage(owner, other, 680532,
                             uint64(damage) * std::max(0, GetEffect(EFFECT_1)->GetAmount()) / 100 * ticks);
                 break;
@@ -375,8 +388,15 @@ class aura_ascension_witch_hunter_event : public AuraScript
                 break;
             case 681329:
             case 681488:
-                Cast(owner, other, 681392);
-                Cast(owner, other, 681392);
+                // Le nombre d'attaques supplementaires vit dans le payload, pas ici. 681329 dit
+                // "strike 2 additional times" et declenche 681392 (val = 2) ; 681488 dit
+                // "strike 3 additional times" et declenche 681489 (val = 3). L'effet est
+                // SPELL_EFFECT_ADD_EXTRA_ATTACKS, qui s'ACCUMULE (Unit::AddExtraAttacks :
+                // extraAttacksTargets[guid] += count) : un seul lancement suffit, deux en
+                // delivraient 4 aux deux rangs. La cible du payload est TARGET_UNIT_CASTER,
+                // d'ou self() plutot que Cast(owner, other, ...).
+                if (uint32 payload = GetSpellInfo()->Effects[EFFECT_0].TriggerSpell)
+                    self(payload);
                 self(1257670);
                 break;
             case 806195:

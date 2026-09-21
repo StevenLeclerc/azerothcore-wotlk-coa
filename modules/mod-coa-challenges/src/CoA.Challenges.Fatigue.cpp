@@ -106,6 +106,37 @@ namespace CoAChallenges
         StopFatigueBar(player);
     }
 
+    // Same as ClearFatigue, but for ONE challenge only. A character can hold
+    // several non-exclusive challenges at once and coa_character_fatigue is
+    // keyed (guid, challengeId): wiping every row when one of them ends threw
+    // away the counter of another challenge that was still active. Callers
+    // follow this with RefreshFatigueTracking(), which re-arms the gauge on
+    // whatever fatigue challenge is left (and falls back to ClearFatigue when
+    // none is).
+    void ClearFatigueForChallenge(Player* player, uint32 challengeID)
+    {
+        if (!player)
+            return;
+        uint32 guid = player->GetGUID().GetCounter();
+        bool wasTracked = false;
+        {
+            std::lock_guard<std::mutex> lock(FatigueMutex);
+            auto it = FatigueStates.find(guid);
+            if (it != FatigueStates.end() && it->second.challengeId == challengeID)
+            {
+                FatigueStates.erase(it);
+                wasTracked = true;
+            }
+        }
+        CharacterDatabase.Execute(
+            "DELETE FROM coa_character_fatigue WHERE guid = {} AND challengeId = {}",
+            guid, challengeID);
+        // Only take the bar down if this challenge was the one driving it:
+        // ending an unrelated challenge must not blink another one's gauge.
+        if (wasTracked)
+            StopFatigueBar(player);
+    }
+
     // Rebuild the tracking state from the DB (login). Loads persisted fatigue.
     void RefreshFatigueTracking(Player* player)
     {

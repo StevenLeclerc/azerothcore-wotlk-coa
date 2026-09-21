@@ -461,6 +461,15 @@ namespace CoAChallenges
             player->GetName(), spellId);
     }
 
+    // Deferred cross-map work (P-034), defined in CoA.Challenges.Lifecycle.cpp.
+    // Declared here rather than in the umbrella header, which is generated from
+    // the review split and shared with the test harness.
+    bool OnSameMapThread(Player* a, Player* b);
+    void QueueRemoteMarkObjective(ObjectGuid const& target, std::string const& type, uint32 eventValue);
+    void QueueRemoteProfessionXP(ObjectGuid const& target, uint32 rarityMult);
+    void ProcessRemoteChallengeWork(Player* player);
+    void ClearRemoteChallengeWork(uint32 guid);
+
     // ---- INVERTED_BREATH ----------------------------------------------------
     // Only Breathe Underwater: the core hook inverts the native breath timer
     // (drown on land, recover underwater). The module keeps the set of players
@@ -1279,6 +1288,12 @@ namespace CoAChallenges
                         continue;
                     if (!PlayerHasRule(member, "CHALLENGE_RULES_TYPE_NO_EXPERIENCE_EXCEPT_PROFESSIONS"))
                         continue;
+                    // P-034: GiveXP on a member updated by another map thread.
+                    if (!OnSameMapThread(member, player))
+                    {
+                        QueueRemoteProfessionXP(slot.guid, mult);
+                        continue;
+                    }
                     GrantProfessionXP(member, mult);
                 }
             }
@@ -1675,6 +1690,15 @@ namespace CoAChallenges
                             LOG_INFO("module.coa_challenges",
                                 "Kill credit shared: {} -> member {} (creature {})",
                                 player->GetName(), member->GetName(), killed->GetEntry());
+                            // P-034: MarkObjectives can run all the way to
+                            // CompleteChallenge (aura removal, packets) on a
+                            // member another map thread is updating.
+                            if (!OnSameMapThread(member, player))
+                            {
+                                QueueRemoteMarkObjective(slot.guid,
+                                    "CHALLENGE_REQUIREMENT_TYPE_KILL_CREATURE_BEFORE_LEVEL", killed->GetEntry());
+                                continue;
+                            }
                             MarkObjectives(member, "CHALLENGE_REQUIREMENT_TYPE_KILL_CREATURE_BEFORE_LEVEL", killed->GetEntry());
                         }
         }
@@ -1805,6 +1829,8 @@ namespace CoAChallenges
 
         void OnPlayerUpdate(Player* player, uint32 diff) override
         {
+            // Work another map's thread could not do itself (P-034).
+            ProcessRemoteChallengeWork(player);
             SpellbindProcessPending(player);
             HungerUpdate(player, diff);
             FatigueUpdate(player, diff);
@@ -1822,6 +1848,7 @@ namespace CoAChallenges
             UntrackLevelUp(player);
             UntrackHighRisk(player);
             UntrackLootedItems(player->GetGUID().GetCounter());
+            ClearRemoteChallengeWork(player->GetGUID().GetCounter());
             UntrackBandage(player);
             ClearGameModeMaskCache(player->GetGUID().GetCounter());
             ClearCharChallengeCache(player->GetGUID().GetCounter());

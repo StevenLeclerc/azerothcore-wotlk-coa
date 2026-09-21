@@ -5,6 +5,245 @@
 namespace CoAChallenges
 {
 
+    // ---- Deferred cross-map work (P-034) -----------------------------------
+    // MapUpdate.Threads is > 1: a script hook runs on the thread of ITS OWN
+    // map. Touching a Player that belongs to another map from there races that
+    // map's update (aura list, packets, group). P-034 states the rule: same map
+    // (a->FindMap() == b->FindMap()), or database only.
+    //
+    // What still has to reach a holder who is online on ANOTHER map is queued
+    // here and replayed from that player's own OnPlayerUpdate, on the same
+    // pattern as SpellbindQueueKill / SpellbindProcessPending. The persisted
+    // half of a transition is written by the producer (it touches no Player
+    // object), so a disconnect before the queue is drained still leaves the
+    // database correct; only the visible half is deferred.
+
+    // Defined in CoA.Challenges.Fatigue.cpp.
+    void ClearFatigueForChallenge(Player* player, uint32 challengeID);
+
+    // Activation conditions that describe a PRISTINE character. They gate the
+    // ENTRY into a challenge, not each of its tiers: a multi-level challenge
+    // with no tracked objective only advances through CompleteAtLevelCap, so a
+    // character asking for tier N>1 has necessarily broken all of them. Tier
+    // N>1 is gated by HasCompletionLevel(N-1) instead. Anything else
+    // (GROUP_SIZE, HAVE_FREE_INVENTORY_SLOTS, and an unknown type, which fails
+    // closed) keeps applying to every tier.
+    static bool IsEntryOnlyCondition(std::string const& label)
+    {
+        return label == "LEVEL_UP"
+            || label == "CANNOT_HAVE_GAINED_EXPERIENCE"
+            || label == "LOOT_INTERACTION";
+    }
+
+    enum class RemoteWorkKind : uint8
+    {
+        Fail,
+        Deactivate,
+        LeaveGroup,
+        MarkObjective,
+        ProfessionXP
+    };
+
+    struct RemoteWork
+    {
+        RemoteWorkKind kind = RemoteWorkKind::Fail;
+        uint32 challengeID = 0;
+        uint32 level = 0;
+        uint32 value = 0;               // deaths (Fail) / eventValue / rarityMult
+        ObjectGuid killerSource;
+        std::string objectiveType;
+        // Deactivate only: the sync-decline rollback silences the 0x59B
+        // broadcast, and the deferred half has to silence it too.
+        bool suppressSync = false;
+    };
+
+    std::mutex RemoteWorkMutex;
+    std::unordered_map<uint32, std::vector<RemoteWork>> RemoteWorkQueue;
+    // Fast path. OnPlayerUpdate runs for every player on every tick on all map
+    // threads; cross-map work is rare, so the drain must not take a global lock
+    // when the queue is empty.
+    std::atomic<uint32> RemoteWorkCount{0};
+
+    // Same map = same update thread (P-034). A player whose map is unknown
+    // (loading screen, teleport in flight) counts as remote: the safe side.
+    bool OnSameMapThread(Player* a, Player* b)
+    {
+        if (!a || !b)
+            return false;
+        Map const* m = a->FindMap();
+        return m != nullptr && m == b->FindMap();
+    }
+
+    // Hard cap: a kill-credit hook can fire many times per second, and a player
+    // who never gets updated again (stuck loading screen) must not grow this
+    // without bound.
+    static constexpr size_t REMOTE_WORK_MAX = 64;
+
+    static void QueueRemoteWork(ObjectGuid const& target, RemoteWork&& work)
+    {
+        if (!target)
+            return;
+        std::lock_guard<std::mutex> lock(RemoteWorkMutex);
+        std::vector<RemoteWork>& list = RemoteWorkQueue[target.GetCounter()];
+        if (list.size() >= REMOTE_WORK_MAX)
+        {
+            LOG_WARN("module.coa_challenges",
+                "Deferred cross-map queue full for guid {}: dropping work item", target.GetCounter());
+            return;
+        }
+        list.push_back(std::move(work));
+        RemoteWorkCount.fetch_add(1, std::memory_order_release);
+    }
+
+    void QueueRemoteFail(ObjectGuid const& target, uint32 challengeID, uint32 level, uint32 deaths,
+        ObjectGuid const& killerSource)
+    {
+        RemoteWork w;
+        w.kind = RemoteWorkKind::Fail;
+        w.challengeID = challengeID;
+        w.level = level;
+        w.value = deaths;
+        w.killerSource = killerSource;
+        QueueRemoteWork(target, std::move(w));
+    }
+
+    void QueueRemoteDeactivate(ObjectGuid const& target, uint32 challengeID, bool suppressSync)
+    {
+        RemoteWork w;
+        w.kind = RemoteWorkKind::Deactivate;
+        w.challengeID = challengeID;
+        w.suppressSync = suppressSync;
+        QueueRemoteWork(target, std::move(w));
+    }
+
+    void QueueRemoteLeaveGroup(ObjectGuid const& target)
+    {
+        RemoteWork w;
+        w.kind = RemoteWorkKind::LeaveGroup;
+        QueueRemoteWork(target, std::move(w));
+    }
+
+    void QueueRemoteMarkObjective(ObjectGuid const& target, std::string const& type, uint32 eventValue)
+    {
+        RemoteWork w;
+        w.kind = RemoteWorkKind::MarkObjective;
+        w.value = eventValue;
+        w.objectiveType = type;
+        QueueRemoteWork(target, std::move(w));
+    }
+
+    void QueueRemoteProfessionXP(ObjectGuid const& target, uint32 rarityMult)
+    {
+        RemoteWork w;
+        w.kind = RemoteWorkKind::ProfessionXP;
+        w.value = rarityMult;
+        QueueRemoteWork(target, std::move(w));
+    }
+
+    // Drop whatever is still queued for a character leaving the world, so the
+    // map does not keep entries for guids that will never be updated again.
+    void ClearRemoteChallengeWork(uint32 guid)
+    {
+        if (!RemoteWorkCount.load(std::memory_order_acquire))
+            return;
+        std::lock_guard<std::mutex> lock(RemoteWorkMutex);
+        auto it = RemoteWorkQueue.find(guid);
+        if (it == RemoteWorkQueue.end())
+            return;
+        RemoteWorkCount.fetch_sub((uint32)it->second.size(), std::memory_order_release);
+        RemoteWorkQueue.erase(it);
+    }
+
+    // Called from OnPlayerUpdate: we are on this player's own map thread, so
+    // every one of these is a local write.
+    void ProcessRemoteChallengeWork(Player* player)
+    {
+        if (!player)
+            return;
+        if (!RemoteWorkCount.load(std::memory_order_acquire))
+            return;
+        std::vector<RemoteWork> work;
+        {
+            std::lock_guard<std::mutex> lock(RemoteWorkMutex);
+            auto it = RemoteWorkQueue.find(player->GetGUID().GetCounter());
+            if (it == RemoteWorkQueue.end())
+                return;
+            work.swap(it->second);
+            RemoteWorkQueue.erase(it);
+        }
+        RemoteWorkCount.fetch_sub((uint32)work.size(), std::memory_order_release);
+        for (RemoteWork const& w : work)
+        {
+            switch (w.kind)
+            {
+                case RemoteWorkKind::Fail:
+                    FailChallenge(player, w.challengeID, w.level, w.value, w.killerSource);
+                    break;
+                case RemoteWorkKind::Deactivate:
+                    // Without this the rollback of a declined group sync would
+                    // send the party a brand new 0x59B remove invitation, on
+                    // the very challenge it is undoing.
+                    if (w.suppressSync)
+                    {
+                        // g_suppressSyncBroadcast is ONE process-wide atomic
+                        // (CoA.Challenges.Core.cpp:237), and this drain runs on
+                        // every map thread. Writing `false` back in would
+                        // un-suppress a rollback another thread is in the
+                        // middle of (History.cpp HandleSyncResponse, Trials.cpp
+                        // 791-829) and re-broadcast SMSG 0x59B on the very
+                        // challenge being undone. Save and restore instead: the
+                        // flag can then only ever be set, never cleared, by a
+                        // thread that did not set it.
+                        bool const prev = g_suppressSyncBroadcast.exchange(true);
+                        DeactivateChallenge(player, w.challengeID);
+                        g_suppressSyncBroadcast.store(prev);
+                    }
+                    else
+                        DeactivateChallenge(player, w.challengeID);
+                    break;
+                case RemoteWorkKind::LeaveGroup:
+                    if (player->GetGroup())
+                    {
+                        ChatHandler(player->GetSession()).PSendSysMessage(
+                            "You have been removed from the group: it now requires the same challenge set.");
+                        player->RemoveFromGroup();
+                    }
+                    break;
+                case RemoteWorkKind::MarkObjective:
+                    MarkObjectives(player, w.objectiveType.c_str(), w.value);
+                    break;
+                case RemoteWorkKind::ProfessionXP:
+                    GrantProfessionXP(player, w.value);
+                    break;
+            }
+        }
+    }
+
+    // The persisted half of FailChallenge / DeactivateChallenge. Touches no
+    // Player object, so it is safe from any thread. Both are idempotent: the
+    // deferred FailChallenge replays them without doubling anything (INSERT
+    // IGNORE on the (guid, challengeId) primary key, DELETE of a row already
+    // gone).
+    void FailChallengeDbOnly(uint32 guid, uint32 challengeID, uint32 level, uint32 deaths)
+    {
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        trans->Append(
+            "INSERT IGNORE INTO coa_challenge_failure (guid, challengeId, level, deaths, failTime) "
+            "VALUES ({}, {}, {}, {}, UNIX_TIMESTAMP())", guid, challengeID, level, deaths);
+        trans->Append(
+            "DELETE FROM coa_character_challenge WHERE guid = {} AND challengeId = {}", guid, challengeID);
+        CharacterDatabase.DirectCommitTransaction(trans);
+        ClearCharChallengeCache(guid);
+    }
+
+    void DeactivateChallengeDbOnly(uint32 guid, uint32 challengeID)
+    {
+        CharacterDatabase.DirectExecute(
+            "DELETE FROM coa_character_challenge WHERE guid = {} AND challengeId = {}", guid, challengeID);
+        ClearCharChallengeCache(guid);
+    }
+
+
     bool HasFailure(uint32 guid, uint32 challengeID)
     {
         if (QueryResult r = CharacterDatabase.Query(
@@ -398,11 +637,32 @@ namespace CoAChallenges
                 return 6;
             }
         }
-        if (std::string reason = CheckActivationConditions(player, challengeID); !reason.empty())
-        {                                                        // 8 CONDITIONS_NOT_MET
-            ChatHandler(player->GetSession()).PSendSysMessage(
-                "Cannot start {}: {}", ChallengeName(challengeID), reason);
-            return 8;
+        {
+            // Some activation conditions describe a PRISTINE character
+            // (LEVEL_UP / CANNOT_HAVE_GAINED_EXPERIENCE: still level 1;
+            // LOOT_INTERACTION: never opened a loot window, a flag that is only
+            // cleared by `.coa reset`). A multi-level challenge with no tracked
+            // objective is completed by CompleteAtLevelCap, i.e. at the level
+            // cap, so by the time tier 2 is asked for, the character
+            // necessarily breaks them: every tier above 1 was unreachable and
+            // their rewards out of reach for the whole realm. Those gates apply
+            // to the ENTRY into the challenge only; tier N>1 is gated by
+            // HasCompletionLevel(N-1) below instead.
+            // Everything else (GROUP_SIZE, HAVE_FREE_INVENTORY_SLOTS, and an
+            // unknown type, which fails closed) keeps applying to every tier.
+            bool const higherTier = (level > 1 && ChallengeLevelCount(challengeID) > 1);
+            for (ConditionState const& s : EvaluateConditions(player, challengeID))
+            {
+                if (!s.broken)
+                    continue;
+                if (higherTier && IsEntryOnlyCondition(s.label))
+                    continue;
+                                                                 // 8 CONDITIONS_NOT_MET
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "Cannot start {}: {}", ChallengeName(challengeID),
+                    s.label + " (" + s.detail + ")");
+                return 8;
+            }
         }
         // NO_GROUP (solo-only, e.g. Ironman): cannot start while grouped.
         if (player->GetGroup())
@@ -497,6 +757,13 @@ namespace CoAChallenges
             Player* member = ObjectAccessor::FindPlayer(g);
             if (!member)
                 continue;
+            // P-034: another map = another update thread. Writing to his session
+            // and pulling him out of the group there races his own update.
+            if (!OnSameMapThread(member, player))
+            {
+                QueueRemoteLeaveGroup(g);
+                continue;
+            }
             ChatHandler(member->GetSession()).PSendSysMessage(
                 "You have been removed from the group: it now requires the same challenge set.");
             member->RemoveFromGroup();
@@ -566,13 +833,24 @@ namespace CoAChallenges
         RemoveChallengeSpell(player, challengeID);
         RemoveMeterAuras(player);
         RemoveHungerChallenge(player, challengeID);
-        ClearFatigue(player);
+        // Drop THIS challenge's fatigue counter, then rebuild from whatever
+        // other active challenge still carries FATIGUED_UNLESS_RESTED. The old
+        // global ClearFatigue() erased every coa_character_fatigue row of the
+        // character and nothing repopulated the tracker, so ending one
+        // challenge silently disarmed another one's gauge until the next login.
+        if (IsFatigueChallenge(challengeID))
+        {
+            ClearFatigueForChallenge(player, challengeID);
+            RefreshFatigueTracking(player);
+        }
         UntrackSpellbind(player);
         // Rebuild for any OTHER active challenge that still carries a spellbind
         // rule (non-exclusive challenges can coexist: removing one must not
         // silently kill another's roulette).
         RefreshSpellbindTracking(player);
-        UntrackInvertedBreath(player);
+        // Same reason for INVERTED_BREATH: recompute from the remaining active
+        // set instead of a blind untrack.
+        RefreshInvertedBreathTracking(player);
         RefreshRegenTracking(player);
         RefreshHighRiskTracking(player);
         RefreshLootedTracking(player);
@@ -872,7 +1150,22 @@ namespace CoAChallenges
             if (r->Fetch()[0].Get<uint32>() > 0)
                 return false;
         }
-        return CheckActivationConditions(player, challengeID).empty();
+        // Same entry-only exemption as ActivateChallenge: without it, the
+        // pristine-character gates a tier-2 holder necessarily breaks would
+        // turn a free cancel into a failure. CheckActivationConditions is left
+        // alone on purpose -- it answers "can this be STARTED", which is the
+        // entry question, and it is what the .coa conditions report shows.
+        uint32 const activeLevel = ActiveChallengeLevel(guid, challengeID);
+        bool const higherTier = (activeLevel > 1 && ChallengeLevelCount(challengeID) > 1);
+        for (ConditionState const& s : EvaluateConditions(player, challengeID))
+        {
+            if (!s.broken)
+                continue;
+            if (higherTier && IsEntryOnlyCondition(s.label))
+                continue;
+            return false;
+        }
+        return true;
     }
 
     // ---- Objectives (Requirements[] level-restricted) --------------------
@@ -1042,21 +1335,34 @@ namespace CoAChallenges
         // level is completed (relevant only when re-completion is allowed).
         bool const firstCompletion = !HasCompletionLevel(guid, challengeID, level);
 
-        CharacterDatabase.DirectExecute(
-            "INSERT IGNORE INTO coa_challenge_completion (guid, challengeId, level, completeTime, startTime) "
-            "VALUES ({}, {}, {}, UNIX_TIMESTAMP(), {})", guid, challengeID, level, startTime);
-        CharacterDatabase.DirectExecute(
-            "DELETE FROM coa_character_challenge WHERE guid = {} AND challengeId = {}", guid, challengeID);
+        // One transaction: recording the completion and dropping the active row
+        // are the same state transition. As two separate DirectExecute a crash
+        // between them left the challenge both completed and active (or, the
+        // other way round, dropped with no completion and no reward).
+        {
+            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+            trans->Append(
+                "INSERT IGNORE INTO coa_challenge_completion (guid, challengeId, level, completeTime, startTime) "
+                "VALUES ({}, {}, {}, UNIX_TIMESTAMP(), {})", guid, challengeID, level, startTime);
+            trans->Append(
+                "DELETE FROM coa_character_challenge WHERE guid = {} AND challengeId = {}", guid, challengeID);
+            CharacterDatabase.DirectCommitTransaction(trans);
+        }
         ClearCharChallengeCache(guid);
         RemoveChallengeSpell(player, challengeID);
         RemoveMeterAuras(player);
         RemoveHungerChallenge(player, challengeID);
-        ClearFatigue(player);
+        // Per-challenge clear + rebuild (see DeactivateChallenge).
+        if (IsFatigueChallenge(challengeID))
+        {
+            ClearFatigueForChallenge(player, challengeID);
+            RefreshFatigueTracking(player);
+        }
         UntrackSpellbind(player);
         // Rebuild for any OTHER active challenge that still carries a spellbind
         // rule (see DeactivateChallenge).
         RefreshSpellbindTracking(player);
-        UntrackInvertedBreath(player);
+        RefreshInvertedBreathTracking(player);
         RefreshRegenTracking(player);
         RefreshHighRiskTracking(player);
         RefreshLootedTracking(player);
@@ -1266,24 +1572,23 @@ namespace CoAChallenges
         // INSERT IGNORE + synchronous: the PK (guid, challengeId) makes a repeat
         // fail a no-op, and a sync write means HasFailure/HasPermaDeathFailure
         // (read in the same tick) and the client re-push see the row immediately.
-        CharacterDatabase.DirectExecute(
-            "INSERT IGNORE INTO coa_challenge_failure (guid, challengeId, level, deaths, failTime) "
-            "VALUES ({}, {}, {}, {}, UNIX_TIMESTAMP())",
-            guid, challengeID, level, deaths);
-        // Synchronous delete so the active-list re-push below reflects it.
-        CharacterDatabase.DirectExecute(
-            "DELETE FROM coa_character_challenge WHERE guid = {} AND challengeId = {}",
-            guid, challengeID);
-        ClearCharChallengeCache(guid);
+        // Both statements are the same state transition, so they commit together
+        // rather than as two independent DirectExecute.
+        FailChallengeDbOnly(guid, challengeID, level, deaths);
         RemoveChallengeSpell(player, challengeID);
         RemoveMeterAuras(player);
         RemoveHungerChallenge(player, challengeID);
-        ClearFatigue(player);
+        // Per-challenge clear + rebuild (see DeactivateChallenge).
+        if (IsFatigueChallenge(challengeID))
+        {
+            ClearFatigueForChallenge(player, challengeID);
+            RefreshFatigueTracking(player);
+        }
         UntrackSpellbind(player);
         // Rebuild for any OTHER active challenge that still carries a spellbind
         // rule (see DeactivateChallenge).
         RefreshSpellbindTracking(player);
-        UntrackInvertedBreath(player);
+        RefreshInvertedBreathTracking(player);
         RefreshRegenTracking(player);
         RefreshHighRiskTracking(player);
         RefreshLootedTracking(player);
@@ -1361,12 +1666,24 @@ namespace CoAChallenges
             if (!r)
                 continue;
             Field* f = r->Fetch();
+            uint32 const level = f[0].Get<uint32>();
             uint32 deaths = f[1].Get<uint32>() + (member == dead ? 1 : 0);
             if (member == dead)
                 CharacterDatabase.Execute(
                     "UPDATE coa_character_challenge SET deaths = {} WHERE guid = {} AND challengeId = {}",
                     deaths, mguid, challengeID);
-            FailChallenge(member, challengeID, f[0].Get<uint32>(), deaths, dead->GetGUID());
+            // P-034: OnPlayerJustDied runs on the DEAD player's map thread.
+            // FailChallenge strips and re-casts auras and pushes packets; doing
+            // that to a holder updated by another map thread races his aura
+            // list. Persist the transition now (no Player touched) and replay
+            // the visible half on his own thread.
+            if (member != dead && !OnSameMapThread(member, dead))
+            {
+                FailChallengeDbOnly(mguid, challengeID, level, deaths);
+                QueueRemoteFail(itr->guid, challengeID, level, deaths, dead->GetGUID());
+                continue;
+            }
+            FailChallenge(member, challengeID, level, deaths, dead->GetGUID());
         }
     }
 
@@ -1378,7 +1695,9 @@ namespace CoAChallenges
         if (!sConfigMgr->GetOption<bool>("CoAChallenges.Enable", true))
             return;
 
-        std::vector<std::pair<Player*, uint32>> targets;
+        // GUIDs, not Player*: nothing here may outlive the lookup, and the
+        // failure below re-reaches the player through ObjectAccessor.
+        std::vector<std::pair<ObjectGuid, uint32>> targets;
         auto collect = [&targets](Player* member)
         {
             if (!member)
@@ -1391,7 +1710,7 @@ namespace CoAChallenges
                 {
                     uint32 cid = r->Fetch()[0].Get<uint32>();
                     if (IsSharedFate(cid))
-                        targets.emplace_back(member, cid);
+                        targets.emplace_back(member->GetGUID(), cid);
                 } while (r->NextRow());
             }
         };
@@ -1402,15 +1721,24 @@ namespace CoAChallenges
                 collect(ObjectAccessor::FindPlayer(itr->guid));
         collect(extra);
 
-        for (auto const& [member, cid] : targets)
+        // P-034: a GroupScript hook carries no map of its own. CMSG_GROUP_UNINVITE
+        // and CMSG_GROUP_DISBAND are PROCESS_THREADUNSAFE (Opcodes.cpp:248, 254),
+        // i.e. the world thread, but OnRemoveMember is also reached from map-side
+        // code, and the hook hands us a GUID, not the Player the caller owns. No
+        // holder here is provably on our thread, so EVERY one of them gets the
+        // persisted transition now and the visible half on his own update tick.
+        for (auto const& [mguid, cid] : targets)
         {
-            if (QueryResult r = CharacterDatabase.Query(
-                    "SELECT level, deaths FROM coa_character_challenge WHERE guid = {} AND challengeId = {}",
-                    member->GetGUID().GetCounter(), cid))
-            {
-                Field* f = r->Fetch();
-                FailChallenge(member, cid, f[0].Get<uint32>(), f[1].Get<uint32>());
-            }
+            QueryResult r = CharacterDatabase.Query(
+                "SELECT level, deaths FROM coa_character_challenge WHERE guid = {} AND challengeId = {}",
+                mguid.GetCounter(), cid);
+            if (!r)
+                continue;
+            Field* f = r->Fetch();
+            uint32 const level = f[0].Get<uint32>();
+            uint32 const deaths = f[1].Get<uint32>();
+            FailChallengeDbOnly(mguid.GetCounter(), cid, level, deaths);
+            QueueRemoteFail(mguid, cid, level, deaths, ObjectGuid::Empty);
         }
     }
 

@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionCultist.h"
 #include "AscensionCultistData.h"
 #include "DBCStores.h"
@@ -8,16 +9,20 @@
 #include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
+#include "WorldScript.h"
 #include <algorithm>
 namespace AscensionCultist
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 31)
+    if (!AscensionContract::MatchesFamily(info, 31, "Cultist"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 slot)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Cultist");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -170,7 +175,7 @@ void ApplyContracts(SpellInfo* info)
             if (effect.ApplyAuraName == SPELL_AURA_MOD_BLOCK_CRIT_CHANCE)
                 effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
     if (id == 807883 || id == 681476 || id == 567529)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Cultist");
     if (id == 520345)
     {
         info->Effects[0].ApplyAuraName = SPELL_AURA_PERIODIC_DUMMY;
@@ -357,8 +362,22 @@ public:
             AddPct(damage, Amount(300287, 1));
     }
 };
+
+// The class contracts used to fail in silence: a client import that moved one
+// SpellFamilyName unarmed a whole class and nothing said so (P-047). This prints
+// the per-contract tally once the spell store is loaded - Main.cpp calls
+// sScriptMgr->OnStartup() after SetInitialWorldSettings, which is where
+// LoadSpellInfoCustomAttributes applies the contracts. A class at zero records is
+// an error line. One instance for all ten contract files, registered here.
+class ascension_contract_audit : public WorldScript
+{
+public:
+    ascension_contract_audit() : WorldScript("ascension_contract_audit", {WORLDHOOK_ON_STARTUP}) { }
+    void OnStartup() override { AscensionContract::Report(); }
+};
 }
 void AddSC_AscensionCultistContracts()
 {
     new cultist_scaling();
+    new ascension_contract_audit();
 }

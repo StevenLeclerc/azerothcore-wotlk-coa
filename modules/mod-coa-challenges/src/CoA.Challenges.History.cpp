@@ -5,6 +5,13 @@
 namespace CoAChallenges
 {
 
+    // Deferred cross-map work (P-034), defined in CoA.Challenges.Lifecycle.cpp.
+    // Declared here rather than in the umbrella header, which is generated from
+    // the review split and shared with the test harness.
+    bool OnSameMapThread(Player* a, Player* b);
+    void QueueRemoteDeactivate(ObjectGuid const& target, uint32 challengeID, bool suppressSync);
+    void DeactivateChallengeDbOnly(uint32 guid, uint32 challengeID);
+
     void SendActiveList(Player* player)
     {
         WorldSession* session = player->GetSession();
@@ -188,7 +195,11 @@ namespace CoAChallenges
 
         if (accept)
         {
-            g_suppressSyncBroadcast = true;
+            // Save/restore, never a bare `false`: the flag is a single
+            // process-wide atomic (CoA.Challenges.Core.cpp:237) and this
+            // handler runs on the responder's map thread, so clearing it in
+            // the blind would un-suppress a rollback owned by another thread.
+            bool const prevSuppress = g_suppressSyncBroadcast.exchange(true);
             for (auto const& [id, level] : pending.pairs)
             {
                 if (pending.remove)
@@ -196,7 +207,7 @@ namespace CoAChallenges
                 else
                     ActivateChallenge(player, id, level);
             }
-            g_suppressSyncBroadcast = false;
+            g_suppressSyncBroadcast.store(prevSuppress);
 
             LOG_INFO("module.coa_challenges", "CMSG 0x59C SYNC_RESPONSE from {}: accepted {} {} challenge(s)",
                 player->GetName(), pending.remove ? "remove" : "add", pending.pairs.size());
@@ -209,24 +220,40 @@ namespace CoAChallenges
 
         // Party-required formation declined: revert the requester's activation
         // everywhere in the party so everyone is back to the previous set.
+        // P-034: CMSG 0x59C is handled on the responder's map thread. The
+        // requester and the other party members can be on other maps, and
+        // DeactivateChallenge strips auras and pushes packets. Off-map holders
+        // get the row removed now and the visible half on their own tick.
         auto revert = [&](Player* p)
         {
             if (!p)
                 return;
             std::set<uint32> active = ActiveChallenges(p->GetGUID().GetCounter());
+            bool const local = (p == player) || OnSameMapThread(p, player);
             for (auto const& [id, level] : pending.rollback)
-                if (active.count(id))
+            {
+                if (!active.count(id))
+                    continue;
+                if (local)
+                {
                     DeactivateChallenge(p, id);
+                    continue;
+                }
+                DeactivateChallengeDbOnly(p->GetGUID().GetCounter(), id);
+                // The rollback runs under g_suppressSyncBroadcast; carry that
+                // over so the deferred half does not re-invite the party.
+                QueueRemoteDeactivate(p->GetGUID(), id, true);
+            }
         };
 
-        g_suppressSyncBroadcast = true;
+        bool const prevSuppress = g_suppressSyncBroadcast.exchange(true);
         if (pending.requesterGuid)
             revert(ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(pending.requesterGuid)));
         if (Group* group = player->GetGroup())
             for (Group::MemberSlot const& slot : group->GetMemberSlots())
                 revert(ObjectAccessor::FindPlayer(slot.guid));
         revert(player);
-        g_suppressSyncBroadcast = false;
+        g_suppressSyncBroadcast.store(prevSuppress);
 
         LOG_INFO("module.coa_challenges", "Declined sync reverted {} challenge(s) for requester {}",
             pending.rollback.size(), pending.requesterGuid);

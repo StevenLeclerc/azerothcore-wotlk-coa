@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionFelsworn.h"
+#include "AscensionSpellSafe.h"
 #include "GameObject.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -436,7 +437,13 @@ class spell_ascension_felsworn_ability : public SpellScript
     }
     void Register() override
     {
-        SpellInfo const* info = sSpellMgr->GetSpellInfo(m_scriptSpellId);
+        // Garde defensive, jamais franchie en pratique : _Register() n'est appele
+        // qu'avec l'Id d'un SpellInfo existant (ObjectMgr.cpp:6432-6434 et
+        // ScriptMgr::CreateSpellScripts). On la garde pour ne pas laisser un
+        // deref nu si le chemin d'appel change.
+        SpellInfo const* info = AscensionSpellSafe::Get(m_scriptSpellId);
+        if (!info)
+            return;
         if (info->Id == 572163 || info->Id == 572183)
             OnEffectHit += SpellEffectFn(spell_ascension_felsworn_ability::SummonHit, EFFECT_0, SPELL_EFFECT_SUMMON);
         if (info->Id == 807942 || info->Id == 705121)

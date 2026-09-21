@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionCultist.h"
+#include "AscensionSpellSafe.h"
 #include "DBCStores.h"
 #include "Map.h"
 #include "MotionMaster.h"
@@ -222,7 +223,7 @@ struct npc_ascension_cultist_summon : public ScriptedAI
         }
         if (active.size() >= 10)
         {
-            Summon(player, 50263, me->GetPosition(), sSpellMgr->GetSpellInfo(804779)->GetDuration());
+            Summon(player, 50263, me->GetPosition(), AscensionSpellSafe::Duration(804779, 30000));
             for (Player* member : active)
                 member->InterruptSpell(CURRENT_CHANNELED_SPELL);
             me->DespawnOrUnsummon();
@@ -274,7 +275,10 @@ struct npc_ascension_cultist_summon : public ScriptedAI
             uint32 roots[] = {500110, 800416, 805572};
             uint32 spell = Highest(player, roots[urand(0, 2)]);
             me->CastSpell(target, spell, false);
-            me->DespawnOrUnsummon(sSpellMgr->GetSpellInfo(spell)->IsChanneled() ? 10000ms : 5000ms);
+            // Highest() rend son id de depart quand rien de mieux n'est appris, et cet id
+            // est en dur : le SpellInfo peut manquer.
+            SpellInfo const* cast = AscensionSpellSafe::Get(spell);
+            me->DespawnOrUnsummon(cast && cast->IsChanneled() ? 10000ms : 5000ms);
         }
         else if (entry == CthunTentacle && !me->HasUnitState(UNIT_STATE_CASTING))
             me->CastSpell(target, MentalAssault, false);

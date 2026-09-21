@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionNecromancer.h"
+#include "AscensionSpellSafe.h"
 #include "Creature.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -306,7 +307,7 @@ class necromancer_casts : public AllSpellScript
                 if (player->HasAura(500572))
                 {
                     uint32 countPlagues = 0;
-                    uint32 maximum = std::max(1u, sSpellMgr->GetSpellInfo(500573)->MaxAffectedTargets);
+                    uint32 maximum = std::max(1u, AscensionSpellSafe::MaxAffectedTargets(500573, 1));
                     for (Unit* unit : Nearby(target, 10.0f))
                         if (player->IsValidAttackTarget(unit))
                         {
@@ -442,14 +443,18 @@ class spell_ascension_necromancer_ability : public SpellScript
     {
         OnEffectHitTarget += SpellEffectFn(spell_ascension_necromancer_ability::Hit, EFFECT_ALL, SPELL_EFFECT_ANY);
         // Validation registers scripts before a cast object exists.
-        for (auto const& effect : sSpellMgr->GetSpellInfo(m_scriptSpellId)->Effects)
-            if (effect.TargetA.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY ||
-                effect.TargetB.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY)
-            {
-                OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_ascension_necromancer_ability::Filter,
-                                                                          EFFECT_ALL, TARGET_UNIT_SRC_AREA_ALLY);
-                break;
-            }
+        // Le test de nullite ci-dessous est defensif et jamais franchi : _Register()
+        // n'est appele qu'avec l'Id d'un SpellInfo existant (ObjectMgr.cpp:6432-6434
+        // et ScriptMgr::CreateSpellScripts).
+        if (SpellInfo const* script = AscensionSpellSafe::Get(m_scriptSpellId))
+            for (auto const& effect : script->Effects)
+                if (effect.TargetA.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY ||
+                    effect.TargetB.GetTarget() == TARGET_UNIT_SRC_AREA_ALLY)
+                {
+                    OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(
+                        spell_ascension_necromancer_ability::Filter, EFFECT_ALL, TARGET_UNIT_SRC_AREA_ALLY);
+                    break;
+                }
     }
 };
 } // namespace

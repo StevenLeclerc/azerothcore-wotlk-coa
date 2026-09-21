@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionSpellSafe.h"
 #include "AscensionWitchHunterCompletion.h"
 #include "Creature.h"
 #include "DBCStores.h"
@@ -192,7 +193,7 @@ class HoundActions
                     continue;
                 }
                 _landingChecks = 0;
-                int32 value = sSpellMgr->GetSpellInfo(706332)->Effects[EFFECT_1].CalcValue(owner) +
+                int32 value = AscensionSpellSafe::EffectValue(706332, EFFECT_1, owner, 0) +
                               int32(owner->GetTotalAttackPowerValue(RANGED_ATTACK) * 0.35f);
                 if (owner->HasAura(705450))
                     value += owner->GetLevel() * 2;
@@ -337,7 +338,7 @@ struct npc_ascension_witch_hunter_field : ScriptedAI
         uint32 entry = me->GetEntry();
         if (entry == 254862)
         {
-            float radius = sSpellMgr->GetSpellInfo(853203)->Effects[EFFECT_0].CalcRadius(owner);
+            float radius = AscensionSpellSafe::EffectRadius(853203, EFFECT_0, owner, 10.0f);
             for (Unit* ally : Nearby(me, radius))
                 if (ally == owner || owner->IsInPartyWith(ally))
                     ally->RemoveAurasWithMechanic((1 << MECHANIC_CHARM) | (1 << MECHANIC_FEAR) | (1 << MECHANIC_SLEEP),
@@ -372,7 +373,7 @@ struct npc_ascension_witch_hunter_field : ScriptedAI
                     else
                     {
                         uint32 count = 0;
-                        uint32 limit = sSpellMgr->GetSpellInfo(681179)->MaxAffectedTargets;
+                        uint32 limit = AscensionSpellSafe::MaxAffectedTargets(681179, 1);
                         for (Unit* victim : Nearby(enemy, 5.0f))
                             if (owner->IsValidAttackTarget(victim))
                             {

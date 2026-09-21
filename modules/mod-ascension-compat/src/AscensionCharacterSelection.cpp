@@ -2,19 +2,46 @@
  * Copyright (C) 2016+ AzerothCore <www.azerothcore.org>, released under GNU AGPL v3 license: https://github.com/azerothcore/azerothcore-wotlk/blob/master/LICENSE-AGPL3
  */
 
+// THREAD HAND-OFF — READ THIS BEFORE MOVING ANY CALL IN THIS FILE.
+// Every entry point here is reached from AscensionCompatServerScript::
+// CanPacketReceiveEarly, which WorldSocket calls on the NETWORK thread. Nothing
+// on the network thread may touch WorldSession::GetQueryProcessor() (see the
+// long comment at "Network thread -> world thread hand-off" below), so this
+// file registers two scripts, both created by AddSC_AscensionCharacterSelection()
+// and both wired from MP_loader.cpp beside AddSC_AscensionPersonalBank():
+//   * AscensionCharacterSelectionWorldScript — drains, every world tick, the
+//     queue that the three extension opcodes (0x072E/0x072F/0x0772) park. Those
+//     opcodes sit above NUM_OPCODE_HANDLERS, so they must be consumed on the
+//     network thread and cannot travel through WorldSession::_recvQueue.
+//   * AscensionCharacterSelectionServerScript — answers CMSG_CHAR_ENUM from
+//     CanPacketReceive, i.e. inside WorldSession::Update on the WORLD thread and
+//     immediately BEFORE WorldSession::HandleCharEnumOpcode. That keeps the
+//     Ascension list query ahead of the core's own enum query in the very same
+//     _queryProcessor vector, which is the order the client used to see, and it
+//     costs no extra world tick.
+// If either script is missing (MP_loader not wired), the matching path falls
+// back to the old network-thread behaviour and logs one LOG_ERROR saying so.
+
 #include "AscensionCharacterSelection.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "Log.h"
+#include "Opcodes.h"
 #include "Player.h"
 #include "QueryResult.h"
+#include "ScriptMgr.h"
 #include "StringFormat.h"
 #include "World.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WorldSessionMgr.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdint>
+#include <deque>
+#include <exception>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -69,9 +96,18 @@ namespace
     constexpr uint32 CHARACTER_LIST_MAXIMUM = 128;
     constexpr std::size_t SORT_ORDER_PAYLOAD_MAXIMUM = 1023;
 
+    // "AscensionCompat.Enable" is the module's own master switch
+    // (AscensionCompat.cpp:343 binds AscensionCompatConfig::ENABLED to it, same
+    // default). It has to be tested here too: the network-thread entry points
+    // are behind AscensionCompatServerScript::CanPacketReceiveEarly, which
+    // returns early when the module is off (AscensionCompat.cpp:5100), but
+    // AscensionCharacterSelectionServerScript::CanPacketReceive is reached
+    // directly by the core and would otherwise answer CMSG_CHAR_ENUM on a
+    // server where the module is disabled.
     bool CharacterSelectionEnabled()
     {
-        return sConfigMgr->GetOption<bool>("AscensionCompat.CharacterSelectionEnable", true);
+        return sConfigMgr->GetOption<bool>("AscensionCompat.Enable", true) &&
+               sConfigMgr->GetOption<bool>("AscensionCompat.CharacterSelectionEnable", true);
     }
 
     uint32 CharacterSelectionMaxActive()
@@ -298,9 +334,18 @@ namespace
     void HandleSortOrderRequest(WorldSession* session, WorldPacket const& packet)
     {
         // operator>> advances the read cursor, so read from a copy of the const packet.
+        //
+        // ReadCString(false), NOT operator>>: ByteBuffer.h:293 makes operator>>
+        // call ReadCString(true), which throws ByteBufferInvalidValueException
+        // (ByteBuffer.cpp:88-89) on any payload that is not valid UTF-8. That
+        // exception had no handler anywhere on the path it travels
+        // (CanPacketReceiveEarly -> WorldSocket::ReadDataHandler ->
+        // Socket<T>::ReadHandlerInternal -> NetworkThread::Run's _ioContext.run()),
+        // so three bytes from any authenticated client terminated the whole
+        // worldserver. ReadCString(false) is bounded by size() and cannot throw;
+        // the payload is validated below instead.
         WorldPacket readable = packet;
-        std::string payload;
-        readable >> payload;
+        std::string const payload = readable.ReadCString(false);
 
         // The client always sends a full table (the reset button re-sends
         // "1 2 3 ..."), so an empty payload is malformed and must not clobber
@@ -317,6 +362,21 @@ namespace
         {
             LOG_ERROR("module.ascension_compat",
                 "Account {} sent an oversized character-selection sort order ({} bytes); ignored",
+                session->GetAccountId(), payload.size());
+            return;
+        }
+
+        // The stored value is echoed straight back through SMSG 0x076F as a
+        // cstring, so nothing outside printable ASCII has any business being
+        // there (the table the client composes, and the identity table this
+        // file generates below, are digits and spaces). Refusing the rest keeps
+        // control bytes and broken encodings out of the column and out of the
+        // packet that goes back to the client.
+        if (std::any_of(payload.begin(), payload.end(),
+                [](char c) { return uint8(c) < 0x20 || uint8(c) > 0x7E; }))
+        {
+            LOG_ERROR("module.ascension_compat",
+                "Account {} sent a character-selection sort order with non-printable bytes ({} bytes); ignored",
                 session->GetAccountId(), payload.size());
             return;
         }
@@ -456,6 +516,186 @@ namespace
             "Sent Ascension character list for account {}: max={}, total={}, active={}, inactive={}, extras={}, sort order={} bytes",
             session->GetAccountId(), maxActive, total, activeCount, total - activeCount, extras.size(), sortOrder.size());
     }
+
+    // Runs on the world thread only: it feeds session->GetQueryProcessor().
+    void SendCharacterListInfoNow(WorldSession* session)
+    {
+        uint32 const accountId = session->GetAccountId();
+        uint32 const maxActive = CharacterSelectionMaxActive();
+
+        // Mirrors the core enum filter: inactive characters are excluded from
+        // SMSG_CHAR_ENUM but still listed here with active = 0. Active characters
+        // come first, each group in enum order (COALESCE(c.order, c.guid)): the
+        // client takes the entries after the active count to be the inactive ones,
+        // and it resolves a row by its position among the active characters.
+        std::string const query = Acore::StringFormat(
+            "SELECT `c`.`guid`, `c`.`name`, `c`.`online`, `c`.`level`, `c`.`race`, `c`.`class`, `c`.`gender`, `c`.`zone`, "
+            "COALESCE(`s`.`active` <> 0, 1), "
+            "COALESCE((SELECT `a`.`sort_order` FROM `account_ascension_settings` AS `a` "
+            "WHERE `a`.`account_id` = {}), ''), "
+            "EXISTS(SELECT 1 FROM `character_aura` AS `ha` WHERE `ha`.`guid` = `c`.`guid` AND `ha`.`spell` = {}), "
+            "EXISTS(SELECT 1 FROM `mail` AS `m` WHERE `m`.`receiver` = `c`.`guid` "
+            "AND (`m`.`checked` & 1) = 0 AND `m`.`deliver_time` <= UNIX_TIMESTAMP()) "
+            "FROM `characters` AS `c` "
+            "LEFT JOIN `character_ascension_state` AS `s` ON `s`.`guid` = `c`.`guid` "
+            "WHERE `c`.`account` = {} AND `c`.`deleteInfos_Name` IS NULL "
+            "ORDER BY COALESCE(`s`.`active` <> 0, 1) DESC, COALESCE(`c`.`order`, `c`.`guid`)",
+            accountId, SPELL_ASCENSION_HIGH_RISK, accountId);
+
+        session->GetQueryProcessor().AddCallback(
+            CharacterDatabase.AsyncQuery(query).WithCallback(
+                [session, maxActive](QueryResult result)
+                {
+                    HandleCharacterListQuery(session, maxActive, result);
+                }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Network thread -> world thread hand-off
+    //
+    // Every entry point of this file is reached from
+    // AscensionCompatServerScript::CanPacketReceiveEarly, which WorldSocket
+    // calls on the NETWORK thread (the comment at AscensionCompat.cpp:4943 says
+    // so itself, and routes CMSG_CHARACTER_ADVANCEMENT_KNOWN_ENTRIES through a
+    // queue for exactly that reason). WorldSession::GetQueryProcessor() is an
+    // AsyncCallbackProcessor whose whole state is a bare std::vector
+    // (AsyncCallbackProcessor.h:59) with no lock: AddCallback() does
+    // emplace_back while the WORLD thread, in WorldSession::Update ->
+    // ProcessQueryCallbacks (WorldSession.cpp:614, :1435), does
+    // `std::vector<T> updateCallbacks{ std::move(_callbacks) }`. Calling it from
+    // the network thread is a plain data race on that vector.
+    //
+    // So nothing is executed here any more: the request is copied into a
+    // mutex-protected queue and replayed from the world thread. The session is
+    // looked up again on replay (never kept as a pointer across threads), which
+    // also removes the dangling-session window the old code had.
+    // -----------------------------------------------------------------------
+    enum class SelectionRequestKind : uint8
+    {
+        Activate,
+        Deactivate,
+        SortOrder,
+    };
+
+    struct PendingSelectionRequest
+    {
+        uint32 accountId = 0;
+        SelectionRequestKind kind = SelectionRequestKind::Activate;
+        uint16 opcode = 0;
+        std::vector<uint8> body;
+    };
+
+    // A session that spams the character screen must not grow this without
+    // bound; the world thread drains it every tick, so the caps are only a
+    // guard. The per-account one matters as much as the global one: these
+    // opcodes are consumed before WorldSession::AntiDOS ever sees them, so one
+    // account could otherwise fill the whole queue and starve every other.
+    constexpr std::size_t MAX_PENDING_SELECTION_REQUESTS = 512;
+    constexpr std::size_t MAX_PENDING_SELECTION_REQUESTS_PER_ACCOUNT = 8;
+    // The largest useful body is one sort-order table (SORT_ORDER_PAYLOAD_
+    // MAXIMUM plus its terminator); WorldSocket lets a client send about 10 KB.
+    constexpr std::size_t MAX_SELECTION_REQUEST_BODY = 2048;
+
+    std::mutex gPendingSelectionLock;
+    std::deque<PendingSelectionRequest> gPendingSelection;
+
+    // Set by each script's constructor, i.e. only if MP_loader.cpp really called
+    // AddSC_AscensionCharacterSelection(). Without them nothing would ever drain
+    // the queue, nor answer CMSG_CHAR_ENUM from the world thread, so the old
+    // direct paths stay available as fallbacks and say once, loudly, what is
+    // missing. They are only ever stored during script registration (single
+    // threaded, before the network starts) and loaded afterwards.
+    std::atomic<bool> gSelectionPumpRegistered{ false };
+    std::atomic<bool> gSelectionEnumHookRegistered{ false };
+    std::atomic<bool> gSelectionPumpWarned{ false };
+    std::atomic<bool> gSelectionEnumHookWarned{ false };
+
+    void DispatchSelectionRequest(WorldSession* session, SelectionRequestKind kind, WorldPacket const& packet)
+    {
+        switch (kind)
+        {
+            case SelectionRequestKind::Activate:
+                HandleActivateRequest(session, packet);
+                break;
+            case SelectionRequestKind::Deactivate:
+                HandleDeactivateRequest(session, packet);
+                break;
+            case SelectionRequestKind::SortOrder:
+                HandleSortOrderRequest(session, packet);
+                break;
+        }
+    }
+
+    void WarnSelectionPumpMissing()
+    {
+        if (gSelectionPumpWarned.exchange(true, std::memory_order_acq_rel))
+            return;
+
+        LOG_ERROR("module.ascension_compat",
+            "AscensionCharacterSelectionWorldScript is not registered: character-selection "
+            "requests keep running on the network thread, which races WorldSession's query processor. "
+            "Check that MP_loader.cpp calls AddSC_AscensionCharacterSelection().");
+    }
+
+    void WarnSelectionEnumHookMissing()
+    {
+        if (gSelectionEnumHookWarned.exchange(true, std::memory_order_acq_rel))
+            return;
+
+        LOG_ERROR("module.ascension_compat",
+            "AscensionCharacterSelectionServerScript is not registered: the Ascension character list "
+            "keeps being queried from the network thread, which races WorldSession's query processor. "
+            "Check that MP_loader.cpp calls AddSC_AscensionCharacterSelection().");
+    }
+
+    void DeferOrRunSelectionRequest(WorldSession* session, SelectionRequestKind kind, WorldPacket const& packet)
+    {
+        if (!gSelectionPumpRegistered.load(std::memory_order_acquire))
+        {
+            WarnSelectionPumpMissing();
+            DispatchSelectionRequest(session, kind, packet);
+            return;
+        }
+
+        uint32 const accountId = session->GetAccountId();
+
+        if (packet.size() > MAX_SELECTION_REQUEST_BODY)
+        {
+            LOG_ERROR("module.ascension_compat",
+                "Dropping an oversized character-selection request from account {} (opcode {}, {} bytes)",
+                accountId, uint32(packet.GetOpcode()), packet.size());
+            return;
+        }
+
+        PendingSelectionRequest request;
+        request.accountId = accountId;
+        request.kind = kind;
+        request.opcode = static_cast<uint16>(packet.GetOpcode());
+        if (packet.size())
+            request.body.assign(packet.contents(), packet.contents() + packet.size());
+
+        std::lock_guard<std::mutex> lock(gPendingSelectionLock);
+        if (gPendingSelection.size() >= MAX_PENDING_SELECTION_REQUESTS)
+        {
+            LOG_WARN("module.ascension_compat",
+                "Dropping a character-selection request from account {}: the queue is full ({} entries)",
+                accountId, gPendingSelection.size());
+            return;
+        }
+
+        std::size_t const fromThisAccount = static_cast<std::size_t>(
+            std::count_if(gPendingSelection.begin(), gPendingSelection.end(),
+                [accountId](PendingSelectionRequest const& pending) { return pending.accountId == accountId; }));
+        if (fromThisAccount >= MAX_PENDING_SELECTION_REQUESTS_PER_ACCOUNT)
+        {
+            LOG_WARN("module.ascension_compat",
+                "Dropping a character-selection request from account {}: {} of its requests are already waiting",
+                accountId, fromThisAccount);
+            return;
+        }
+
+        gPendingSelection.push_back(std::move(request));
+    }
 }
 
 bool IsAscensionCharacterSelectionOpcode(uint16 opcode)
@@ -470,20 +710,46 @@ bool HandleAscensionCharacterSelectionPacket(WorldSession* session, WorldPacket 
     if (!session || !CharacterSelectionEnabled())
         return false;
 
+    SelectionRequestKind kind;
     switch (uint16(packet.GetOpcode()))
     {
         case CMSG_ASCENSION_CHARACTER_ACTIVATE:
-            HandleActivateRequest(session, packet);
-            return true;
+            kind = SelectionRequestKind::Activate;
+            break;
         case CMSG_ASCENSION_CHARACTER_DEACTIVATE:
-            HandleDeactivateRequest(session, packet);
-            return true;
+            kind = SelectionRequestKind::Deactivate;
+            break;
         case CMSG_ASCENSION_CHARACTER_SORT_ORDER:
-            HandleSortOrderRequest(session, packet);
-            return true;
+            kind = SelectionRequestKind::SortOrder;
+            break;
         default:
             return false;
     }
+
+    // Nothing may escape from here: this runs on the network thread, where
+    // WorldSocket::ReadDataHandler wraps only CMSG_PING and CMSG_AUTH_SESSION in
+    // a try, and an exception that reaches NetworkThread::Run's _ioContext.run()
+    // takes the whole realm down.
+    try
+    {
+        DeferOrRunSelectionRequest(session, kind, packet);
+    }
+    catch (std::exception const& e)
+    {
+        LOG_ERROR("module.ascension_compat",
+            "Ignored a malformed character-selection packet (opcode {}, {} bytes) from account {}: {}",
+            uint32(packet.GetOpcode()), packet.size(), session->GetAccountId(), e.what());
+    }
+    catch (...)
+    {
+        LOG_ERROR("module.ascension_compat",
+            "Ignored a malformed character-selection packet (opcode {}, {} bytes) from account {}",
+            uint32(packet.GetOpcode()), packet.size(), session->GetAccountId());
+    }
+
+    // Consumed either way. These opcodes are above NUM_OPCODE_HANDLERS, so
+    // letting them through would make WorldSocket close the connection.
+    return true;
 }
 
 void SendAscensionCharacterListInfo(WorldSession* session)
@@ -491,32 +757,153 @@ void SendAscensionCharacterListInfo(WorldSession* session)
     if (!session || !CharacterSelectionEnabled())
         return;
 
-    uint32 const accountId = session->GetAccountId();
-    uint32 const maxActive = CharacterSelectionMaxActive();
+    // Registered path: AscensionCharacterSelectionServerScript::CanPacketReceive
+    // answers this very CMSG_CHAR_ENUM a moment later, on the world thread and
+    // just before WorldSession::HandleCharEnumOpcode. Doing anything here would
+    // send the list twice, so the network thread has nothing left to do.
+    if (gSelectionEnumHookRegistered.load(std::memory_order_acquire))
+        return;
 
-    // Mirrors the core enum filter: inactive characters are excluded from
-    // SMSG_CHAR_ENUM but still listed here with active = 0. Active characters
-    // come first, each group in enum order (COALESCE(c.order, c.guid)): the
-    // client takes the entries after the active count to be the inactive ones,
-    // and it resolves a row by its position among the active characters.
-    std::string const query = Acore::StringFormat(
-        "SELECT `c`.`guid`, `c`.`name`, `c`.`online`, `c`.`level`, `c`.`race`, `c`.`class`, `c`.`gender`, `c`.`zone`, "
-        "COALESCE(`s`.`active` <> 0, 1), "
-        "COALESCE((SELECT `a`.`sort_order` FROM `account_ascension_settings` AS `a` "
-        "WHERE `a`.`account_id` = {}), ''), "
-        "EXISTS(SELECT 1 FROM `character_aura` AS `ha` WHERE `ha`.`guid` = `c`.`guid` AND `ha`.`spell` = {}), "
-        "EXISTS(SELECT 1 FROM `mail` AS `m` WHERE `m`.`receiver` = `c`.`guid` "
-        "AND (`m`.`checked` & 1) = 0 AND `m`.`deliver_time` <= UNIX_TIMESTAMP()) "
-        "FROM `characters` AS `c` "
-        "LEFT JOIN `character_ascension_state` AS `s` ON `s`.`guid` = `c`.`guid` "
-        "WHERE `c`.`account` = {} AND `c`.`deleteInfos_Name` IS NULL "
-        "ORDER BY COALESCE(`s`.`active` <> 0, 1) DESC, COALESCE(`c`.`order`, `c`.`guid`)",
-        accountId, SPELL_ASCENSION_HIGH_RISK, accountId);
+    // Fallback only (script not registered): the old behaviour, which races the
+    // world thread on WorldSession::GetQueryProcessor(). Kept so the character
+    // screen still fills, and loudly reported once per process.
+    WarnSelectionEnumHookMissing();
 
-    session->GetQueryProcessor().AddCallback(
-        CharacterDatabase.AsyncQuery(query).WithCallback(
-            [session, maxActive](QueryResult result)
+    try
+    {
+        SendCharacterListInfoNow(session);
+    }
+    catch (std::exception const& e)
+    {
+        LOG_ERROR("module.ascension_compat",
+            "Could not send the Ascension character list for account {}: {}",
+            session->GetAccountId(), e.what());
+    }
+    catch (...)
+    {
+        LOG_ERROR("module.ascension_compat",
+            "Could not send the Ascension character list for account {}", session->GetAccountId());
+    }
+}
+
+void ProcessAscensionCharacterSelectionQueue()
+{
+    std::deque<PendingSelectionRequest> batch;
+    {
+        std::lock_guard<std::mutex> lock(gPendingSelectionLock);
+        if (gPendingSelection.empty())
+            return;
+        batch.swap(gPendingSelection);
+    }
+
+    for (PendingSelectionRequest const& request : batch)
+    {
+        // The session is resolved again here, on the world thread that owns the
+        // session map: the account may have disconnected since the packet was
+        // read, and keeping a WorldSession* across threads is exactly what this
+        // hand-off exists to avoid.
+        WorldSession* session = sWorldSessionMgr->FindSession(request.accountId);
+        if (!session)
+            continue;
+
+        try
+        {
+            WorldPacket packet(request.opcode, request.body.size());
+            if (!request.body.empty())
+                packet.append(request.body.data(), request.body.size());
+
+            DispatchSelectionRequest(session, request.kind, packet);
+        }
+        catch (std::exception const& e)
+        {
+            LOG_ERROR("module.ascension_compat",
+                "Ignored a malformed character-selection request (opcode {}) from account {}: {}",
+                request.opcode, request.accountId, e.what());
+        }
+        catch (...)
+        {
+            LOG_ERROR("module.ascension_compat",
+                "Ignored a malformed character-selection request (opcode {}) from account {}",
+                request.opcode, request.accountId);
+        }
+    }
+}
+
+namespace
+{
+    // Drains, on the world thread, what the three extension opcodes parked from
+    // the network thread. WorldScript::OnUpdate is called from World::Update
+    // (World.cpp:1346), after WorldSessionMgr::UpdateSessions (World.cpp:1218):
+    // these are self-contained request/response exchanges, so the tick of delay
+    // costs nothing and no packet order depends on it.
+    class AscensionCharacterSelectionWorldScript : public WorldScript
+    {
+    public:
+        AscensionCharacterSelectionWorldScript()
+            : WorldScript("AscensionCharacterSelectionWorldScript", { WORLDHOOK_ON_UPDATE })
+        {
+            gSelectionPumpRegistered.store(true, std::memory_order_release);
+        }
+
+        void OnUpdate(uint32 /*diff*/) override
+        {
+            ProcessAscensionCharacterSelectionQueue();
+        }
+    };
+
+    // CMSG_CHAR_ENUM is a real core opcode (Opcodes.cpp:186, STATUS_AUTHED), so
+    // it is queued into WorldSession::_recvQueue and handled on the world thread.
+    // WorldSession::Update calls sScriptMgr->CanPacketReceive (WorldSession.cpp:
+    // 524, STATUS_AUTHED branch) immediately before opHandle->Call, i.e. before
+    // HandleCharEnumOpcode adds the core's own enum query to _queryProcessor
+    // (CharacterHandler.cpp:264). Sending the Ascension list from here therefore
+    // does two things at once: it leaves the network thread out of the query
+    // processor, and it keeps the Ascension query ahead of the core enum query
+    // in that same vector, which is the order the client saw before.
+    //
+    // This returns true unconditionally: the packet is the core's, we only ride
+    // along. Never consume it, or the client never gets SMSG_CHAR_ENUM.
+    class AscensionCharacterSelectionServerScript : public ServerScript
+    {
+    public:
+        AscensionCharacterSelectionServerScript()
+            : ServerScript("AscensionCharacterSelectionServerScript", { SERVERHOOK_CAN_PACKET_RECEIVE })
+        {
+            gSelectionEnumHookRegistered.store(true, std::memory_order_release);
+        }
+
+        [[nodiscard]] bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+        {
+            if (!session || packet.GetOpcode() != CMSG_CHAR_ENUM || !CharacterSelectionEnabled())
+                return true;
+
+            // Same discipline as every other entry point of this file: nothing
+            // escapes. This one runs on the world thread, where an escaping
+            // exception would be caught by WorldSession::Update's own try
+            // (WorldSession.cpp:451) and would skip the core's enum handler.
+            try
             {
-                HandleCharacterListQuery(session, maxActive, result);
-            }));
+                SendCharacterListInfoNow(session);
+            }
+            catch (std::exception const& e)
+            {
+                LOG_ERROR("module.ascension_compat",
+                    "Could not send the Ascension character list for account {}: {}",
+                    session->GetAccountId(), e.what());
+            }
+            catch (...)
+            {
+                LOG_ERROR("module.ascension_compat",
+                    "Could not send the Ascension character list for account {}", session->GetAccountId());
+            }
+
+            return true;
+        }
+    };
+}
+
+void AddSC_AscensionCharacterSelection()
+{
+    new AscensionCharacterSelectionWorldScript();
+    new AscensionCharacterSelectionServerScript();
 }

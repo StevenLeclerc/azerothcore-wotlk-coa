@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionPyromancer.h"
+#include "AscensionSpellSafe.h"
 #include "DBCStores.h"
 #include "Map.h"
 #include "MotionMaster.h"
@@ -103,7 +104,7 @@ struct npc_ascension_pyromancer_summon : public ScriptedAI
         }
         if (action == 2)
         {
-            dormant = std::max(1, sSpellMgr->GetSpellInfo(707060)->GetDuration());
+            dormant = std::max(1, AscensionSpellSafe::Duration(707060, 4000));
             me->GetMotionMaster()->MoveIdle();
             me->SetDisplayId(20245);
             timers.RescheduleEvent(1, 2s);
@@ -116,7 +117,8 @@ struct npc_ascension_pyromancer_summon : public ScriptedAI
         if (!firstShield && length < .0001f)
             return;
         firstShield = false;
-        uint32 maximum = sSpellMgr->GetSpellInfo(706855)->Effects[0].ChainTarget;
+        // Le repli a 5 juste en dessous couvre deja le sort absent (ChainTarget nul).
+        uint32 maximum = AscensionSpellSafe::EffectChainTarget(706855, EFFECT_0, 0);
         if (!maximum)
             maximum = 5;
         for (Unit* ally : Allies(player, me, std::sqrt(length) + 3, 40))
@@ -164,15 +166,18 @@ struct npc_ascension_pyromancer_summon : public ScriptedAI
         if (me->GetEntry() == 50258)
         {
             uint32 id = dormant ? 706856 : 707110;
-            SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-            float radius = info->Effects[0].CalcRadius(player);
-            for (Unit* ally : Allies(player, me, radius > 0 ? radius : 15, info->MaxAffectedTargets))
-                Cast(player, ally, id);
+            if (SpellInfo const* info = AscensionSpellSafe::Get(id))
+            {
+                float radius = info->Effects[0].CalcRadius(player);
+                for (Unit* ally : Allies(player, me, radius > 0 ? radius : 15, info->MaxAffectedTargets))
+                    Cast(player, ally, id);
+            }
         }
         if (me->GetEntry() == 52258)
         {
             std::set<ObjectGuid> current;
-            float radius = sSpellMgr->GetSpellInfo(802791)->Effects[0].CalcRadius(player);
+            // Le repli a 6 de la ligne suivante couvre deja le sort absent (rayon nul).
+            float radius = AscensionSpellSafe::EffectRadius(802791, EFFECT_0, player, 0.0f);
             for (Unit* enemy : Nearby(me, radius > 0 ? radius : 6))
                 if (player->IsValidAttackTarget(enemy) && me->IsWithinLOSInMap(enemy))
                 {

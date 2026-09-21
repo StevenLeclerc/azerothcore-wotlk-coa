@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionXoroth.h"
+#include "AscensionSpellSafe.h"
 #include "Pet.h"
 #include "Player.h"
 #include "Random.h"
@@ -115,7 +116,7 @@ class aura_ascension_xoroth_event : public AuraScript
         switch (id)
         {
         case 92104:
-            Summon(player, 50301, player->GetNearPosition(2, 0), sSpellMgr->GetSpellInfo(805966)->GetDuration());
+            Summon(player, 50301, player->GetNearPosition(2, 0), AscensionSpellSafe::Duration(805966, 12000));
             break;
         case 300376:
             Cast(player, player, 805799);
@@ -203,8 +204,13 @@ class aura_ascension_xoroth_event : public AuraScript
             break;
         case 802602: {
             // Refresh the six-stack DoT while retaining each contributing hit's actual value.
-            auto info = sSpellMgr->GetSpellInfo(802608);
-            uint32 ticks = std::max(1, info->GetDuration() / int32(info->Effects[0].Amplitude));
+            // 802608 lu au Spell.dbc le 2026-09-21 : duree 6000 ms, Amplitude[0] 1500 ms,
+            // soit 4 ticks. Le repli couvre le sort absent du DBC (dereferencement nul, P-047)
+            // et une Amplitude a 0 (division entiere par zero).
+            int32 amplitude = int32(AscensionSpellSafe::EffectAmplitude(802608, EFFECT_0, 1500));
+            uint32 ticks = amplitude > 0
+                ? uint32(std::max(1, AscensionSpellSafe::Duration(802608, 6000) / amplitude))
+                : 4u;
             uint32 values[6] = {damage / 10 / ticks};
             if (Aura* previous = target->GetAura(802608, GetTarget()->GetGUID()))
                 for (uint32 i = 1; i < 6; ++i)

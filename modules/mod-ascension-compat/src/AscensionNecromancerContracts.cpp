@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionContract.h"
 #include "AscensionNecromancer.h"
 #include "AscensionNecromancerData.h"
 #include "DBCStores.h"
@@ -32,11 +33,14 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].ApplyAuraName = info->Effects[1].ApplyAuraName = SPELL_AURA_DUMMY;
         return;
     }
-    if (info->SpellFamilyName != 29)
+    if (!AscensionContract::MatchesFamily(info, 29, "Necromancer"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 index)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, index, "Necromancer");
         info->Effects[index].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[index].TriggerSpell = 0;
     };
@@ -49,12 +53,12 @@ void ApplyContracts(SpellInfo* info)
     };
     // Private event types have a single actual-result router on the caster and
     // each owned minion.
-    for (SpellEffectInfo& effect : info->Effects)
-        if (effect.ApplyAuraName == 42 || effect.ApplyAuraName == 354)
-        {
-            effect.ApplyAuraName = SPELL_AURA_DUMMY;
-            effect.TriggerSpell = 0;
-        }
+    // Written through dummy() rather than by hand so that this loop, which
+    // rewrites the router of every event spell of the class, is journalled like
+    // the rest when the slot can no longer carry the aura it writes.
+    for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
+        if (info->Effects[index].ApplyAuraName == 42 || info->Effects[index].ApplyAuraName == 354)
+            dummy(index);
     for (auto const& row : NecromancerSummons)
         if (row.spell == id)
             info->Effects[row.effect].MiscValueB = 64;
@@ -72,7 +76,7 @@ void ApplyContracts(SpellInfo* info)
         }
     if (id == 805011 || id == 525004 || id == 805015)
     {
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Necromancer");
         for (auto& effect : info->Effects)
             effect.Effect = 0;
         info->Effects[0].Effect = SPELL_EFFECT_APPLY_AURA;
@@ -119,7 +123,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 561318)
         info->Effects[0].ValueMultiplier = 1.0f;
     if (id == 573131)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1); // finite, refreshable ten-second army buff
+        AscensionContract::SetDuration(info, 1, "Necromancer"); // finite, refreshable ten-second army buff
     if (id == 807098)
     {
         info->Effects[0].Effect = SPELL_EFFECT_DUMMY;
@@ -183,7 +187,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 806149 || id == 807925)
         dummy(0);
     if (id == 500982 || id == 500983 || id == 500985)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Necromancer");
     if (id == 500983)
     {
         dummy(0);
@@ -295,7 +299,7 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].Effect = 0; // the visible Shade spell owns transformation,
                                      // without a missing shapeshift row
     if (id == 803782)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Necromancer");
     if (id == 801938)
         info->Effects[1].Effect = 0; // Infest marker belongs to the caster's copied-disease snapshot
     if (id == 707133)

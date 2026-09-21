@@ -11,6 +11,7 @@
 #include "AscensionTinker.h"
 #include "AscensionSunCleric.h"
 #include "AllCreatureScript.h"
+#include "AllGameObjectScript.h"
 #include "AllSpellScript.h"
 #include "AscensionChangelogCompat.h"
 #include "AscensionCharacterSelection.h"
@@ -62,6 +63,7 @@
 #include "ConfigValueCache.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
+#include "GameTime.h"
 #include "GossipDef.h"
 #include "GlobalScript.h"
 #include "GridTerrainData.h"
@@ -97,6 +99,7 @@
 #include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -4641,13 +4644,111 @@ constexpr uint32 BANK_VAULT_DURATION = 10 * 60;
     return alliance ? BANK_OBJECT_PERSONAL_ALLIANCE : BANK_OBJECT_PERSONAL_HORDE;
 }
 
+/// Whether an object entry is one of the vaults this module places.
+///
+/// Used to keep the removal hook, which the core runs for every gameobject leaving the world,
+/// from touching the registry's lock for objects that have nothing to do with us.
+[[nodiscard]] bool IsBankVaultEntry(uint32 entry)
+{
+    switch (entry)
+    {
+        case BANK_OBJECT_PERSONAL_ALLIANCE:
+        case BANK_OBJECT_PERSONAL_HORDE:
+        case BANK_OBJECT_CELESTIAL:
+        case BANK_OBJECT_REALM_ALLIANCE:
+        case BANK_OBJECT_REALM_HORDE:
+            return true;
+        default:
+            return false;
+    }
+}
+
+// How long a remembered vault outlives the object it stands for, when nothing tells us the
+// object is gone. The removal hook below is what normally drops a row the instant the vault
+// despawns; this margin only bounds a row whose hook never ran (a map torn down, an object
+// removed by a path that skips RemoveFromWorld), and it is deliberately longer than a second
+// of clock slack so a live vault is never declared dead while the player is still using it.
+constexpr uint32 BANK_VAULT_REGISTRY_GRACE = 60;
+
 struct PersonalBankVault
 {
     ObjectGuid Owner;
     uint8 Kind = PERSONAL_BANK_PERSONAL;
+    // Unix second past which this row no longer answers, whatever else happens. See
+    // BANK_VAULT_REGISTRY_GRACE.
+    time_t Expiry = 0;
 };
 
-std::unordered_map<ObjectGuid::LowType, PersonalBankVault> personalBankVaults;
+/// The vaults this module has placed, remembered for as long as they live.
+///
+/// Three things this table has to get right, and none of them held before.
+///
+/// 1. The key is the WHOLE ObjectGuid, never `GetCounter()`. Low counters come from
+///    `Map::GenerateLowGuid`, whose generators are a member of Map (`Map.h`, `_guidGenerators`),
+///    so every map starts its own sequence at 1 and two maps reach the same number; and a
+///    gameobject GUID carries its entry and its high type outside the counter (`ObjectGuid.h`),
+///    so two different object entries collide on a bare counter as well. Worse,
+///    `CMSG_GUILD_BANKER_ACTIVATE` normally carries a CREATURE guid - a real guild banker,
+///    numbered in its own per-map sequence - so a bare counter let a guild banker answer as
+///    somebody's personal vault and swallowed the core's own handling of it.
+///
+/// 2. Writes come from map threads. The summon runs in `AfterCast` of a SpellScript, and both
+///    CMSG_USE_ITEM (PROCESS_INPLACE) and CMSG_CAST_SPELL (PROCESS_THREADSAFE) are handled
+///    inside `Map::Update` through `MapSessionFilter::Process`, of which `MapUpdate.Threads`
+///    run at once. Two characters placing a vault in the same tick used to call `operator[]`
+///    on one unprotected `unordered_map`: that is exactly the rehash race of P-050, and it
+///    segfaults. The reader (the activate packet, PROCESS_THREADUNSAFE) is on the world thread,
+///    hence a shared_mutex rather than a plain one - and every accessor hands back a COPY,
+///    because a reference into the table stops being valid the moment the lock is released.
+///
+/// 3. Rows are erased. The object dies when its ten minutes run out, but the row used to stay
+///    for the lifetime of the process: the table only ever grew, one row per vault ever placed,
+///    and every one of them went on answering an activate packet for an object that no longer
+///    exists. `Forget` runs from the object's removal hook (`GameObject::RemoveFromWorld`, which
+///    the despawn reaches through `Delete` -> `AddObjectToRemoveList` -> `Map::RemoveFromMap`),
+///    `Remember` sweeps what has expired, and `Find` refuses an expired row even if neither ran.
+class PersonalBankVaultRegistry
+{
+public:
+    void Remember(ObjectGuid vault, ObjectGuid owner, uint8 kind, time_t expiry)
+    {
+        std::unique_lock<std::shared_mutex> lock(_lock);
+
+        // Placing a vault is rare - one per character per ten minutes - which makes this the
+        // cheapest place to bound the table: drop everything already dead before inserting.
+        time_t const now = time_t(GameTime::GetGameTime().count());
+        std::erase_if(_vaults, [now](auto const& entry) { return entry.second.Expiry <= now; });
+
+        _vaults[vault] = PersonalBankVault{owner, kind, expiry};
+    }
+
+    /// The vault behind this guid, by value, or nothing at all.
+    [[nodiscard]] std::optional<PersonalBankVault> Find(ObjectGuid vault) const
+    {
+        std::shared_lock<std::shared_mutex> lock(_lock);
+
+        auto itr = _vaults.find(vault);
+        if (itr == _vaults.end())
+            return std::nullopt;
+
+        if (itr->second.Expiry <= time_t(GameTime::GetGameTime().count()))
+            return std::nullopt;
+
+        return itr->second;
+    }
+
+    void Forget(ObjectGuid vault)
+    {
+        std::unique_lock<std::shared_mutex> lock(_lock);
+        _vaults.erase(vault);
+    }
+
+private:
+    mutable std::shared_mutex _lock;
+    std::unordered_map<ObjectGuid, PersonalBankVault> _vaults;
+};
+
+PersonalBankVaultRegistry personalBankVaults;
 
 void SendBankPermissions(Player* player, uint8 kind)
 {
@@ -4702,8 +4803,10 @@ bool HandlePersonalBankActivate(Player* player, WorldPacket const& packet)
         return false;
     }
 
-    auto itr = personalBankVaults.find(banker.GetCounter());
-    if (itr == personalBankVaults.end())
+    // A copy, taken under the registry's own lock and valid after it is released: nothing below
+    // may run with a module lock held, since it sends packets and re-enters the game (P-050).
+    std::optional<PersonalBankVault> const vault = personalBankVaults.Find(banker);
+    if (!vault)
         return false;
 
     // A placed bank belongs to whoever walks up to it, which is how CoA's own did it: the vault
@@ -4711,27 +4814,27 @@ bool HandlePersonalBankActivate(Player* player, WorldPacket const& packet)
     // interacting character's own - their personal bank, or the single realm-wide one. Someone
     // else's chest therefore opens your bank, not theirs. What entitles you to it is owning the
     // bank, not having placed this particular chest; the summoner is kept only for the record.
-    if (!OwnsPlacedBank(player, itr->second.Kind))
+    if (!OwnsPlacedBank(player, vault->Kind))
     {
         ChatHandler(player->GetSession())
             .PSendSysMessage("You do not own a {} bank.",
-                             itr->second.Kind == PERSONAL_BANK_REALM ? "Realm" : "Personal");
+                             vault->Kind == PERSONAL_BANK_REALM ? "Realm" : "Personal");
         LOG_INFO("module.ascension_compat",
                  "{} touched a {} bank placed by {} (vault {}) without owning one",
                  player->GetName(),
-                 itr->second.Kind == PERSONAL_BANK_REALM ? "realm" : "personal",
-                 itr->second.Owner.ToString(), banker.ToString());
+                 vault->Kind == PERSONAL_BANK_REALM ? "realm" : "personal",
+                 vault->Owner.ToString(), banker.ToString());
         return true;
     }
 
     // The kind decides which bank this is; the storage behind it is the module's own
     // (AscensionPersonalBank.cpp), which sends the rights and the tab list itself.
-    SendBankPermissions(player, itr->second.Kind);
-    AscensionPersonalBank::Opened(player, itr->second.Kind, banker);
+    SendBankPermissions(player, vault->Kind);
+    AscensionPersonalBank::Opened(player, vault->Kind, banker);
 
     LOG_INFO("module.ascension_compat",
              "Personal bank opened for {} (kind {}, vault {}, full update {})",
-             player->GetName(), uint32(itr->second.Kind), banker.ToString(),
+             player->GetName(), uint32(vault->Kind), banker.ToString(),
              fullUpdate);
     return true;
 }
@@ -4815,7 +4918,11 @@ class spell_ascension_personal_bank : public SpellScript
             return;
         }
 
-        personalBankVaults[vault->GetGUID().GetCounter()] = {player->GetGUID(), kind};
+        // Keyed on the whole guid, under the registry's lock, and with the second past which
+        // the row stops answering by itself - the object's own ten minutes plus the grace above.
+        personalBankVaults.Remember(
+            vault->GetGUID(), player->GetGUID(), kind,
+            time_t(GameTime::GetGameTime().count()) + BANK_VAULT_DURATION + BANK_VAULT_REGISTRY_GRACE);
 
         // Wait the same ten minutes as the vault just placed. The cooldown that a bank item shows
         // comes from the item (`item_template.spellcooldown_1` = 600000 ms) and lives on no spell,
@@ -4837,6 +4944,50 @@ class spell_ascension_personal_bank : public SpellScript
     }
 };
 
+/// Forgets a vault the moment the world lets go of its object.
+///
+/// Without this the registry only ever grew: the object is deleted when its ten minutes run out
+/// (`GameObject::Update` on a summoned object whose timer expired), and nothing told the module.
+/// `GameObject::RemoveFromWorld` calls this hook for EVERY object in the world, hence the entry
+/// test before the lock. Erasing by the whole guid means a database-spawned object that happens
+/// to share one of our entries can never evict a vault that is still standing.
+///
+/// What registering it costs the whole server, since this is the FIRST `AllGameObjectScript` in
+/// the tree (`grep -rl "public AllGameObjectScript" src modules` finds only this file) and every
+/// dispatch point of that type stops short-circuiting the day one exists. Read, not assumed:
+///
+///   - `ExecuteScript` and `IsValidBoolScript` (ScriptMgrMacros.h) return early on
+///     `ScriptPointerList.empty()`, but the `std::function` they are handed is built by the
+///     CALLER, before the test - so the per-tick allocation-free lambda wrapper at
+///     `GameObject::Update` -> `ScriptMgr::OnGameObjectUpdate` (GameObject.cpp:903,
+///     GameObjectScript.cpp:209) was already being built on every gameobject of every active
+///     grid, empty list or not. What this class adds to that line is one iteration of a
+///     one-entry map and one virtual call into an empty body - next to the
+///     `ScriptRegistry<GameObjectScript>::GetScriptById(go->GetScriptId())` lookup that the
+///     same function runs unconditionally two lines further down, it does not register.
+///   - Nothing changes MEANING. Every `Can*` hook of AllGameObjectScript defaults to `false`
+///     and each caller acts only on `ret && *ret` (GameObjectScript.cpp:29-121), and
+///     `GetGameObjectAI` defaults to `nullptr` (AllGameObjectScript.h:86), which
+///     `GetReturnAIScript` skips. A script that overrides none of them is invisible to all of
+///     them; only `OnGameObjectRemoveWorld` below does anything.
+///
+/// So the hook stays. Dropping it and leaning on the 600+60 s expiry alone would leave a dead
+/// row answering an activate for up to a minute, which is exactly the confusion the registry
+/// was rewritten to end.
+class AscensionCompatBankVaultScript : public AllGameObjectScript
+{
+public:
+    AscensionCompatBankVaultScript() : AllGameObjectScript("AscensionCompatBankVaultScript") {}
+
+    void OnGameObjectRemoveWorld(GameObject* go) override
+    {
+        if (!go || !IsBankVaultEntry(go->GetEntry()))
+            return;
+
+        personalBankVaults.Forget(go->GetGUID());
+    }
+};
+
 class AscensionCompatServerScript : public ServerScript {
 public:
   AscensionCompatServerScript()
@@ -4851,15 +5002,27 @@ public:
         {
             Player* player = session->GetPlayer();
 
-            if (packet.GetOpcode() == CMSG_GUILD_BANKER_ACTIVATE)
-            {
-                if (HandlePersonalBankActivate(player, packet))
-                    return false;
-            }
-            // While one of our windows is open the client's bank conversation belongs to
-            // the personal bank, so none of it may reach the core's guild handling.
-            else if (AscensionPersonalBank::IsOpen(player) &&
-                     AscensionPersonalBank::HandlePacket(player, packet))
+            // Ours to answer only while the vault is still standing and still remembered.
+            if (packet.GetOpcode() == CMSG_GUILD_BANKER_ACTIVATE &&
+                HandlePersonalBankActivate(player, packet))
+                return false;
+
+            // While one of our windows is open the client's bank conversation belongs to the
+            // personal bank, so none of it may reach the core's guild handling.
+            //
+            // An activate the line above did not claim falls through to here on purpose, and
+            // that is a change: it used to be an `else if`. Now that the registry drops a row
+            // the instant its vault despawns, the only activate that gets this far with one of
+            // our windows still open is one whose vault is gone - and `HandlePacket` begins by
+            // looking the vault up (`ObjectAccessor::GetGameObject`) and calling `Closed` when
+            // it has gone, which takes the dead window down instead of leaving it in the table
+            // until some other bank opcode happens along. It has no case for this opcode, so it
+            // then answers false and the packet goes on to the core, where
+            // `WorldSession::HandleGuildBankerActivate` finds no object and returns without
+            // sending anything. A real guild banker is unaffected: its object is not ours, the
+            // first line declines it, and `HandlePacket` declines it as well.
+            if (AscensionPersonalBank::IsOpen(player) &&
+                AscensionPersonalBank::HandlePacket(player, packet))
                 return false;
         }
 
@@ -6838,4 +7001,5 @@ void AddAscensionCompatScripts() {
   new AscensionCompatLevelScalingScript();
   new AscensionCompatWorldScript();
   new AscensionCompatAllCreatureScript();
+  new AscensionCompatBankVaultScript();
 }

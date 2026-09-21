@@ -346,16 +346,30 @@ enum class Spoils
 //
 // L'appelant a deja lu le nom de la piece : apres MoveItemToInventory le
 // pointeur peut avoir ete fusionne dans une pile et ne doit plus etre lu.
-Spoils HandToKiller(Player* victim, Item* item, ObjectGuid killerGuid, std::string const& itemName, std::string& killerName)
+//
+// `detail` repart avec le MOTIF de l'issue, pas seulement l'issue : trois
+// chemins differents menent a Spoils::Destroyed et deux a Spoils::Mail, et
+// c'est justement ce qu'un exploitant doit pouvoir distinguer apres coup. On y
+// pose un litteral, jamais une chaine construite : Settle le joint a sa ligne
+// de journal unique, sans allouer.
+Spoils HandToKiller(Player* victim, Item* item, ObjectGuid killerGuid, std::string const& itemName,
+                    std::string& killerName, char const*& detail)
 {
     if (!item)
+    {
+        detail = "no-item";
         return Spoils::Destroyed;
+    }
 
     uint8 bag = item->GetBagSlot();
     uint8 slot = item->GetSlot();
 
     if (!killerGuid || !sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskLootToKiller", true))
     {
+        // Remember() ne retient le GUID que pour une mort infligee par un AUTRE
+        // joueur : mort contre un monstre, chute, noyade ou coup sur soi-meme
+        // arrivent ici avec un GUID vide. C'est le cas NOMINAL, pas le cas rare.
+        detail = !killerGuid ? "no-killer" : "loot-to-killer-disabled";
         victim->DestroyItem(bag, slot, true);
         return Spoils::Destroyed;
     }
@@ -365,6 +379,7 @@ Spoils HandToKiller(Player* victim, Item* item, ObjectGuid killerGuid, std::stri
     CharacterCacheEntry const* cache = sCharacterCache->GetCharacterCacheByGuid(killerGuid);
     if (!cache)
     {
+        detail = "killer-deleted";
         victim->DestroyItem(bag, slot, true);
         return Spoils::Destroyed;
     }
@@ -392,9 +407,14 @@ Spoils HandToKiller(Player* victim, Item* item, ObjectGuid killerGuid, std::stri
             if (killer->GetSession())
                 ChatHandler(killer->GetSession()).PSendSysMessage(
                     "High Risk: you took {} from {}'s corpse.", itemName, victim->GetName());
+            detail = "killer-bags";
             return Spoils::Bags;
         }
     }
+
+    // Ici le tueur est soit absent de la carte de la victime (killer == nullptr,
+    // remis a zero plus haut), soit present mais les sacs pleins.
+    detail = killer ? "killer-bags-full" : "killer-away";
 
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
     item->DeleteFromInventoryDB(trans);
@@ -419,11 +439,86 @@ Spoils HandToKiller(Player* victim, Item* item, ObjectGuid killerGuid, std::stri
     return Spoils::Mail;
 }
 
+// La trace de la sanction.
+//
+// C'est la sanction la plus lourde du royaume : elle preleve de l'argent,
+// confisque une piece d'equipement ou la DETRUIT. Sans ligne de journal, une
+// reclamation de joueur (« on m'a pris mon arme ») ne peut etre ni confirmee ni
+// dementie, et une regression du code de sanction — c'est deja le troisieme
+// correctif de cette zone, P-031 puis P-040 puis P-041 — resterait invisible
+// jusqu'a la plainte suivante.
+//
+// UNE ligne par dette soldee, et une seule : Tick a efface l'entree de Pending
+// AVANT d'appeler Settle, donc ce chemin n'est emprunte qu'une fois par mort.
+// Un seul point d'ecriture, donc un format identique d'une issue a l'autre, ce
+// qui rend Server.log exploitable au grep.
+//
+// `carried` est l'argent porte MESURE AVANT le prelevement : le relire apres
+// ModifyMoney donnerait le solde et non la capacite de payer.
+//
+// ATTENTION AU CHAMP DE NIVEAU. Remember() ne remplit `debt.Killer` que pour
+// une mort infligee par un AUTRE JOUEUR, mais il remplit `debt.KillerLevel`
+// pour N'IMPORTE QUELLE source (`killer ? killer->GetLevel() : 0`) :
+// un monstre, et meme la victime elle-meme, puisqu'une chute ou une noyade
+// arrive dans le crochet avec killer == victime. Une mort en PvE — le cas
+// NOMINAL — ecrirait donc « killer <none> level 32 », un nom absent adosse a
+// un niveau bien reel, ce qui se lit comme une incoherence alors que c'est le
+// fonctionnement attendu. D'ou deux champs separes et nommes pour ce qu'ils
+// sont : `killer` ne porte que le tueur JOUEUR (nom et GUID, `<none>` sinon),
+// et `blame level` porte le niveau de la SOURCE de la mort, qui que ce soit —
+// c'est ce niveau, et lui seul, que l'exemption d'ecart de niveau compare
+// (Settle, test `gap && debt.KillerLevel`), donc c'est lui qu'un exploitant
+// doit retrouver pour arbitrer une reclamation.
+// `blame level 0` veut dire qu'aucune source n'a ete transmise au crochet.
+void LogVerdict(Player const* victim, Debt const& debt, char const* verdict, char const* detail,
+                uint32 premium, uint32 carried,
+                std::string const& killerName = {}, std::string const& itemName = {},
+                uint32 itemEntry = 0, std::string const& itemGuid = {})
+{
+    LOG_INFO("module.ascension_compat",
+        "High Risk settle: victim {} ({}) level {} | verdict {} ({}) | premium {} | carried {} | "
+        "killer {} ({}) | blame level {} | item {} (entry {}, {})",
+        victim->GetName(), victim->GetGUID().ToString(), uint32(victim->GetLevel()),
+        verdict, detail, premium, carried,
+        killerName.empty() ? std::string("<none>") : killerName,
+        debt.Killer.IsEmpty() ? std::string("<none>") : debt.Killer.ToString(),
+        uint32(debt.KillerLevel),
+        itemName.empty() ? std::string("<none>") : itemName, itemEntry,
+        itemGuid.empty() ? std::string("<none>") : itemGuid);
+}
+
 // Verdict deja rendu par Remember : on ne rejoue pas PenaltyApplies.
 void Settle(Player* victim, Debt const& debt)
 {
     if (!victim || !victim->GetSession())
+    {
+        // Inatteignable par construction : Tick vient de tester IsInWorld,
+        // GetSession et PlayerLogout sur le meme fil, sans appel intermediaire.
+        // Si on y tombe malgre tout, la dette est PERDUE — Tick l'a deja
+        // effacee de Pending — et c'est une rupture d'invariant, pas une issue
+        // normale de la sanction : LOG_ERROR, pas LOG_INFO.
+        LOG_ERROR("module.ascension_compat",
+            "High Risk settle: debt dropped, victim {} has no session; killer {}.",
+            victim ? victim->GetGUID().ToString() : std::string("<null>"), debt.Killer.ToString());
         return;
+    }
+
+    // L'argent porte se lit AVANT toute deduction : relu apres ModifyMoney il
+    // donnerait le solde restant et non la capacite de payer, ce qui rend la
+    // ligne de journal inexploitable pour arbitrer une reclamation.
+    uint32 const carried = victim->GetMoney();
+
+    // Une prime nulle veut dire qu'il n'y a rien a assurer, pas qu'on est
+    // insolvable. Le test d'origine, `premium && GetMoney() >= premium`,
+    // envoyait ce cas a la perte de piece : invisible sur un personnage nu,
+    // que le test worn.empty() plus bas rattrapait, mais pas sur un personnage
+    // entierement vetu d'objets de niveau d'objet 0.
+    //
+    // Calculee ici et non apres l'exemption d'ecart de niveau pour que la ligne
+    // de journal de cette exemption porte la prime REELLE au lieu d'un zero qui
+    // se confondrait avec le cas « rien a perdre ». Premium() ne lit que
+    // l'equipement porte et une option : la remonter n'a aucun effet de bord.
+    uint32 premium = Premium(victim);
 
     uint32 gap = sConfigMgr->GetOption<uint32>("AscensionCompat.HighRiskDeathLevelGap", 4);
     if (gap && debt.KillerLevel)
@@ -433,29 +528,26 @@ void Settle(Player* victim, Debt const& debt)
         {
             ChatHandler(victim->GetSession()).PSendSysMessage(
                 "High Risk: no loss, the level gap was too wide.");
+            LogVerdict(victim, debt, "no-gap", "level-gap-exemption", premium, carried);
             return;
         }
     }
 
-    // Une prime nulle veut dire qu'il n'y a rien a assurer, pas qu'on est
-    // insolvable. Le test d'origine, `premium && GetMoney() >= premium`,
-    // envoyait ce cas a la perte de piece : invisible sur un personnage nu,
-    // que le test worn.empty() plus bas rattrapait, mais pas sur un personnage
-    // entierement vetu d'objets de niveau d'objet 0.
-    uint32 premium = Premium(victim);
     if (!premium)
     {
         ChatHandler(victim->GetSession()).PSendSysMessage(
             "High Risk: nothing to insure and nothing to lose.");
+        LogVerdict(victim, debt, "nothing-to-lose", "premium-zero", premium, carried);
         return;
     }
 
-    if (victim->GetMoney() >= premium)
+    if (carried >= premium)
     {
         victim->ModifyMoney(-int32(premium), false);
         ChatHandler(victim->GetSession()).PSendSysMessage(
             "High Risk: your gear was insured. Premium paid: {}.",
             MoneyText(premium));
+        LogVerdict(victim, debt, "insured", "premium-paid", premium, carried);
         return;
     }
 
@@ -467,38 +559,60 @@ void Settle(Player* victim, Debt const& debt)
             worn.push_back(slot);
 
     // Garde-fou : une prime non nulle implique au moins une piece portee.
+    // Y tomber signifie que Premium() et cette boucle ne voient plus le meme
+    // equipement : rupture d'invariant, donc LOG_ERROR et pas une issue normale.
     if (worn.empty())
+    {
+        LOG_ERROR("module.ascension_compat",
+            "High Risk settle: {} ({}) owes a {} premium but wears nothing; penalty dropped. "
+            "Premium() and the worn-slot scan disagree.",
+            victim->GetName(), victim->GetGUID().ToString(), premium);
         return;
+    }
 
     uint8 slot = worn[urand(0, worn.size() - 1)];
     Item* item = victim->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
     if (!item)
+    {
+        LOG_ERROR("module.ascension_compat",
+            "High Risk settle: {} ({}) lost the item in slot {} between the scan and the draw; penalty dropped.",
+            victim->GetName(), victim->GetGUID().ToString(), uint32(slot));
         return;
+    }
 
     // Le nom se lit avant le transfert : apres MoveItemToInventory le pointeur
-    // peut avoir ete fusionne dans une pile existante et detruit.
+    // peut avoir ete fusionne dans une pile existante et detruit. L'entree et le
+    // GUID de l'objet se lisent au meme endroit et pour la meme raison : ce sont
+    // eux qui permettent, apres coup, de confirmer ou de dementir une
+    // reclamation, la ou le nom seul ne designe pas l'exemplaire.
     std::string name = "a piece of equipment";
     if (ItemTemplate const* proto = item->GetTemplate())
         name = proto->Name1;
+    uint32 const itemEntry = item->GetEntry();
+    std::string const itemGuid = item->GetGUID().ToString();
 
     std::string killerName;
     std::string cost = MoneyText(premium);
-    switch (HandToKiller(victim, item, debt.Killer, name, killerName))
+    char const* detail = "unknown";
+    switch (HandToKiller(victim, item, debt.Killer, name, killerName, detail))
     {
         case Spoils::Bags:
             ChatHandler(victim->GetSession()).PSendSysMessage(
                 "High Risk: you could not cover the {} premium. {} looted {} from your corpse.",
                 cost, killerName, name);
+            LogVerdict(victim, debt, "bags", detail, premium, carried, killerName, name, itemEntry, itemGuid);
             break;
         case Spoils::Mail:
             ChatHandler(victim->GetSession()).PSendSysMessage(
                 "High Risk: you could not cover the {} premium. {} was taken from your corpse and sent to {}.",
                 cost, name, killerName);
+            LogVerdict(victim, debt, "mail", detail, premium, carried, killerName, name, itemEntry, itemGuid);
             break;
         case Spoils::Destroyed:
             ChatHandler(victim->GetSession()).PSendSysMessage(
                 "High Risk: you could not cover the {} premium. You lost {}.",
                 cost, name);
+            LogVerdict(victim, debt, "destroyed", detail, premium, carried, killerName, name, itemEntry, itemGuid);
             break;
     }
 }

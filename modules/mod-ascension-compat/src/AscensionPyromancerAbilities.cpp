@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionPyromancer.h"
 #include "AscensionPyromancerData.h"
+#include "AscensionSpellSafe.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -191,11 +192,12 @@ class pyromancer_spells : public AllSpellScript
                     Cast(player, target, 706874);
                 if (player->HasAura(704813))
                 {
-                    SpellInfo const* spread = sSpellMgr->GetSpellInfo(800834);
-                    Spread(player, target, {805500}, spread->MaxAffectedTargets, spread->Effects[0].CalcRadius(player));
+                    if (SpellInfo const* spread = AscensionSpellSafe::Get(800834))
+                        Spread(player, target, {805500}, spread->MaxAffectedTargets,
+                               spread->Effects[0].CalcRadius(player));
                 }
                 if (player->HasAura(704815) && target->GetAuraOfRankedSpell(805500, player->GetGUID()))
-                    for (Unit* other : Nearby(target, sSpellMgr->GetSpellInfo(704817)->Effects[0].CalcRadius(player)))
+                    for (Unit* other : Nearby(target, AscensionSpellSafe::EffectRadius(704817, EFFECT_0, player, 10.0f)))
                         if (other != target && player->IsValidAttackTarget(other))
                             Copy(player, other, 704817, CalculatePct(damage, Amount(704815)));
             }
@@ -213,7 +215,7 @@ class pyromancer_spells : public AllSpellScript
             {
                 spell->SetScriptValue(560525, 1);
                 Spread(player, target, {800791, 805500, 680962, 706874, 520826}, 1,
-                       sSpellMgr->GetSpellInfo(573277)->Effects[0].CalcRadius(player));
+                       AscensionSpellSafe::EffectRadius(573277, EFFECT_0, player, 10.0f));
             }
             if (Any(info, {800790, 800792, 801915}) && player->HasAura(807146))
                 if (Aura* fumes = target->GetAura(807224, player->GetGUID()))
@@ -258,14 +260,14 @@ class pyromancer_spells : public AllSpellScript
                 if (!tender)
                     tender = player->GetAura(704273);
                 if (tender)
-                    for (Unit* ally : Allies(player, target, 10, sSpellMgr->GetSpellInfo(704274)->MaxAffectedTargets))
+                    for (Unit* ally : Allies(player, target, 10, AscensionSpellSafe::MaxAffectedTargets(704274, 1)))
                         Copy(player, ally, 704274, CalculatePct(healing, Amount(tender->GetId())));
                 if (player->HasAura(806747) && target->ToCreature() && AnyPet(target))
                 {
-                    SpellInfo const* fuel = sSpellMgr->GetSpellInfo(806749);
-                    for (Unit* ally :
-                         Allies(player, target, fuel->Effects[0].CalcRadius(player), fuel->MaxAffectedTargets))
-                        Cast(player, ally, 806749);
+                    if (SpellInfo const* fuel = AscensionSpellSafe::Get(806749))
+                        for (Unit* ally : Allies(player, target, fuel->Effects[0].CalcRadius(player),
+                                                 fuel->MaxAffectedTargets))
+                            Cast(player, ally, 806749);
                 }
             }
         }

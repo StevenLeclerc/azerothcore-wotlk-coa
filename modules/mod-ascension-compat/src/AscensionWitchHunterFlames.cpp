@@ -142,7 +142,7 @@ class spell_ascension_witch_hunter_flames_of_sin : public AuraScript
 
     bool Load() override
     {
-        return IsFlameCaster(GetCaster()) && GetCaster() == GetTarget();
+        return IsFlameCaster(GetCaster()) && GetCaster() == GetUnitOwner();
     }
 
     bool CheckProc(ProcEventInfo& eventInfo)
@@ -162,7 +162,8 @@ class spell_ascension_witch_hunter_flames_of_sin : public AuraScript
 
         // This active aura can be extended indefinitely. Do not retain a
         // snapshot of a Tonic or talent that has since been removed.
-        GetAura()->GetEffect(EFFECT_0)->RecalculateAmount();
+        if (AuraEffect* dummy = GetAura()->GetEffect(EFFECT_0))
+            dummy->RecalculateAmount();
         uint64 amount = uint64(eventInfo.GetDamageInfo()->GetDamage()) * uint32(std::max(0, effect->GetAmount())) / 100;
         amount = std::min(amount, uint64(std::numeric_limits<int32>::max()));
         if (amount)
@@ -236,7 +237,7 @@ class spell_ascension_witch_hunter_flame_modifier_update : public AuraScript
 
     bool Load() override
     {
-        return IsFlameCaster(GetTarget());
+        return IsFlameCaster(GetUnitOwner());
     }
 
     void UpdateFlameAmount(AuraEffect const*, AuraEffectHandleModes)

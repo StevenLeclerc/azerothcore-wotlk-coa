@@ -39,14 +39,17 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
             GetAura()->SetUsingCharges(false);
         }
         if (Named(GetSpellInfo(),804983) && (mode & AURA_EFFECT_HANDLE_REAPPLY))
-            GetAura()->GetEffect(EFFECT_2)->SetAmount(0);
+            if (AuraEffect* snapshot = GetAura()->GetEffect(EFFECT_2))
+                snapshot->SetAmount(0);
         if (Named(GetSpellInfo(),706962))
         {
             if (mode & AURA_EFFECT_HANDLE_REAPPLY)
-                GetAura()->GetEffect(EFFECT_2)->SetAmount(0);
+                if (AuraEffect* snapshot = GetAura()->GetEffect(EFFECT_2))
+                    snapshot->SetAmount(0);
             if (AuraEffect* base = GetAura()->GetEffect(EFFECT_1))
                 if (!base->GetAmount() || (mode & AURA_EFFECT_HANDLE_REAPPLY))
-                    base->SetAmount(GetAura()->GetEffect(EFFECT_0)->GetAmount());
+                    if (AuraEffect* source = GetAura()->GetEffect(EFFECT_0))
+                        base->SetAmount(source->GetAmount());
             if (player->HasAura(805104) && player->HasAura(Spider))
                 player->CastSpell(target->GetPositionX(),target->GetPositionY(),target->GetPositionZ(),570208,true);
         }
@@ -140,8 +143,9 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
         if (Named(GetSpellInfo(),800901) && slot > 0)
             amount = player->HasAura(706014) ? Amount(800903) : 0;
         if (Named(GetSpellInfo(),800926) && slot == 1 && player->HasAura(504356))
-            if (Aura* stacks = GetTarget()->GetAura(806454,player->GetGUID()))
-                AddPct(amount,stacks->GetStackAmount() * Amount(504356,1));
+            if (Unit* owner = GetUnitOwner())
+                if (Aura* stacks = owner->GetAura(806454,player->GetGUID()))
+                    AddPct(amount,stacks->GetStackAmount() * Amount(504356,1));
         if (id == 803216 && slot == 1)
             amount = int32(5 * (player->GetStat(STAT_INTELLECT) + player->GetStat(STAT_AGILITY)));
         if (id == 705970 && slot == 0 && !player->HasAura(Beetle))
@@ -205,7 +209,8 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
                 }
         if (id == 808082 && expired)
         {
-            int32 stored = GetAura()->GetEffect(EFFECT_1)->GetAmount();
+            AuraEffect const* carried = GetAura()->GetEffect(EFFECT_1);
+            int32 stored = carried ? carried->GetAmount() : 0;
             Cast(player,target,808083);
             if (Aura* release = target->GetAura(808083,player->GetGUID()))
             {
@@ -216,7 +221,8 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
             }
         }
         if (id == 504867 && expired)
-            Copy(player,target,504869,uint32(std::max(0,GetAura()->GetEffect(EFFECT_1)->GetAmount())));
+            if (AuraEffect const* carried = GetAura()->GetEffect(EFFECT_1))
+                Copy(player,target,504869,uint32(std::max(0,carried->GetAmount())));
         if (id == 800921)
             ExitParasite(player);
         if (id == 806154)
@@ -297,7 +303,8 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
             PreventDefaultAction();
             if (!effect->GetAmount())
             {
-                GetAura()->GetEffect(effect->GetEffIndex())->SetAmount(1);
+                if (AuraEffect* self = GetAura()->GetEffect(effect->GetEffIndex()))
+                    self->SetAmount(1);
                 Mushroom(player,*target);
             }
         }
@@ -359,25 +366,25 @@ class aura_ascension_venomancer_lifecycle : public AuraScript
     {
         if (Named(GetSpellInfo(),706962) && effect->GetEffIndex() == 0)
             if (AuraEffect* base = GetAura()->GetEffect(EFFECT_1))
-            {
-                AuraEffect* snapshot = GetAura()->GetEffect(EFFECT_2);
-                uint32 saved = uint32(snapshot->GetAmount());
-                uint32 ticks = std::min(15u,(saved >> 8) + 1);
-                effect->SetAmount(int32(std::min<int64>(INT32_MAX,int64(base->GetAmount()) *
-                    ticks)));
-                snapshot->SetAmount(int32((saved & 255u) | (ticks << 8)));
-            }
+                if (AuraEffect* snapshot = GetAura()->GetEffect(EFFECT_2))
+                {
+                    uint32 saved = uint32(snapshot->GetAmount());
+                    uint32 ticks = std::min(15u,(saved >> 8) + 1);
+                    effect->SetAmount(int32(std::min<int64>(INT32_MAX,int64(base->GetAmount()) *
+                        ticks)));
+                    snapshot->SetAmount(int32((saved & 255u) | (ticks << 8)));
+                }
         if (GetId() == 706456 && effect->GetEffIndex() == 0)
         {
             uint32 ticks = 1 + uint32(std::max(0,GetAura()->GetDuration())) / uint32(std::max(1,int32(effect->GetAmplitude())));
             uint64 total = 0;
             for (uint8 slot : {uint8(1),uint8(2)})
-            {
-                AuraEffect* budget = GetAura()->GetEffect(slot);
-                uint32 value = uint32(std::max(0,budget->GetAmount())) / ticks;
-                budget->SetAmount(budget->GetAmount()-int32(value));
-                total += value;
-            }
+                if (AuraEffect* budget = GetAura()->GetEffect(slot))
+                {
+                    uint32 value = uint32(std::max(0,budget->GetAmount())) / ticks;
+                    budget->SetAmount(budget->GetAmount()-int32(value));
+                    total += value;
+                }
             effect->SetAmount(int32(std::min<uint64>(INT32_MAX,total)));
         }
     }

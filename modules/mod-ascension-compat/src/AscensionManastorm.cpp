@@ -73,6 +73,11 @@ namespace
     constexpr uint32 PortalAura = 93338;
     constexpr uint32 EventCapability = 1;
     constexpr uint32 EventCacheDelivery = 2;
+    // Les deux monnaies du systeme. Elles etaient ecrites en clair sur cinq
+    // sites ; ValidateRewardTemplates a besoin des memes valeurs, et deux listes
+    // de nombres nus qui doivent rester egales finissent toujours par diverger.
+    constexpr uint32 BullionEntry = 1297307;
+    constexpr uint32 BoltEntry = 1297308;
 
     struct Request
     {
@@ -235,6 +240,78 @@ namespace
                 enabled.store(false);
                 LOG_ERROR("module.ascension_compat", "Manastorm disabled: no reachable opening room is installed");
             }
+        }
+
+        // Les entrees d'objet que Complete() va tenter de creer, verifiees UNE
+        // fois au demarrage plutot qu'a chaque achevement.
+        //
+        // CE QUI EST EN JEU, VERIFIE DANS LE COEUR ET NON SUPPOSE :
+        // Item::CreateItem (Entities/Item/Item.cpp) ne rend PAS nullptr sur une
+        // entree absente de acore_world.item_template — elle appelle ABORT(),
+        // c'est-a-dire Acore::Abort, c'est-a-dire une ecriture a l'adresse nulle
+        // (src/common/Debugging/Errors.cpp, macro Crash). Une entree de
+        // recompense disparue ne produit donc pas une course sans butin : elle
+        // TUE le worldserver au premier joueur qui termine une course, des
+        // heures apres le demarrage, et le tuera de nouveau a chaque tentative.
+        // C'est exactement le genre de desynchronisation de donnees que P-047 a
+        // deja produit lors d'un import.
+        //
+        // D'ou ce controle au demarrage, et d'ou le fait qu'il coupe le systeme
+        // des la PREMIERE entree manquante, coffre compris : un coffre absent
+        // ne prive pas une tranche de niveau de sa recompense, il fait tomber le
+        // royaume entier. Couper Manastorm est strictement moins grave.
+        //
+        // La liste ne duplique aucun nombre : elle est ENGENDREE par
+        // CacheForLevel, la meme fonction que Complete() appelle, sur tout le
+        // domaine de ses parametres. Ajouter un palier a CacheForLevel etend ce
+        // controle sans y toucher.
+        //
+        // CE QUE COUPER LE SYSTEME COUPE AUSSI, a savoir avant d'y toucher :
+        // `enabled` garde aussi Login() et UpdatePlayer(), et la remise des
+        // coffres DEJA GAGNES ne passe que par la : DeliverCaches n'a qu'UN
+        // seul appelant dans tout le fichier (verifie au grep), la branche
+        // EventCacheDelivery de UpdatePlayer, et c'est Login qui arme cet
+        // evenement. Les deux sortent en tete sur `!enabled.load()`. Desactiver
+        // suspend donc aussi la livraison des coffres en attente. Ils ne sont
+        // PAS detruits : ils restent en base et repartiront a la
+        // reactivation. C'est le prix accepte pour ne pas tuer le royaume, et
+        // c'est volontairement le meme interrupteur que ValidateScenes : un
+        // second drapeau « recompenses seules » multiplierait les etats a
+        // tenir pour un gain nul tant que la cause est un import rate, qui
+        // demande de toute facon une intervention.
+        void ValidateRewardTemplates()
+        {
+            if (!enabled.load())
+                return;
+
+            std::set<uint32> rewards{BoltEntry, BullionEntry};
+            for (uint32 level = 1; level <= DEFAULT_MAX_LEVEL; ++level)
+                rewards.insert(CacheForLevel(level, 1, false));
+            // En mode fin de jeu le niveau n'entre pas en compte et seul le
+            // seuil `depth < 25` fait varier le resultat.
+            rewards.insert(CacheForLevel(1, 1, true));
+            rewards.insert(CacheForLevel(1, 25, true));
+
+            uint32 missing = 0;
+            for (uint32 entry : rewards)
+                if (!sObjectMgr->GetItemTemplate(entry))
+                {
+                    ++missing;
+                    LOG_ERROR("module.ascension_compat",
+                        "Manastorm: reward item template {} is missing from item_template; "
+                        "Item::CreateItem would ABORT the worldserver on the first clear that awards it.", entry);
+                }
+
+            if (missing)
+            {
+                enabled.store(false);
+                LOG_ERROR("module.ascension_compat",
+                    "Manastorm disabled: {} of {} reward item templates are missing", missing, uint32(rewards.size()));
+                return;
+            }
+
+            LOG_INFO("module.ascension_compat",
+                "Manastorm: {} reward item templates installed", uint32(rewards.size()));
         }
 
         bool IsAwardingXP(Player const* player)
@@ -905,15 +982,15 @@ namespace
                 else if (action == 6)
                     GiveStarterItems(player);
                 else if (action == 20 && !player->HasSpell(93418) && !player->HasItemCount(98074, 1, true))
-                    BuyItem(player, 98074, 1, 1297307, 10);
+                    BuyItem(player, 98074, 1, BullionEntry, 10);
                 else if (action == 21)
-                    BuyItem(player, 1297308, 10, 1297307, 1);
+                    BuyItem(player, BoltEntry, 10, BullionEntry, 1);
                 else if (action >= 100 && action - 100 < Gadgets.size())
                 {
                     Gadget const& gadget = Gadgets[action - 100];
                     if (!player->HasSpell(gadget.spell) && (!gadget.previous || player->HasSpell(gadget.previous))
                         && !player->HasItemCount(gadget.item, 1, true))
-                        BuyItem(player, gadget.item, 1, 1297308, gadget.cost);
+                        BuyItem(player, gadget.item, 1, BoltEntry, gadget.cost);
                 }
             }
             return true;
@@ -1626,9 +1703,9 @@ namespace
             bonus->SetData(3, totalCaches);
             transaction->Append(bonus);
             std::vector<std::pair<uint32, uint32>> items;
-            items.emplace_back(1297308, BoltReward(run.encounter->depth) + run.encounter->bonusCaches * 10);
+            items.emplace_back(BoltEntry, BoltReward(run.encounter->depth) + run.encounter->bonusCaches * 10);
             if (first)
-                items.emplace_back(1297307, BullionReward(run.encounter->depth));
+                items.emplace_back(BullionEntry, BullionReward(run.encounter->depth));
             for (uint32 i = 0; i < cacheCount; ++i)
                 items.emplace_back(CacheForLevel(player->GetLevel(), run.encounter->depth, mode >= 4), 1);
             for (auto const& [entry, count] : items)
@@ -1636,6 +1713,39 @@ namespace
                 std::unique_ptr<Item> item(Item::CreateItem(entry, count, player));
                 if (!item)
                 {
+                    // Le joueur ne recoit qu'un message de discussion ephemere
+                    // (l'appelant, l. ~495, branche Phase::Committing) : sans
+                    // cette ligne, un achevement perdu n'existe nulle part cote
+                    // serveur et ne s'apprend que par une plainte. C'est le
+                    // motif de defaillance silencieuse de P-049 et P-053.
+                    //
+                    // CE QUE VAUT CETTE BRANCHE, LU ET NON SUPPOSE.
+                    // Item::CreateItem (Item.cpp:1094-1120) n'a que deux
+                    // retours nullptr : `count < 1` (l. 1096) et l'echec de
+                    // Item::Create (l. 1117). Le second est INATTEIGNABLE
+                    // depuis ici : Item::Create ne rend false que sur un
+                    // GetItemTemplate nul, or CreateItem a deja fait ABORT()
+                    // sur ce meme cas dix lignes plus haut (l. 1100-1101).
+                    // Reste `count < 1`, et les trois comptes passes ici sont
+                    // non nuls PAR CONSTRUCTION :
+                    //   BoltReward    = 3 + min(depth,5000)/5  >= 3
+                    //   BullionReward = 1 + min(depth,5000)/50 >= 1
+                    //     (AscensionManastormRules.h:78-79)
+                    //   les coffres partent avec le litteral 1.
+                    // Cette sortie est donc aujourd'hui INATTEIGNABLE, et on la
+                    // garde comme garde-fou : elle ne signale pas une donnee
+                    // absente — ValidateRewardTemplates s'en charge au
+                    // demarrage — mais une RUPTURE D'INVARIANT introduite par
+                    // une modification future d'une des trois formules ou de la
+                    // liste `items`. D'ou LOG_ERROR et un texte qui nomme
+                    // l'invariant rompu plutot qu'une cause de donnees.
+                    LOG_ERROR("module.ascension_compat",
+                        "Manastorm: invariant broken, Item::CreateItem refused entry {} with count {}; "
+                        "no reward issued to {} ({}) for depth {} in mode {}, the clear was rolled back. "
+                        "A refusal here can only be a zero count: check BoltReward, BullionReward and the "
+                        "cache loop, one of them now yields 0.",
+                        entry, count, player->GetName(), player->GetGUID().ToString(),
+                        run.encounter->depth, uint32(mode));
                     run.commitReady = true;
                     run.commitSucceeded = false;
                     return;
@@ -2044,7 +2154,13 @@ namespace
         ManastormWorld() : WorldScript("AscensionManastormWorld") { }
         void OnAfterConfigLoad(bool reload) override { if (!reload) ManastormService::Get().Configure(); }
         void OnUpdate(uint32) override { ManastormService::Get().PollTransactions(); }
-        void OnStartup() override { ManastormService::Get().ValidateScenes(); }
+        void OnStartup() override
+        {
+            // Dans cet ordre : ValidateScenes peut deja desactiver le systeme,
+            // et ValidateRewardTemplates se tait alors.
+            ManastormService::Get().ValidateScenes();
+            ManastormService::Get().ValidateRewardTemplates();
+        }
     };
 
     class ManastormCommands final : public CommandScript

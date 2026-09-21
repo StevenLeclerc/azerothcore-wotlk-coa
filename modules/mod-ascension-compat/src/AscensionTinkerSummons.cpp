@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionTinker.h"
 #include "Creature.h"
 #include "DBCStores.h"
@@ -331,11 +332,14 @@ struct npc_ascension_tinker_device : ScriptedAI
         uint32 id = me->GetEntry() == 50045 ? 802336 : me->GetEntry() == 50600 ? 706648 :
             me->GetEntry() == 840028 ? 802477 : me->GetEntry() == 226112 ? 500601 :
             me->GetEntry() == 226312 ? 806074 : 801982;
-        auto* info = sSpellMgr->GetSpellInfo(id);
         auto targets = Nearby(me,Radius(id));
         targets.remove_if([player](Unit* enemy) { return !player->IsValidAttackTarget(enemy); });
-        if (info->MaxAffectedTargets && targets.size() > info->MaxAffectedTargets)
-            targets.resize(info->MaxAffectedTargets);
+        // Appele depuis DoAction(1) et JustDied(), donc sur un fil de carte en
+        // plein combat : un des six ids disparu de Spell.dbc plantait ici. 1
+        // cible par defaut, comme TinkerAbilities.cpp (801744).
+        uint32 limit = AscensionSpellSafe::MaxAffectedTargets(id, 1);
+        if (limit && targets.size() > limit)
+            targets.resize(limit);
         explosionTargets = uint32(targets.size());
         for (Unit* enemy : targets)
         {

@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionTinker.h"
+#include "AscensionSpellSafe.h"
 #include "Creature.h"
 #include "Player.h"
 #include "Random.h"
@@ -55,7 +56,7 @@ void DeviceEvent(Player* player, Creature* device, Unit* target, SpellInfo const
     {
         if (player->HasAura(707265))
             Cast(device,target,707266);
-        if (player->HasAura(524979) && roll_chance_i(sSpellMgr->GetSpellInfo(801811)->ProcChance))
+        if (player->HasAura(524979) && roll_chance_i(AscensionSpellSafe::ProcChance(801811, 30)))
         {
             Cast(device,target,706700);
             Cast(player,device,573269);
@@ -74,7 +75,7 @@ void DeviceEvent(Player* player, Creature* device, Unit* target, SpellInfo const
     if (!info && device->HasAura(805519))
         Cast(device,target,805657);
     if ((device->GetEntry() == 500711 || device->HasAura(806757)) &&
-        (!info || info->Id != 806781) && roll_chance_i(sSpellMgr->GetSpellInfo(806780)->ProcChance))
+        (!info || info->Id != 806781) && roll_chance_i(AscensionSpellSafe::ProcChance(806780, 50)))
         Cast(device,target,806781);
 }
 } // namespace AscensionTinker
@@ -172,7 +173,7 @@ class aura_ascension_tinker_event : public AuraScript
             }
             case 704107: Cast(player,target,653254); break;
             case 705846:
-                for (Unit* ally : Allies(player,target,Radius(705847),sSpellMgr->GetSpellInfo(705847)->MaxAffectedTargets))
+                for (Unit* ally : Allies(player,target,Radius(705847),AscensionSpellSafe::MaxAffectedTargets(705847, 5)))
                     Cast(player,ally,705847);
                 break;
             case 806629: player->RestoreSpellCharge(504527); break;

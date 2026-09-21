@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionXoroth.h"
 #include "Map.h"
 #include "MotionMaster.h"
@@ -75,7 +76,7 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
             if (me->GetEntry() == 50268)
                 me->SetNpcFlag(UNIT_NPC_FLAG_GOSSIP);
             else
-                remaining = uint32(sSpellMgr->GetSpellInfo(706756)->GetDuration());
+                remaining = uint32(AscensionSpellSafe::Duration(706756, 30000));
         }
         else
         {

@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionCultist.h"
 #include "AscensionCultistData.h"
+#include "AscensionSpellSafe.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
@@ -200,7 +201,7 @@ class aura_ascension_cultist_event : public AuraScript
                 Reduce(player, 567524, std::abs(Amount(681475)));
                 break;
             case 681425:
-                Summon(player, 397771, player->GetNearPosition(2, 0), sSpellMgr->GetSpellInfo(680573)->GetDuration(), target);
+                Summon(player, 397771, player->GetNearPosition(2, 0), AscensionSpellSafe::Duration(680573, 10000), target);
                 break;
             case 681474:
                 Cast(player, player, 681532);
@@ -218,7 +219,7 @@ class aura_ascension_cultist_event : public AuraScript
             case 802043: Cast(player, player, 572613); break;
             case 803035: Cast(player, target, 805180); break;
             case 803037:
-                Summon(player, 500464, player->GetNearPosition(1, 0), sSpellMgr->GetSpellInfo(500707)->GetDuration(), target);
+                Summon(player, 500464, player->GetNearPosition(1, 0), AscensionSpellSafe::Duration(500707, 8000), target);
                 break;
             case 803082: Cast(player, target, 803083); break;
             case 803339: Cast(player, player, 803340); break;

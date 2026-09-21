@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionBarbarianCompletion.h"
+#include "AscensionSpellSafe.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
@@ -242,7 +243,7 @@ class aura_ascension_barbarian_event : public AuraScript
                 }
                 break;
             case 805811: cast(583020, false); break;
-            case 805804: ExtendLimited(2000, sSpellMgr->GetSpellInfo(805807)->GetDuration()); break;
+            case 805804: ExtendLimited(2000, AscensionSpellSafe::Duration(805807, 15000)); break;
             case 706354: cast(562323); break;
             case 801782:
                 cast(801783, false);

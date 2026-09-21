@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionSpellSafe.h"
 #include "AscensionWitchHunterCompletion.h"
 #include "Map.h"
 #include "MovementTypedefs.h"
@@ -228,12 +229,14 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                     uint32 count = aura->GetStackAmount();
                     target->RemoveAurasDueToSpell(stack, player->GetGUID());
                     uint32 child = stack == 681413 ? 681415 : 681524;
-                    SpellInfo const* helper = sSpellMgr->GetSpellInfo(child);
-                    float value = helper->Effects[EFFECT_0].CalcValue(player) +
-                                  player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_HOLY) * 0.25f +
-                                  player->GetTotalAttackPowerValue(BASE_ATTACK) * 0.45f;
-                    player->CastCustomSpell(child, SPELLVALUE_BASE_POINT0, int32(value * count), target,
-                                            TRIGGERED_FULL_MASK);
+                    if (SpellInfo const* helper = AscensionSpellSafe::Get(child))
+                    {
+                        float value = helper->Effects[EFFECT_0].CalcValue(player) +
+                                      player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_HOLY) * 0.25f +
+                                      player->GetTotalAttackPowerValue(BASE_ATTACK) * 0.45f;
+                        player->CastCustomSpell(child, SPELLVALUE_BASE_POINT0, int32(value * count), target,
+                                                TRIGGERED_FULL_MASK);
+                    }
                 }
         if (id == 520271 && dealt && player->HasAura(500056))
         {
@@ -399,7 +402,8 @@ class spell_ascension_witch_hunter_ability : public SpellScript
         if (id == 802273)
         {
             if (player->HasAura(705450))
-                SummonHounds(player, 1, sSpellMgr->GetSpellInfo(803886)->GetDuration(), 803886, target);
+                if (SpellInfo const* hound = AscensionSpellSafe::Get(803886))
+                    SummonHounds(player, 1, hound->GetDuration(), 803886, target);
             CallHounds(player, target);
         }
         if (Family(info, 2, 8))
@@ -407,7 +411,8 @@ class spell_ascension_witch_hunter_ability : public SpellScript
             talent(705463, 680275);
             uint32 chance = player->HasAura(707891) ? 50 : player->HasAura(706365) ? 25 : 0;
             if (chance && roll_chance_i(chance))
-                SummonHounds(player, 1, sSpellMgr->GetSpellInfo(707890)->GetDuration(), 707890, target);
+                if (SpellInfo const* hound = AscensionSpellSafe::Get(707890))
+                    SummonHounds(player, 1, hound->GetDuration(), 707890, target);
         }
         if (Family(info, 2, 512) && id != 802826 && player->HasAura(680513))
         {

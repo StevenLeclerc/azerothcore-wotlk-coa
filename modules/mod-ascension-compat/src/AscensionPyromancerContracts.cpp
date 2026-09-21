@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionPyromancer.h"
 #include "AscensionPyromancerData.h"
 #include "DBCStores.h"
@@ -12,11 +13,14 @@ namespace AscensionPyromancer
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 30)
+    if (!AscensionContract::MatchesFamily(info, 30, "Pyromancer"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 slot)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Pyromancer");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -121,7 +125,7 @@ void ApplyContracts(SpellInfo* info)
         info->StackAmount = 1;
     }
     if (id == 900755)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Pyromancer");
     if (id == 806783)
         info->Effects[0].SpellClassMask = flag96(2, 0, 1048576);
     if (id == 525059)
@@ -190,7 +194,7 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].SpellClassMask = mask;
     }
     if (id == 704277)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Pyromancer");
     if (id == 802173 || id == 520826 || id == 680370 || id == 680371)
     {
         info->AscensionIgnoreAbsorbAndResistance = true;

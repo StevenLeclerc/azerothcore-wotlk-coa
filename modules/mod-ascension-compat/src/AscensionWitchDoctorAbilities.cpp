@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionSpellSafe.h"
 #include "AscensionWitchDoctorCompletion.h"
 #include "Creature.h"
 #include "ObjectAccessor.h"
@@ -209,11 +210,12 @@ class witch_doctor_casts : public AllSpellScript
         if (healing && IsBottle(info))
         {
             uint32 count = 0;
+            uint32 limit = AscensionSpellSafe::MaxAffectedTargets(BottleDamage, 1);
             for (Unit* unit : Nearby(target, 5.0f))
                 if (player->IsValidAttackTarget(unit))
                 {
                     Copy(player, unit, BottleDamage, uint64(healing) * 4 / 100);
-                    if (++count >= sSpellMgr->GetSpellInfo(BottleDamage)->MaxAffectedTargets)
+                    if (++count >= limit)
                         break;
                 }
         }

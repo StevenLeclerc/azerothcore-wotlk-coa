@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionSunCleric.h"
 #include "DBCStores.h"
 #include "Map.h"
@@ -25,7 +26,7 @@ void SunGate(Player* player)
         return;
     Position origin = player->GetPosition();
     TempSummon* gate = player->GetMap()->SummonCreature(SunGateEntry,origin,
-        sSummonPropertiesStore.LookupEntry(61),sSpellMgr->GetSpellInfo(802161)->GetDuration(),player);
+        sSummonPropertiesStore.LookupEntry(61),AscensionSpellSafe::Duration(802161, 30000),player);
     if (!gate)
         return;
     gate->SetTempSummonType(TEMPSUMMON_TIMED_DESPAWN);
@@ -48,7 +49,7 @@ void Valkyr(Player* player, Unit* target, bool dawn, bool fulfillment)
     ObjectGuid owner = player->GetGUID(), victim = target->GetGUID();
     uint32 map = player->GetMapId();
     Cast(player,player,520025);
-    State(player).scheduler.Schedule(Milliseconds(sSpellMgr->GetSpellInfo(520024)->GetDuration()),
+    State(player).scheduler.Schedule(Milliseconds(AscensionSpellSafe::Duration(520024, 3000)),
         [owner,victim,map,dawn,fulfillment](TaskContext)
         {
             Player* caster = ObjectAccessor::FindPlayer(owner);

@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionCultist.h"
 #include "AscensionCultistData.h"
+#include "AscensionSpellSafe.h"
 #include "CellImpl.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -105,10 +106,17 @@ bool Chance(Player* player, uint32 id, uint32 cooldown)
 uint32 Highest(Player* player, uint32 root)
 {
     uint32 result = root;
+    // GetSpellInfo(root) peut rendre nullptr : root est un id en dur. Le niveau du
+    // meilleur candidat est garde de cote, ce qui evite aussi trois lectures par tour.
+    uint32 best = AscensionSpellSafe::SpellLevel(root, 0);
     for (auto const& pair : player->GetSpellMap())
-        if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root) &&
-            sSpellMgr->GetSpellInfo(pair.first)->SpellLevel >= sSpellMgr->GetSpellInfo(result)->SpellLevel)
-            result = pair.first;
+        if (player->HasSpell(pair.first))
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(pair.first);
+                Named(info, root) && info->SpellLevel >= best)
+            {
+                result = pair.first;
+                best = info->SpellLevel;
+            }
     return result;
 }
 void Reduce(Player* player, uint32 root, int32 milliseconds)

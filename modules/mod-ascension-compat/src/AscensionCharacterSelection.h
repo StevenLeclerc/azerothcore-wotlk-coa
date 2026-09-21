@@ -34,9 +34,27 @@ bool IsAscensionCharacterSelectionOpcode(uint16 opcode);
 // Returns true when the packet was consumed by this feature.
 bool HandleAscensionCharacterSelectionPacket(WorldSession* session, WorldPacket const& packet);
 
-// Called when the client asks for its character list; sends the Ascension list
-// info, the stored sort order and the per-character data after the core's own
-// SMSG_CHAR_ENUM handling. Does nothing when the feature is disabled.
+// Legacy entry point for CMSG_CHAR_ENUM, still called from
+// AscensionCompatServerScript::CanPacketReceiveEarly on the NETWORK thread.
+// It is a no-op as soon as AddSC_AscensionCharacterSelection() has run, because
+// AscensionCharacterSelectionServerScript::CanPacketReceive then answers the
+// same CMSG_CHAR_ENUM on the world thread, just before the core's own handler.
+// It only does the work itself — racily, and after one LOG_ERROR — when that
+// script is missing. Does nothing when the feature is disabled.
 void SendAscensionCharacterListInfo(WorldSession* session);
+
+// Drains the activate/deactivate/sort-order requests parked from the network
+// thread by HandleAscensionCharacterSelectionPacket.
+// WORLD THREAD ONLY: it feeds WorldSession::GetQueryProcessor(), whose vector
+// has no lock, and it resolves sessions through WorldSessionMgr::FindSession().
+// AscensionCharacterSelectionWorldScript calls it every world tick; it is
+// cheap when the queue is empty and safe to call more than once per tick.
+void ProcessAscensionCharacterSelectionQueue();
+
+// Registers AscensionCharacterSelectionWorldScript (the queue pump) and
+// AscensionCharacterSelectionServerScript (the world-thread CMSG_CHAR_ENUM
+// hook). Called from MP_loader.cpp: without it both paths fall back to the
+// network thread and each logs one LOG_ERROR.
+void AddSC_AscensionCharacterSelection();
 
 #endif // ASCENSION_CHARACTER_SELECTION_H

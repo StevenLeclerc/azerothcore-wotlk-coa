@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionVenomancer.h"
 #include "AscensionVenomancerData.h"
 #include "DBCStores.h"
@@ -13,11 +14,14 @@ namespace AscensionVenomancer
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 35)
+    if (!AscensionContract::MatchesFamily(info, 35, "Venomancer"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 slot)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Venomancer");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -269,10 +273,10 @@ void ApplyContracts(SpellInfo* info)
     if (id == 503990)
     {
         aura(0,SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,-10,SPELL_SCHOOL_MASK_HOLY);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Venomancer");
     }
     if (id == 707358)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(35);
+        AscensionContract::SetDuration(info, 35, "Venomancer");
     if (id == 800921)
     {
         info->CasterAuraSpell = Skulk;

@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionStarcaller.h"
 #include "AscensionStarcallerData.h"
 #include "DBCStores.h"
@@ -11,10 +12,13 @@ namespace AscensionStarcaller
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 32)
+    if (!AscensionContract::MatchesFamily(info, 32, "Starcaller"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 slot) {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Starcaller");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -117,7 +121,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 92132 || id == 574349)
         dummy(id == 92132 ? 2 : 0);
     if (id == 100250 || id == 801148 || id == 706436)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Starcaller");
     if (id == 704787)
     {
         info->Effects[1].MiscValue = 127;
@@ -177,7 +181,7 @@ void ApplyContracts(SpellInfo* info)
         dummy(0), dummy(1);
     if (id == 561096)
     {
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Starcaller");
         for (uint8 i = 0; i < 2; ++i)
         {
             auto& e = info->Effects[i];
@@ -243,7 +247,7 @@ void ApplyContracts(SpellInfo* info)
         info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
     }
     if (id == 561122)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Starcaller");
     if (id == 680213 || id == 300256)
     {
         info->Effects[0].ApplyAuraName = SPELL_AURA_PERIODIC_DUMMY;

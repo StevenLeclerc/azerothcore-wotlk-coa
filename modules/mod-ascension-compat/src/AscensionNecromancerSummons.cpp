@@ -2,6 +2,7 @@
 
 #include "AscensionNecromancer.h"
 #include "AscensionNecromancerData.h"
+#include "AscensionSpellSafe.h"
 #include "Creature.h"
 #include "DBCStores.h"
 #include "MotionMaster.h"
@@ -373,7 +374,8 @@ class npc_ascension_necromancer : public ScriptedAI
         _events.ScheduleEvent(1, 1ms);
         _events.ScheduleEvent(2, 2s);
         if (me->GetEntry() == 50133 || me->GetEntry() == 50303)
-            _events.ScheduleEvent(3, Milliseconds(sSpellMgr->GetSpellInfo(807640)->Effects[1].Amplitude));
+            _events.ScheduleEvent(3,
+                Milliseconds(AscensionSpellSafe::EffectAmplitude(807640, EFFECT_1, 2000)));
         if (me->GetEntry() == 542064)
             _events.ScheduleEvent(4, 2s);
         if (me->GetEntry() == 542065)

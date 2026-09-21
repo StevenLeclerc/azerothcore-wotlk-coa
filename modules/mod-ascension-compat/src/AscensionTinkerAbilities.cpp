@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionTinker.h"
 #include "AscensionTinkerData.h"
 #include "Creature.h"
@@ -193,7 +194,10 @@ public:
                 if (Turret(device->GetEntry()))
                 {
                     Cast(player,device,578323);
-                    if (Count(device,578323) >= sSpellMgr->GetSpellInfo(578323)->StackAmount)
+                    // Sans 578323 dans le DBC la charge ne peut pas s'appliquer non plus :
+                    // un seuil de 0 ferait partir la decharge a chaque coup.
+                    if (uint32 charges = AscensionSpellSafe::StackAmount(578323, 0);
+                        charges && Count(device,578323) >= charges)
                     {
                         device->RemoveAurasDueToSpell(578323);
                         Cast(device,target,578335);
@@ -286,7 +290,7 @@ public:
         if (healing && Named(info,680196))
         {
             if (critical && player->HasAura(805306))
-                for (Unit* ally : Allies(player,target,Radius(706255),sSpellMgr->GetSpellInfo(706255)->MaxAffectedTargets))
+                for (Unit* ally : Allies(player,target,Radius(706255),AscensionSpellSafe::MaxAffectedTargets(706255,1)))
                     Copy(player,ally,706255,CalculatePct(healing,15));
             if (player->HasAura(560787))
                 for (Creature* device : Devices(player))
@@ -417,7 +421,9 @@ class spell_ascension_tinker_ability : public SpellScript
                 {
                     return !caster->IsValidAttackTarget(enemy) || enemy->GetExactDist(&position) > Radius(801744);
                 });
-                uint32 limit = sSpellMgr->GetSpellInfo(801744)->MaxAffectedTargets;
+                // Lu depuis une tache differee : un 801744 disparu planterait le fil de
+                // carte plusieurs secondes apres le lancement. 1 cible par defaut.
+                uint32 limit = AscensionSpellSafe::MaxAffectedTargets(801744, 1);
                 if (limit && targets.size() > limit)
                     targets.resize(limit);
                 for (Unit* enemy : targets)

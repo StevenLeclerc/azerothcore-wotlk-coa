@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionXoroth.h"
 #include "AscensionXorothData.h"
 #include "DBCStores.h"
@@ -21,11 +22,11 @@ enum FleshHook : uint32
 
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 23)
+    if (!AscensionContract::MatchesFamily(info, 23, "Xoroth"))
         return;
     uint32 id = info->Id;
     if (id == SPELL_WARPATH_PROTECTION && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_MOD_MINIMUM_SPEED)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(27); // Three seconds after Unleash Pestilence.
+        AscensionContract::SetDuration(info, 27, "Xoroth"); // Three seconds after Unleash Pestilence.
     if (id == SPELL_FLESH_HOOK_PULL)
     {
         // The parent has already passed its range and hit checks before scheduling this helper.
@@ -38,6 +39,9 @@ void ApplyContracts(SpellInfo* info)
         for (auto& effect : info->Effects)
             effect.Effect = 0; // Legacy delayed removal must not erase Demonfire generated after reservation.
     auto dummy = [info](uint8 i) {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, i, "Xoroth");
         info->Effects[i].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[i].TriggerSpell = 0;
     };
@@ -101,7 +105,7 @@ void ApplyContracts(SpellInfo* info)
         dummy(0);
     if (id == 573075)
     {
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Xoroth");
         info->Effects[1].Effect = 0;
     }
     if (id == 302546 || id == 302573 || id == 302574 || id == 302592)
@@ -181,12 +185,12 @@ void ApplyContracts(SpellInfo* info)
         e.MiscValue = SPELLMOD_COST;
         e.SpellClassMask = flag96(32768, 0, 0);
         e.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Xoroth");
     }
     if (id == 800702)
         dummy(0);
     if (id == 801064)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Xoroth");
     if (id == 802342)
         info->Effects[1].Effect = 0;
     if (id == 803334)

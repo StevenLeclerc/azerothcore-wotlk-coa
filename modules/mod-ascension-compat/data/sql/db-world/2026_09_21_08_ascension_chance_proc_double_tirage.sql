@@ -1,0 +1,301 @@
+-- =====================================================================================
+-- mod-ascension-compat — les talents qui tiraient leur chance DEUX fois.
+--
+-- LE MECANISME, relu dans le coeur et non deduit :
+--   1. `Aura::GetProcEffectMask` (src/server/game/Spells/Auras/SpellAuras.cpp) appelle
+--      `CallScriptCheckProcHandlers` a la ligne 2216 — c'est le `Check()` de nos
+--      AuraScript — PUIS, aux lignes 2276-2279, `float procChance = CalcProcChance(...);
+--      if (roll_chance_f(procChance)) return procEffectMask;`. Deux tirages successifs
+--      et independants, dans cet ordre.
+--   2. `SpellMgr::LoadSpellProcs` (SpellMgr.cpp:2114-2115) :
+--      `if (!procEntry.Chance && !procEntry.ProcsPerMinute) procEntry.Chance =
+--       float(spellInfo->ProcChance);` — une ligne `spell_proc` a Chance = 0 ET
+--      ProcsPerMinute = 0 retombe donc sur `Spell.dbc.ProcChance` (champ 35, index
+--      confirme contre src/server/shared/DataStores/DBCStructure.h:1712).
+--   3. Le module lit EXACTEMENT le meme nombre : `Chance(player, id)` fait
+--      `float chance = info ? float(info->ProcChance) : 0;` puis
+--      `roll_chance_f(std::clamp(chance, 0.0f, 100.0f))` (AscensionCultist.cpp:92-104),
+--      et les variantes en clair font `roll_chance_i(GetSpellInfo()->ProcChance)`.
+--
+-- CONSEQUENCE MESUREE : la cadence reelle est <= p^2 (<=, et non =, car le second tirage
+-- n'a lieu qu'apres `CheckEffectProc` et le controle d'equipement). « Dark Revelation »
+-- 300313, annonce a 6 %, part a 0,36 % ; « Malice of Gul'dan » 800214, annonce a 60 %,
+-- part a 36 % ; les talents a 5 % partent a 0,25 %.
+--
+-- POURQUOI LE CORRECTIF EST ICI ET NON DANS LE C++ : retirer le tirage des `Check()`
+-- perdrait ce que la ligne `spell_proc` ne sait pas exprimer —
+--   * l'ICD interne de `Chance(player, id, cooldown)`, qui arme
+--     `State(player).timers.ScheduleEvent(id, ...)` ;
+--   * les chances CONDITIONNELLES : 300313 et 706245 gagnent `Amount(707753)` quand
+--     l'Insanity depasse 40 (AscensionCultist.cpp:95-96) ; 560207 gagne
+--     `803422->Effects[EFFECT_2]` quand cette aura est presente
+--     (AscensionWitchHunterEvents.cpp:122-126) ; 520007 applique lui-meme
+--     SPELLMOD_CHANCE_OF_SUCCESS sur une base de 20 (AscensionTemplarEvents.cpp:58-64).
+-- `Aura::CalcProcChance` ne connait que `procEntry.Chance`, `ProcsPerMinute` et le
+-- spellmod : aucune de ces trois conditions n'y est exprimable.
+--
+-- C'EST LA CONVENTION DEJA ETABLIE DE LA MAISON, pas une invention : voir
+-- `AscensionRunemasterSecondary.cpp:235` — « So `spell_proc` is set to Chance 100 and the
+-- real roll is below » — et les 34 talents du meme module qui portent DEJA Chance = 100
+-- pour cette raison exacte (92104, 92111, 300349, 300371, 300476, 300478, 504628, 504786,
+-- 520388, 560501, 560715, 681449, 704971, 705810, 805249, 807659, ...). Le cas le plus
+-- parlant : « Scourgebane » porte DEUX identites, 92111 et 520007, cablees par le MEME
+-- `case` de AscensionTemplarEvents.cpp:57-64 ; 92111 est deja a 100, 520007 etait reste
+-- a 0. Ce fichier ne fait que finir un travail commence.
+--
+-- ⚠ COUPLAGE, DELIBERE ET A SENS UNIQUE, comme pour 2026_09_20_06 : avec la ligne a 100,
+--   un binaire qui NE PORTERAIT PAS ces `Check()` ferait partir ces talents a CHAQUE coup.
+--   Tous les `Check()` cites existent deja dans l'arbre de service `/opt/coa/core-main`
+--   (branche coa-service-19092026) ; ce fichier n'exige donc aucune recompilation, mais il
+--   exige que le binaire en service reste celui de cette branche.
+--
+-- ⚠ NE PAS APPLIQUER A LA VOLEE SANS DECISION : 74 talents voient leur cadence multipliee
+--   par 1/p, soit x2 (800214) a x20 (les 5 %). C'est un changement d'equilibrage massif,
+--   voulu, mais qui doit etre annonce. Rechargeable a chaud une fois applique :
+--   `.reload spell_proc` (eprouve, P-045).
+--
+-- ⚠ CE FICHIER PORTE LE SUFFIXE `.proto`, ET CE N'EST PAS UN OUBLI.
+--   `exploitation/appliquer-sql-module.sh` boucle sur `"$SQLDIR"/*.sql` (ligne 30) et
+--   applique d'un coup TOUS les fichiers en attente, sans arbitrage par fichier : sa seule
+--   barriere est de chercher dans le binaire les `ScriptName` que le fichier INSERE dans
+--   `spell_script_names` (lignes 34-54), et ce fichier n'en insere aucun — il passait donc
+--   la barriere sans condition. Verifie en lecture seule le 2026-09-21 : le script le
+--   classait « PRET ... (aucun script nomme) » et « 1 fichier(s) applicables ». Le prochain
+--   `--appliquer` l'aurait donc embarque, alors que le mandat dit qu'il doit etre applique
+--   SEPAREMENT, APRES DECISION. Le suffixe `.proto` — convention deja etablie dans ce
+--   repertoire par `2026_09_20_17_ascension_patron_modificateurs.sql.proto` — le sort de
+--   l'inventaire.
+--   POUR L'APPLIQUER, UNE FOIS LA DECISION D'EQUILIBRAGE PRISE :
+--     mv 2026_09_21_08_ascension_chance_proc_double_tirage.sql.proto \
+--        2026_09_21_08_ascension_chance_proc_double_tirage.sql
+--     bash exploitation/appliquer-sql-module.sh --appliquer
+--
+-- -------------------------------------------------------------------------------------
+-- LES TROIS CHANGEMENTS DE JEU QUI NE SE DEVINENT PAS DANS LA LISTE, ET QU'IL FAUT
+-- ANNONCER AVANT D'APPLIQUER.
+--
+-- (1) 574354 « Vulnerability » — DEUX branches, et l'UPDATE ne les touche pas pareil.
+--     Le `Check()` est une disjonction de PREMIER niveau
+--     (AscensionVenomancerEvents.cpp:83-84) :
+--       `case 574354: return (damage && automatic && player->HasAura(805776)
+--                             && Chance(player,id)) || (damage && critical);`
+--     Le second disjoint NE TIRE PAS. C'est le seul de tout le module dans ce cas : deux
+--     sondes independantes (decoupage des `||` a profondeur de parentheses 0 sur les
+--     formes `case N: return ...` puis `if (id == N) return ...` de tous les
+--     Ascension*Events.cpp) ne renvoient que celui-la. Une version precedente de cet entete
+--     affirmait cette verification faite ; elle ne l'etait pas. Elle l'est maintenant.
+--     Effet de l'UPDATE, branche par branche :
+--       * auto-attaque sous Blight Venom : 10 % x 10 %  =  1 %   ->  10 % x 100 % = 10 %
+--       * coup critique (applique 572056) : 100 % x 10 % = 10 %  -> 100 % x 100 % = 100 %
+--     LE CHOIX RETENU EST DE LE GARDER DANS L'UPDATE, parce que l'infobulle lue au
+--     Spell.dbc n'annonce une chance que sur la premiere branche et aucune sur la seconde :
+--       « While Blight Venom is active, your auto attacks now have a $h% chance to apply
+--         it.  In addition, your offensive critical strikes now increase the target's
+--         spell damage taken by $572056s1% for $572056d. »
+--     Ce qui porte la decision n'est pas la valeur de `$h` — ce jeton est resolu par le
+--     client, pas par le serveur, et je ne l'ai pas lu dans le coeur — mais sa PRESENCE :
+--     l'infobulle annonce une chance sur la premiere branche et AUCUNE sur la seconde.
+--     C'est exactement la forme que prend le `Check()`, et exactement ce que l'UPDATE
+--     retablit. ProcChance(574354) = 10 au DBC, ce qui rend la premiere branche a 10 %.
+--     CONSEQUENCE DE JEU, ASSUMEE ET A EPROUVER EN JEU : chaque critique offensif d'un
+--     Venomancer appliquera 572056 (« Vulnerable », +10 % degats magiques subis, Aura=87,
+--     MiscValue=126), au lieu d'un critique sur dix. Uptime quasi permanent sur la cible,
+--     et un `CastSpell` par critique (Proc() : AscensionVenomancerEvents.cpp:182-187).
+--     C'est la plus grosse variation de puissance du fichier. Si elle est jugee excessive
+--     a l'essai, RETIRER 574354 de la liste de l'UPDATE ramene la branche critique a 10 %,
+--     soit exactement son etat d'aujourd'hui : sur une branche qui ne tire pas elle-meme,
+--     le double tirage se reduit au seul tirage du coeur, et donne deja la valeur du DBC.
+--     Le point (2) ci-dessous montre que 574354 n'est pas seul dans ce cas de figure :
+--     la branche critique de 806603 tire `roll_chance_i(100)`, ce qui revient au meme.
+--
+-- (2) 806603 « Acidfang » — branche periodique 16 % -> 40 %, branche critique 40 % -> 100 %.
+--     `Check()` (AscensionVenomancerEvents.cpp:109-110) :
+--       `(critical && roll_chance_i(GetSpellInfo(806604)->ProcChance)) || (periodic && Chance(player,id))`
+--     Les deux branches tirent — il n'y a donc pas ici le trou de 574354 — mais elles ne
+--     tirent pas le meme nombre, et le detail compte. Valeurs LUES au Spell.dbc champ 35
+--     (`ProcChance`, index confirme contre src/server/shared/DataStores/DBCStructure.h:1712) :
+--       ProcChance(806603) = 40 ,  ProcChance(806604) = 100.
+--     Donc la branche critique tire `roll_chance_i(100)` : elle passe TOUJOURS le `Check()`,
+--     et seul le tirage du coeur la freine.
+--       * periodique : 40 % (Check) x 40 % (coeur, repli DBC) = 16 %  ->  40 % x 100 % = 40 %
+--       * critique   : 100 % (Check) x 40 % (coeur)           = 40 %  -> 100 % x 100 % = 100 %
+--     Conforme a l'infobulle, mais c'est un saut de x2,5 sur les degats periodiques et
+--     l'application systematique sur les critiques. A eprouver en jeu au meme titre que
+--     574354.
+--
+-- (3) 520007 « Scourgebane » — perd la DOUBLE application de SPELLMOD_CHANCE_OF_SUCCESS.
+--     Aujourd'hui le spellmod « Pure Focus » s'applique deux fois : une fois dans le module
+--     (`player->ApplySpellMod(520007, SPELLMOD_CHANCE_OF_SUCCESS, chance)`,
+--     AscensionTemplarEvents.cpp:58-64) et une fois dans le coeur (`modOwner->ApplySpellMod(
+--     GetId(), SPELLMOD_CHANCE_OF_SUCCESS, chance)`, Aura::CalcProcChance,
+--     SpellAuras.cpp:2311). Avec la ligne a 100 la seconde n'a plus de prise : c'est une
+--     CORRECTION, mais un joueur qui porte Pure Focus la ressentira comme une perte.
+--
+-- -------------------------------------------------------------------------------------
+-- TROISIEME CATEGORIE, RECENSEE POUR QU'ELLE NE RESTE PAS IMPLICITE :
+-- LES TALENTS QUI TIRENT DANS LEUR `Check()` ET SONT DEJA A Chance = 100.
+-- Ils sont SAINS et ne figurent volontairement pas dans l'UPDATE ; les nommer evite qu'un
+-- prochain passage les croie oublies. Releve du 2026-09-21 sur `acore_world.spell_proc`,
+-- sonde `outils/sonde-recensement-tirage.py` (formes `case N: return ...` et
+-- `if (id == N) return ...` de tous les Ascension*Events.cpp, 59 talents a tirage
+-- reconnus par cette sonde) :
+--
+--   92142, 300349, 300369, 300371, 520388, 520662, 560492, 560715, 705810,
+--   706590, 707629, 802935, 804629, 805647, 806058, 806604, 806627, 806699   (18 ids)
+--
+-- COUVERTURE, DITE FRANCHEMENT : cette sonde ne reconnait que deux formes d'ecriture et
+-- ramene 59 talents a tirage, la ou l'UPDATE en compte 74 — les 15 restants tirent depuis
+-- une forme que la sonde ne sait pas decouper (helpers, lambdas). Les 41 talents a
+-- Chance = 0 qu'elle trouve sont tous deja dans la liste de l'UPDATE : elle n'en decouvre
+-- aucun qui y manquerait.
+--
+-- ET LE FAIT QUI FERME L'INVENTAIRE : les 74 lignes visees par l'UPDATE portent toutes
+-- `Chance = 0` ET `ProcsPerMinute = 0` (releve du 2026-09-21, les 74 lignes existent), et
+-- les 18 ci-dessus portent toutes exactement 100. Sur l'ensemble des talents a tirage
+-- identifies, la colonne `Chance` ne prend donc QUE deux valeurs, 0 ou 100 — aucune valeur
+-- partielle (30, 50...), aucun `ProcsPerMinute` non nul. Il n'existe pas de quatrieme
+-- categorie ou l'UPDATE ecraserait un reglage d'equilibrage deliberement intermediaire.
+--
+-- -------------------------------------------------------------------------------------
+-- LES 74 LIGNES, ETABLIES PAR RECENSEMENT ET NON PAR LECTURE DE LA REVUE.
+-- Critere retenu, verifiable : (a) le `Check()` de l'aura tire lui-meme une chance
+-- (`Chance(player, ...)` ou `roll_chance_*`), ET (b) sa ligne `spell_proc` porte
+-- Chance = 0 ET ProcsPerMinute = 0 — donc le repli DBC s'applique. Les 34 talents qui
+-- tirent aussi leur chance mais sont DEJA a 100 sont exclus — ils sont recenses plus bas,
+-- pour que l'inventaire soit complet et non implicite.
+--
+-- RECTIFICATIF (relecture adverse du 2026-09-21) : une version precedente de cet entete
+-- affirmait que « 10 talents Necromancer tirent sans avoir de ligne spell_proc du tout »
+-- et que « l'aura ne part JAMAIS ». C'ETAIT FAUX, et la phrase est retiree. Les dix ids
+-- en cause (573242, 801241, 707575, 561318, 561095, 570050, 681463, 707002, 707284,
+-- 505225) ne sont pas des talents a proc : ils forment le corps de
+-- `Derived(SpellInfo const*)` (AscensionNecromancerEvents.cpp:18-38), la liste des
+-- sorts-CHARGES a ignorer pour eviter la re-entrance. Aucun `Chance(` sur ces lignes ;
+-- ce sont des payloads lances en clair (`Copy(player,target,573242,...)` ligne 117,
+-- `Cast(actor,target,707284)` ligne 188, `Cast(actor,nearby,707002)` ligne 196,
+-- `Copy(me,target,505225,mana)` AscensionNecromancerSummons.cpp:504). Ils n'ont ni ligne
+-- `spell_script_names` ni ligne `spell_proc`, et c'est NORMAL : ce ne sont pas des auras
+-- a proc. Il n'y a rien a corriger de ce cote.
+--
+--   id      DBC   nom (Spell.dbc)                        sites
+--   300278  40 %  Bulwark of Horror                      AscensionCultistEvents.cpp:138, AscensionCultistEvents.cpp:49
+--   300300  25 %  Mind Rot                               AscensionCultistEvents.cpp:148, AscensionCultistEvents.cpp:68
+--   300313  6  %  Dark Revelation                        AscensionCultistEvents.cpp:154, AscensionCultistEvents.cpp:156
+--   300480  5  %  Infernal Summoner                      AscensionFelswornEvents.cpp:145, AscensionFelswornEvents.cpp:54
+--   300490  15 %  Felforged                              AscensionFelswornEvents.cpp:205, AscensionFelswornEvents.cpp:87
+--   300855  5  %  Envenomed Weapons                      AscensionVenomancerEvents.cpp:140, AscensionVenomancerEvents.cpp:22
+--   503851  30 %  Contagion                              AscensionVenomancerEvents.cpp:147, AscensionVenomancerEvents.cpp:71
+--   503856  10 %  Avatar of Shadra                       AscensionVenomancerEvents.cpp:165, AscensionVenomancerEvents.cpp:73
+--   503960  30 %  Enduring Exoskeleton                   AscensionVenomancerEvents.cpp:167, AscensionVenomancerEvents.cpp:52
+--   504406  20 %  Chitinous Spikes                       AscensionVenomancerEvents.cpp:291, AscensionVenomancerEvents.cpp:55
+--   520007  20 %  Scourgebane                            AscensionTemplarEvents.cpp:127, AscensionTemplarEvents.cpp:58
+--   524620  15 %  Pulverizing                            AscensionTemplarEvents.cpp:173, AscensionTemplarEvents.cpp:87
+--   524642  25 %  Star-Guided Arrows                     AscensionStarcallerEvents.cpp:169, AscensionStarcallerEvents.cpp:89
+--   538441  5  %  Flames of the Firelord                 AscensionPyromancerEvents.cpp:159, AscensionPyromancerEvents.cpp:75
+--   560091  5  %  Eldritch Bastion                       AscensionCultistEvents.cpp:183, AscensionCultistEvents.cpp:76
+--   560200  10 %  Cycle of Rebirth                       AscensionVenomancerEvents.cpp:178, AscensionVenomancerEvents.cpp:80
+--   560207  25 %  Flames of the Sinned                   AscensionWitchHunterEvents.cpp:121, AscensionWitchHunterEvents.cpp:237
+--   560264  10 %  Deadly Sting                           AscensionVenomancerEvents.cpp:179, AscensionVenomancerEvents.cpp:81
+--   560281  20 %  Vizier Form SLS                        AscensionVenomancerEvents.cpp:180, AscensionVenomancerEvents.cpp:82
+--   560320  10 %  Voidseeker                             AscensionCultistEvents.cpp:184, AscensionCultistEvents.cpp:77
+--   560639  20 %  Illidari Magi                          AscensionFelswornEvents.cpp:172, AscensionFelswornEvents.cpp:86
+--   560648  10 %  Warrior of Dawn                        AscensionTemplarEvents.cpp:151, AscensionTemplarEvents.cpp:72
+--   560785  25 %  Graftbolts                             AscensionTinkerEvents.cpp:128, AscensionTinkerEvents.cpp:192
+--   561022  5  %  Hunter's Sight                         AscensionStarcallerEvents.cpp:101, AscensionStarcallerEvents.cpp:196
+--   561336  10 %  Eldritch Bastion                       AscensionCultistEvents.cpp:183, AscensionCultistEvents.cpp:76
+--   572367  50 %  Ventilation                            AscensionTinkerEvents.cpp:104, AscensionTinkerEvents.cpp:188
+--   574354  10 %  Vulnerability                          AscensionVenomancerEvents.cpp:182, AscensionVenomancerEvents.cpp:83
+--   680975  30 %  Gear Grind                             AscensionTinkerEvents.cpp:130, AscensionTinkerEvents.cpp:194
+--   681376  8  %  Chaotic                                AscensionFelswornEvents.cpp:148, AscensionFelswornEvents.cpp:56
+--   704264  40 %  Spider Lord                            AscensionVenomancerEvents.cpp:197, AscensionVenomancerEvents.cpp:87
+--   704610  30 %  A Thousand Cuts                        AscensionFelswornEvents.cpp:176, AscensionFelswornEvents.cpp:69
+--   704741  15 %  Blessed By The Stars                   AscensionStarcallerEvents.cpp:114, AscensionStarcallerEvents.cpp:157
+--   704800  15 %  Searing Speed                          AscensionPyromancerEvents.cpp:180, AscensionPyromancerEvents.cpp:81
+--   705815  5  %  Sparked and Ready!                     AscensionTinkerEvents.cpp:129, AscensionTinkerEvents.cpp:193
+--   705993  8  %  Tome of Ahn'kahet                      AscensionVenomancerEvents.cpp:229, AscensionVenomancerEvents.cpp:92
+--   705998  20 %  Slimy                                  AscensionVenomancerEvents.cpp:230, AscensionVenomancerEvents.cpp:53
+--   706018  5  %  Serpent Lord's Ritual                  AscensionVenomancerEvents.cpp:237, AscensionVenomancerEvents.cpp:95
+--   706030  10 %  Infestation                            AscensionVenomancerEvents.cpp:250, AscensionVenomancerEvents.cpp:96
+--   706035  15 %  Surprise Strategy                      AscensionVenomancerEvents.cpp:254, AscensionVenomancerEvents.cpp:97
+--   706230  30 %  Unleashed Wisps                        AscensionStarcallerEvents.cpp:247, AscensionStarcallerEvents.cpp:90
+--   706239  20 %  Earthwarder                            AscensionPyromancerEvents.cpp:189, AscensionPyromancerEvents.cpp:45
+--   706245  20 %  Dark Revelation                        AscensionCultistEvents.cpp:154, AscensionCultistEvents.cpp:83
+--   706271  5  %  Death Spray                            AscensionVenomancerEvents.cpp:255, AscensionVenomancerEvents.cpp:98
+--   706325  15 %  Condemnation                           AscensionTemplarEvents.cpp:123, AscensionTemplarEvents.cpp:82
+--   706370  15 %  Rotting Away                           AscensionVenomancerEvents.cpp:117, AscensionVenomancerEvents.cpp:297
+--   706911  15 %  Depths of Madness                      AscensionCultistEvents.cpp:213, AscensionCultistEvents.cpp:84
+--   707233  8  %  Suffocating Coils                      AscensionVenomancerEvents.cpp:101, AscensionVenomancerEvents.cpp:262
+--   707391  20 %  Retribution                            AscensionTemplarEvents.cpp:143, AscensionTemplarEvents.cpp:70
+--   707483  10 %  Magmatic                               AscensionPyromancerEvents.cpp:196, AscensionPyromancerEvents.cpp:89
+--   707640  30 %  Shadow Strikes                         AscensionCultistEvents.cpp:216, AscensionCultistEvents.cpp:85
+--   800214  60 %  Malice of Gul'dan                      AscensionFelswornEvents.cpp:227, AscensionFelswornEvents.cpp:97
+--   800394  25 %  New Moon                               AscensionStarcallerEvents.cpp:156, AscensionStarcallerEvents.cpp:81
+--   800463  20 %  Void Reaver                            AscensionCultistEvents.cpp:217, AscensionCultistEvents.cpp:51
+--   801143  15 %  Stellar Amplification                  AscensionStarcallerEvents.cpp:250, AscensionStarcallerEvents.cpp:91
+--   801899  15 %  Legionfall                             AscensionFelswornEvents.cpp:201, AscensionFelswornEvents.cpp:84
+--   802068  10 %  Wreath of Flames                       AscensionPyromancerEvents.cpp:199, AscensionPyromancerEvents.cpp:91
+--   803035  20 %  Presence of Y'Shaarj                   AscensionCultistEvents.cpp:219, AscensionCultistEvents.cpp:86
+--   803037  20 %  Presence of N'Zoth                     AscensionCultistEvents.cpp:220, AscensionCultistEvents.cpp:86
+--   803082  30 %  Presence of Yogg-Saron                 AscensionCultistEvents.cpp:223, AscensionCultistEvents.cpp:86
+--   803210  10 %  Regenerative Properties                AscensionVenomancerEvents.cpp:301, AscensionVenomancerEvents.cpp:51
+--   803339  20 %  Presence of C'Thun                     AscensionCultistEvents.cpp:224, AscensionCultistEvents.cpp:86
+--   804822  10 %  Vengeance Is Mine                      AscensionFelswornEvents.cpp:157, AscensionFelswornEvents.cpp:42
+--   804981  15 %  Weaver Form                            AscensionVenomancerEvents.cpp:105, AscensionVenomancerEvents.cpp:283
+--   804987  35 %  Fungal Growth                          AscensionVenomancerEvents.cpp:120, AscensionVenomancerEvents.cpp:302
+--   805098  50 %  Venomancer (Fortitude)                 AscensionVenomancerEvents.cpp:284, AscensionVenomancerEvents.cpp:54
+--   805110  5  %  Black Prayer                           AscensionCultistEvents.cpp:225, AscensionCultistEvents.cpp:88
+--   805245  20 %  Demonic Fortitude                      AscensionFelswornEvents.cpp:173, AscensionFelswornEvents.cpp:42
+--   805439  40 %  Shadowsong's Mandate                   AscensionStarcallerEvents.cpp:110, AscensionStarcallerEvents.cpp:214
+--   805505  5  %  Starlight Duelist                      AscensionStarcallerEvents.cpp:217, AscensionStarcallerEvents.cpp:52
+--   805606  15 %  Corrupting Whispers                    AscensionCultistEvents.cpp:226, AscensionCultistEvents.cpp:86
+--   806603  40 %  Acidfang                               AscensionVenomancerEvents.cpp:109, AscensionVenomancerEvents.cpp:290
+--   806629  20 %  Battle Engineer                        AscensionTinkerEvents.cpp:121, AscensionTinkerEvents.cpp:178
+--   806736  50 %  Inferno                                AscensionPyromancerEvents.cpp:208, AscensionPyromancerEvents.cpp:97
+--   806758  10 %  Clockwork Guardians                    AscensionTinkerEvents.cpp:126, AscensionTinkerEvents.cpp:187
+--
+-- =====================================================================================
+
+UPDATE `spell_proc` SET `Chance` = 100 WHERE `SpellId` IN (
+    300278, 300300, 300313, 300480, 300490, 300855, 503851, 503856,
+    503960, 504406, 520007, 524620, 524642, 538441, 560091, 560200,
+    560207, 560264, 560281, 560320, 560639, 560648, 560785, 561022,
+    561336, 572367, 574354, 680975, 681376, 704264, 704610, 704741,
+    704800, 705815, 705993, 705998, 706018, 706030, 706035, 706230,
+    706239, 706245, 706271, 706325, 706370, 706911, 707233, 707391,
+    707483, 707640, 800214, 800394, 800463, 801143, 801899, 802068,
+    803035, 803037, 803082, 803210, 803339, 804822, 804981, 804987,
+    805098, 805110, 805245, 805439, 805505, 805606, 806603, 806629,
+    806736, 806758
+);
+
+-- =====================================================================================
+-- RETOUR ARRIERE — l'UPDATE inverse, exact, a copier tel quel.
+--
+-- Il est ICI et non en prose parce que le fichier previent lui-meme qu'il s'agit d'un
+-- rebalancement massif potentiellement a annuler : un antidote decrit mais pas ecrit
+-- oblige a le reconstruire sous pression.
+--
+-- Il est EXACT et non approximatif : releve du 2026-09-21 sur `acore_world.spell_proc`,
+-- les 74 lignes visees existent toutes et portent toutes `Chance = 0` ET
+-- `ProcsPerMinute = 0` AVANT application. Reposer `Chance = 0` les ramene donc a leur
+-- etat d'origine sans perte, et sans toucher `ProcsPerMinute`, que ce fichier n'ecrit pas.
+--
+-- Il ne s'applique PAS en l'etat (tout le bloc est en commentaire) : le decommenter, ou le
+-- coller dans un client mysql, puis `.reload spell_proc` en console (P-045).
+--
+-- UPDATE `spell_proc` SET `Chance` = 0 WHERE `SpellId` IN (
+--     300278, 300300, 300313, 300480, 300490, 300855, 503851, 503856,
+--     503960, 504406, 520007, 524620, 524642, 538441, 560091, 560200,
+--     560207, 560264, 560281, 560320, 560639, 560648, 560785, 561022,
+--     561336, 572367, 574354, 680975, 681376, 704264, 704610, 704741,
+--     704800, 705815, 705993, 705998, 706018, 706030, 706035, 706230,
+--     706239, 706245, 706271, 706325, 706370, 706911, 707233, 707391,
+--     707483, 707640, 800214, 800394, 800463, 801143, 801899, 802068,
+--     803035, 803037, 803082, 803210, 803339, 804822, 804981, 804987,
+--     805098, 805110, 805245, 805439, 805505, 805606, 806603, 806629,
+--     806736, 806758
+-- );
+--
+-- RETOUR ARRIERE PARTIEL, si seul 574354 « Vulnerability » se revele excessif a l'essai :
+-- UPDATE `spell_proc` SET `Chance` = 0 WHERE `SpellId` = 574354;
+-- =====================================================================================

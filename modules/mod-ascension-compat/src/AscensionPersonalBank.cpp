@@ -46,8 +46,11 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <limits>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <unordered_map>
 
@@ -115,6 +118,38 @@ struct OpenBank
 };
 
 std::unordered_map<ObjectGuid::LowType, OpenBank> openBanks;
+
+/// Guards the *shape* of `openBanks`, nothing else.
+///
+/// The table is read from the map threads and written from the world thread. `IsOpen` is
+/// called from `CanPacketReceive` for every opcode a session receives, and CMSG_USE_ITEM
+/// (the tab voucher, which writes) is PROCESS_INPLACE, so a map thread can be walking the
+/// buckets while another thread rehashes them - the crash of P-050.
+///
+/// Reads are shared, insertions and erasures exclusive. The *contents* of one OpenBank need
+/// no guard: every entry is keyed by the acting character and only that character's own
+/// session ever touches it, and a session is updated by one thread at a time.
+std::shared_mutex openBanksLock;
+
+/// How many banks are open, so the per-opcode `IsOpen` costs one relaxed load instead of a
+/// lock on a realm where nobody has a bank window up.
+std::atomic<uint32> openBankCount{0};
+
+/// The bank `guid` has open, or nullptr.
+///
+/// The pointer outlives the lock on purpose: std::unordered_map only invalidates pointers and
+/// references to the element that is erased (a rehash moves buckets, not nodes), and the only
+/// erasures of this key - Opened and Closed - run on this same character's session. That is
+/// what lets the callers do their database work and send their packets unlocked.
+[[nodiscard]] OpenBank* FindOpenBank(ObjectGuid::LowType guid)
+{
+    if (!openBankCount.load(std::memory_order_acquire))
+        return nullptr;
+
+    std::shared_lock<std::shared_mutex> guard(openBanksLock);
+    auto itr = openBanks.find(guid);
+    return itr == openBanks.end() ? nullptr : &itr->second;
+}
 
 // ---------------------------------------------------------------------------------------
 // Loading and unloading
@@ -242,14 +277,22 @@ void StoreSlot(CharacterDatabaseTransaction trans, OpenBank const& bank, uint8 t
     item->SaveToDB(trans);
 }
 
-void StoreMoney(OpenBank const& bank)
+/// Writes the drawer's gold inside `trans`.
+///
+/// It takes a transaction because the character's own gold has to be written by the same
+/// commit: `ModifyMoney` only moves PLAYER_FIELD_COINAGE in memory, and characters.money is
+/// not touched until the periodic save. Writing the drawer on its own left a window - fifteen
+/// minutes wide by default - in which a crash duplicated the deposited gold (or destroyed the
+/// withdrawn gold), which is what the six item paths already avoid by saving both ends in one
+/// transaction.
+void StoreMoney(CharacterDatabaseTransaction trans, OpenBank const& bank)
 {
-    CharacterDatabase.Execute("REPLACE INTO mod_ascension_bank_money (owner_kind, owner_id, money) "
-                              "VALUES ({}, {}, {})",
-                              bank.OwnerKind, bank.OwnerId, bank.Money);
+    trans->Append("REPLACE INTO mod_ascension_bank_money (owner_kind, owner_id, money) "
+                  "VALUES ({}, {}, {})",
+                  bank.OwnerKind, bank.OwnerId, bank.Money);
 }
 
-void StoreTab(OpenBank const& bank, uint8 tab)
+void StoreTab(CharacterDatabaseTransaction trans, OpenBank const& bank, uint8 tab)
 {
     std::string name = bank.TabName[tab];
     std::string icon = bank.TabIcon[tab];
@@ -258,9 +301,18 @@ void StoreTab(OpenBank const& bank, uint8 tab)
     CharacterDatabase.EscapeString(icon);
     CharacterDatabase.EscapeString(text);
 
-    CharacterDatabase.Execute("REPLACE INTO mod_ascension_bank_tab (owner_kind, owner_id, tab_index, name, icon, text) "
-                              "VALUES ({}, {}, {}, '{}', '{}', '{}')",
-                              bank.OwnerKind, bank.OwnerId, tab, name, icon, text);
+    trans->Append("REPLACE INTO mod_ascension_bank_tab (owner_kind, owner_id, tab_index, name, icon, text) "
+                  "VALUES ({}, {}, {}, '{}', '{}', '{}')",
+                  bank.OwnerKind, bank.OwnerId, tab, name, icon, text);
+}
+
+/// The same write on its own, for the paths where no gold moves with it (renaming a tab, and
+/// the voucher, which costs no gold).
+void StoreTab(OpenBank const& bank, uint8 tab)
+{
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    StoreTab(trans, bank, tab);
+    CharacterDatabase.CommitTransaction(trans);
 }
 
 /// Logs one bank event the way the core logs guild-bank events, so the frame's log tab
@@ -468,7 +520,11 @@ void DestroyBankItem(CharacterDatabaseTransaction trans, OpenBank& bank, uint8 t
 }
 
 /// The first bank slot that can take `item` as-is: a stack with room, else an empty slot.
-[[nodiscard]] bool FindBankSlotFor(OpenBank const& bank, uint8 tab, Item* item, uint8& outSlot)
+///
+/// `amount` is how much is really going to move. Zero means "whatever fits" - the caller will
+/// clip the merge and keep the rest - while a split says how much has to fit *whole*, because
+/// a split has already decided how much leaves the source and cannot be clipped.
+[[nodiscard]] bool FindBankSlotFor(OpenBank const& bank, uint8 tab, Item* item, uint32 amount, uint8& outSlot)
 {
     if (tab >= bank.Tabs)
         return false;
@@ -477,7 +533,8 @@ void DestroyBankItem(CharacterDatabaseTransaction trans, OpenBank& bank, uint8 t
     for (uint8 slot = 0; slot < BANK_SLOTS; ++slot)
     {
         Item* existing = bank.Items[tab][slot];
-        if (existing && existing->GetEntry() == item->GetEntry() && existing->GetCount() < maxStack)
+        if (existing && existing->GetEntry() == item->GetEntry() && existing->GetCount() < maxStack &&
+            (!amount || amount <= maxStack - existing->GetCount()))
         {
             outSlot = slot;
             return true;
@@ -497,9 +554,23 @@ void DestroyBankItem(CharacterDatabaseTransaction trans, OpenBank& bank, uint8 t
 }
 
 /// True when `dest` and `item` are the same thing and `dest` still has stack room.
-[[nodiscard]] bool CanMergeInto(Item* dest, Item* item)
+///
+/// With `amount`, that much has to fit whole. The callers that pass zero go on to clip the
+/// merge to the room they find and keep the remainder where it was; the split callers cannot
+/// do that - they have already decided how much leaves the source - so for them an overflowing
+/// merge has to be refused, not clipped. Without that test a split of 15 onto a stack of 19
+/// out of 20 wrote a count of 34 straight into item_instance.count, a state the core never
+/// produces and which then blocks every later merge into that slot.
+[[nodiscard]] bool CanMergeInto(Item* dest, Item* item, uint32 amount = 0)
 {
-    return dest && item && dest->GetEntry() == item->GetEntry() && dest->GetCount() < dest->GetMaxStackCount();
+    if (!dest || !item || dest->GetEntry() != item->GetEntry())
+        return false;
+
+    uint32 const maxStack = dest->GetMaxStackCount();
+    if (dest->GetCount() >= maxStack)
+        return false;
+
+    return !amount || amount <= maxStack - dest->GetCount();
 }
 
 /// Takes `amount` off a bank stack and persists the new count.
@@ -561,18 +632,25 @@ void DepositToBank(Player* player, OpenBank& bank, uint8 bag, uint8 slot, uint8 
     if (tab >= bank.Tabs)
         return;
 
-    if (autoStore && !FindBankSlotFor(bank, tab, source, bankSlot))
+    // A split that would not actually split the stack is a plain move. This is settled before
+    // a slot is picked, because the slot has to have room for what really moves.
+    if (split == 0 || split >= source->GetCount())
+        split = 0;
+
+    if (autoStore && !FindBankSlotFor(bank, tab, source, split, bankSlot))
     {
         player->SendEquipError(EQUIP_ERR_BANK_FULL, source, nullptr);
+
+        // Only for a split, and only because a split is what this diff made refusable here:
+        // the frame has drawn the fraction landing in the tab, and the core redraws it in the
+        // same case (Guild.cpp:2777). A whole-stack refusal is left exactly as it was.
+        if (split)
+            SendTabChanged(player, bank, tab);
         return;
     }
 
     if (bankSlot >= BANK_SLOTS)
         return;
-
-    // A split that would not actually split the stack is a plain move.
-    if (split == 0 || split >= source->GetCount())
-        split = 0;
 
     Item* dest = bank.Items[tab][bankSlot];
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
@@ -590,7 +668,7 @@ void DepositToBank(Player* player, OpenBank& bank, uint8 bag, uint8 slot, uint8 
 
         if (dest)
         {
-            if (CanMergeInto(dest, moved))
+            if (CanMergeInto(dest, moved, moved->GetCount()))
             {
                 dest->SetCount(dest->GetCount() + moved->GetCount());
                 dest->FSetState(ITEM_CHANGED);
@@ -602,6 +680,13 @@ void DepositToBank(Player* player, OpenBank& bank, uint8 bag, uint8 slot, uint8 
                 CharacterDatabase.CommitTransaction(trans);
                 delete moved;
                 player->SendEquipError(EQUIP_ERR_BANK_FULL, source, nullptr);
+
+                // Same reason as the refused move inside the bank: the frame has drawn the
+                // fraction arriving in this slot and only a tab update takes it back. The core
+                // does it the same way - Guild::_MoveItems sends its step 7
+                // _SendBankContentUpdate (Guild.cpp:2777) even when the split move at 5.2 was
+                // refused by CanStore.
+                SendTabChanged(player, bank, tab);
                 return;
             }
         }
@@ -689,18 +774,25 @@ void WithdrawToPlayer(Player* player, OpenBank& bank, uint8 tab, uint8 bankSlot,
         split = 0;
 
     // The character side of the move: a named destination, or the first bag with room.
+    //
+    // A split is planned further down instead, against the clone that really leaves the bank:
+    // planning the whole stack here both refused withdrawals that would have fitted (room for
+    // one out of a stack of twenty) and, worse, handed that plan to a clone of one.
     ItemPosCountVec destPos;
-    InventoryResult msg = player->CanStoreItem(bag, slot, destPos, source, false);
-    if (autoStore || msg != EQUIP_ERR_OK)
+    if (!split)
     {
-        destPos.clear();
-        msg = player->CanStoreItem(NULL_BAG, NULL_SLOT, destPos, source, false);
-    }
+        InventoryResult msg = player->CanStoreItem(bag, slot, destPos, source, false);
+        if (autoStore || msg != EQUIP_ERR_OK)
+        {
+            destPos.clear();
+            msg = player->CanStoreItem(NULL_BAG, NULL_SLOT, destPos, source, false);
+        }
 
-    if (msg != EQUIP_ERR_OK)
-    {
-        player->SendEquipError(msg, source, nullptr);
-        return;
+        if (msg != EQUIP_ERR_OK)
+        {
+            player->SendEquipError(msg, source, nullptr);
+            return;
+        }
     }
 
     CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
@@ -721,6 +813,32 @@ void WithdrawToPlayer(Player* player, OpenBank& bank, uint8 tab, uint8 bankSlot,
         {
             CharacterDatabase.CommitTransaction(trans);
             player->SendEquipError(EQUIP_ERR_ITEM_NOT_FOUND, source, nullptr);
+            return;
+        }
+
+        // The storage plan above was drawn for the WHOLE stack, and the plan is what decides
+        // the counts: Player::MoveItemToInventory hands each entry's count to _StoreItem,
+        // which does `pItem->SetCount(count)` on a free slot and `pItem2->SetCount(+count)` on
+        // a merge. Reusing it for a clone of `split` therefore handed the character the whole
+        // stack's count while the bank was debited `split` alone - taking 1 out of 20 returned
+        // 20 and left 19, repeatable at will. The split needs its own plan, drawn for the clone.
+        destPos.clear();
+        InventoryResult splitMsg = player->CanStoreItem(bag, slot, destPos, moved, false);
+        if (autoStore || splitMsg != EQUIP_ERR_OK)
+        {
+            destPos.clear();
+            splitMsg = player->CanStoreItem(NULL_BAG, NULL_SLOT, destPos, moved, false);
+        }
+
+        if (splitMsg != EQUIP_ERR_OK)
+        {
+            CharacterDatabase.CommitTransaction(trans);
+            delete moved;   // nothing was taken from the bank yet: the clone just goes away
+            player->SendEquipError(splitMsg, source, nullptr);
+
+            // The frame has drawn the fraction leaving this slot; nothing left it, so the tab
+            // is resent (the core's step 7, Guild.cpp:2777, for the same refused split).
+            SendTabChanged(player, bank, tab);
             return;
         }
 
@@ -802,9 +920,15 @@ void MoveWithinBank(Player* player, OpenBank& bank, uint8 tab, uint8 slot, uint8
 
     if (split)
     {
-        if (dest && !CanMergeInto(dest, source))
+        if (dest && !CanMergeInto(dest, source, split))
         {
             CharacterDatabase.CommitTransaction(trans);
+
+            // The client has already drawn the move it asked for; nothing moved here, so the
+            // tabs are resent to put its view back where the server actually stands.
+            SendTabChanged(player, bank, tab);
+            if (destTab != tab)
+                SendTabChanged(player, bank, destTab);
             return;
         }
 
@@ -941,14 +1065,29 @@ void HandleDepositMoney(Player* player, OpenBank& bank, WorldPacket const& packe
     WithBankPacket<WorldPackets::Guild::GuildBankDepositMoney>(packet,
         [&](WorldPackets::Guild::GuildBankDepositMoney& deposit)
         {
-            if (deposit.Banker != bank.Vault || !deposit.Money || !player->HasEnoughMoney(deposit.Money))
+            // Capped before anything else, like the withdrawal below: Money is a uint32 off
+            // the wire, and `-int32(x)` of a value above 2^31 comes out POSITIVE, which would
+            // have paid the character for depositing. HasEnoughMoney alone does not rule that
+            // out - characters.money is an unsigned column, so a value above the gold cap can
+            // reach memory without ModifyMoney ever having allowed it.
+            uint32 const amount = uint32(std::min<uint64>(deposit.Money, uint64(MAX_MONEY_AMOUNT)));
+            if (deposit.Banker != bank.Vault || !amount || !player->HasEnoughMoney(amount))
                 return;
 
-            player->ModifyMoney(-int32(deposit.Money));
-            bank.Money += deposit.Money;
-            StoreMoney(bank);
+            if (!player->ModifyMoney(-int32(amount)))
+                return;
+
+            bank.Money += amount;
+
+            // One commit for both ends. The character's gold is only in memory until this
+            // SaveGoldToDB, so writing the drawer alone duplicated the deposit at any crash.
+            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+            StoreMoney(trans, bank);
+            player->SaveGoldToDB(trans);
+            CharacterDatabase.CommitTransaction(trans);
+
             SendTabChanged(player, bank, 0);
-            LogBankEvent(bank, GUILD_BANK_LOG_DEPOSIT_MONEY, 0, player, deposit.Money, 0);
+            LogBankEvent(bank, GUILD_BANK_LOG_DEPOSIT_MONEY, 0, player, amount, 0);
         });
 }
 
@@ -957,14 +1096,34 @@ void HandleWithdrawMoney(Player* player, OpenBank& bank, WorldPacket const& pack
     WithBankPacket<WorldPackets::Guild::GuildBankWithdrawMoney>(packet,
         [&](WorldPackets::Guild::GuildBankWithdrawMoney& withdraw)
         {
-            if (withdraw.Banker != bank.Vault || !withdraw.Money || bank.Money < withdraw.Money)
+            // Money is a uint32 off the wire: without the cap, a value above MAX_MONEY_AMOUNT
+            // makes int32() negative and ModifyMoney *takes* gold instead of giving it. The
+            // core's guild bank caps the same way (Guild::HandleMemberWithdrawMoney).
+            uint32 const amount = uint32(std::min<uint64>(withdraw.Money, uint64(MAX_MONEY_AMOUNT)));
+            if (withdraw.Banker != bank.Vault || !amount || bank.Money < amount)
                 return;
 
-            bank.Money -= withdraw.Money;
-            player->ModifyMoney(int32(withdraw.Money));
-            StoreMoney(bank);
+            // ModifyMoney refuses - and credits nothing - when the character would go over the
+            // gold cap or a trial account's cap. Debiting the drawer first destroyed the gold
+            // silently, so the credit has to succeed before anything leaves the bank.
+            if (!player->ModifyMoney(int32(amount)))
+            {
+                LOG_ERROR("module.ascension_compat",
+                          "Personal bank: {} could not be credited {} copper on withdrawal "
+                          "(kind {} id {}); the drawer keeps it",
+                          player->GetName(), amount, bank.OwnerKind, bank.OwnerId);
+                return;
+            }
+
+            bank.Money -= amount;
+
+            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+            StoreMoney(trans, bank);
+            player->SaveGoldToDB(trans);
+            CharacterDatabase.CommitTransaction(trans);
+
             SendTabChanged(player, bank, 0);
-            LogBankEvent(bank, GUILD_BANK_LOG_WITHDRAW_MONEY, 0, player, withdraw.Money, 0);
+            LogBankEvent(bank, GUILD_BANK_LOG_WITHDRAW_MONEY, 0, player, amount, 0);
         });
 }
 
@@ -976,12 +1135,23 @@ void HandleBuyTab(Player* player, OpenBank& bank, WorldPacket const& packet)
             if (buy.Banker != bank.Vault || bank.Tabs >= BANK_TABS || uint8(buy.BankTab) != bank.Tabs)
                 return;
 
-            uint32 const price = TabPrice(bank.Tabs);
+            // Same cap as the two money handlers, for the same reason: the price comes from
+            // configuration (CONFIG_GUILD_BANK_TAB_COST_*) as a uint32, and a value above 2^31
+            // would make `-int32(price)` positive and pay for the tab instead of charging it.
+            uint32 const price = uint32(std::min<uint64>(TabPrice(bank.Tabs), uint64(MAX_MONEY_AMOUNT)));
             if (!price || !player->HasEnoughMoney(price))
                 return;
 
-            player->ModifyMoney(-int32(price));
-            StoreTab(bank, bank.Tabs);      // owning an empty tab row is what "purchased" means
+            if (!player->ModifyMoney(-int32(price)))
+                return;
+
+            // The tab row and the gold that paid for it, in one commit: persisting the tab on
+            // its own gave a free tab to anyone whose character was not saved before a crash.
+            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+            StoreTab(trans, bank, bank.Tabs);   // owning an empty tab row is what "purchased" means
+            player->SaveGoldToDB(trans);
+            CharacterDatabase.CommitTransaction(trans);
+
             ++bank.Tabs;
 
             SendBankData(player, bank, bank.OwnerKind == OWNER_REALM ? AscensionPersonalBank::REALM
@@ -1137,7 +1307,7 @@ void SendKindHint(Player* player, uint8 kind)
 
 bool IsOpen(Player* player)
 {
-    return player && openBanks.find(player->GetGUID().GetCounter()) != openBanks.end();
+    return player && FindOpenBank(player->GetGUID().GetCounter()) != nullptr;
 }
 
 void Opened(Player* player, uint8 kind, ObjectGuid vault)
@@ -1147,28 +1317,45 @@ void Opened(Player* player, uint8 kind, ObjectGuid vault)
 
     ObjectGuid::LowType const guid = player->GetGUID().GetCounter();
 
-    // Replace any window this character already had open.
-    auto existing = openBanks.find(guid);
-    if (existing != openBanks.end())
+    // Replace any window this character already had open. The old contents are taken out of the
+    // table under the lock and released after it: UnloadBank removes objects from the world and
+    // deletes them, which must never run while another thread waits to read the table.
+    OpenBank previous;
+    bool hadPrevious = false;
     {
-        UnloadBank(existing->second);
-        openBanks.erase(existing);
+        std::unique_lock<std::shared_mutex> guard(openBanksLock);
+        auto existing = openBanks.find(guid);
+        if (existing != openBanks.end())
+        {
+            previous = std::move(existing->second);
+            hadPrevious = true;
+            openBanks.erase(existing);
+            openBankCount.store(uint32(openBanks.size()), std::memory_order_release);
+        }
     }
+
+    if (hadPrevious)
+        UnloadBank(previous);
 
     OpenBank bank;
     bank.OwnerKind = kind == REALM ? OWNER_REALM : OWNER_CHARACTER;
     bank.OwnerId = BankOwnerId(player, kind);
     bank.Vault = vault;
-    LoadBank(bank);
+    LoadBank(bank);   // three synchronous queries: deliberately outside the lock
 
-    OpenBank const& stored = openBanks.emplace(guid, std::move(bank)).first->second;
+    OpenBank const* stored = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> guard(openBanksLock);
+        stored = &openBanks.emplace(guid, std::move(bank)).first->second;
+        openBankCount.store(uint32(openBanks.size()), std::memory_order_release);
+    }
 
-    SendBankData(player, stored, kind, true);
+    SendBankData(player, *stored, kind, true);
 
     LOG_INFO("module.ascension_compat",
              "{} bank opened for {} (kind {}, owner {} id {}, {} tabs, {} items, {} copper)",
              kind == REALM ? "Realm" : "Personal", player->GetName(), uint32(kind),
-             uint32(stored.OwnerKind), stored.OwnerId, stored.Tabs, ItemCount(stored), stored.Money);
+             uint32(stored->OwnerKind), stored->OwnerId, stored->Tabs, ItemCount(*stored), stored->Money);
 }
 
 bool HandlePacket(Player* player, WorldPacket const& packet)
@@ -1176,14 +1363,26 @@ bool HandlePacket(Player* player, WorldPacket const& packet)
     if (!player)
         return false;
 
-    auto itr = openBanks.find(player->GetGUID().GetCounter());
-    if (itr == openBanks.end())
+    // Only the lookup is guarded. Everything below sends packets and talks to the database,
+    // and none of that may hold the table's lock; see FindOpenBank on why the pointer stays
+    // good once the lock is gone.
+    OpenBank* found = FindOpenBank(player->GetGUID().GetCounter());
+    if (!found)
         return false;
 
-    OpenBank& bank = itr->second;
+    OpenBank& bank = *found;
 
     // The window lives on the summoned object: once it has despawned, or the character has
     // walked away from it, the bank is closed and the opcode goes back to the core.
+    //
+    // That hand-back is NOT free for a character who is in a real guild: the five vault
+    // objects are gameobject_template.type 34 (measured: entries 475001, 475002, 80782,
+    // 80159, 80160 are all type 34 = GAMEOBJECT_TYPE_GUILD_BANK), so the banker check at
+    // WorldSession::HandleGuildBankSwapItems (GuildHandler.cpp:332) accepts them, and a
+    // swap that arrives in the same breath as the despawn is then applied to that
+    // character's GUILD bank, at the same tab and slot. Only an in-flight packet can be in
+    // that window, and closing it means swallowing these opcodes instead of handing them
+    // back - a policy change, deliberately not made here.
     GameObject* vault = ObjectAccessor::GetGameObject(*player, bank.Vault);
     if (!vault || !vault->IsInWorld() || player->GetDistance(vault) > BANK_REACH)
     {
@@ -1235,17 +1434,31 @@ void Closed(Player* player)
     if (!player)
         return;
 
-    auto itr = openBanks.find(player->GetGUID().GetCounter());
-    if (itr == openBanks.end())
-        return;
+    OpenBank closing;
+    {
+        std::unique_lock<std::shared_mutex> guard(openBanksLock);
+        auto itr = openBanks.find(player->GetGUID().GetCounter());
+        if (itr == openBanks.end())
+            return;
 
-    UnloadBank(itr->second);
-    openBanks.erase(itr);
+        closing = std::move(itr->second);
+        openBanks.erase(itr);
+        openBankCount.store(uint32(openBanks.size()), std::memory_order_release);
+    }
+
+    UnloadBank(closing);   // deletes world objects: never under the lock
 }
 
-bool AddTab(Player* player, uint8 kind)
+/// The work of AddTab, with the tab row appended to `trans` instead of committed on its own.
+///
+/// The voucher has to destroy itself in the same commit that writes the tab: DestroyItemCount
+/// only takes the item out of memory, and characters/item_instance are not touched until the
+/// periodic save, so a crash in between left either a free tab with the voucher still in the
+/// bags or a spent voucher with no tab. That is the same class of hole the two gold paths just
+/// had, and it closes the same way - one commit for both ends.
+bool AddTab(Player* player, uint8 kind, CharacterDatabaseTransaction trans)
 {
-    if (!player)
+    if (!player || !trans)
         return false;
 
     // The bank the voucher names: the character's own for the personal and celestial items, the
@@ -1253,14 +1466,15 @@ bool AddTab(Player* player, uint8 kind)
     uint8 const ownerKind = kind == REALM ? OWNER_REALM : OWNER_CHARACTER;
     uint64 const ownerId = BankOwnerId(player, kind);
 
-    auto itr = openBanks.find(player->GetGUID().GetCounter());
-    bool const isOpen = itr != openBanks.end() && itr->second.OwnerKind == ownerKind &&
-                        itr->second.OwnerId == ownerId;
+    // CMSG_USE_ITEM is PROCESS_INPLACE, so this runs on a map thread: the lookup goes through
+    // the guarded helper like every other one.
+    OpenBank* open = FindOpenBank(player->GetGUID().GetCounter());
+    bool const isOpen = open && open->OwnerKind == ownerKind && open->OwnerId == ownerId;
 
     uint8 tabs = 1;
     if (isOpen)
     {
-        tabs = itr->second.Tabs;
+        tabs = open->Tabs;
     }
     else
     {
@@ -1284,16 +1498,31 @@ bool AddTab(Player* player, uint8 kind)
     OpenBank owner;
     owner.OwnerKind = ownerKind;
     owner.OwnerId = ownerId;
-    StoreTab(owner, tabs);
+    StoreTab(trans, owner, tabs);
 
     if (isOpen)
     {
-        itr->second.Tabs = tabs + 1;
-        SendBankData(player, itr->second, kind, true);
+        // A write to one entry's value, not to the table's shape: nothing rehashes, and only
+        // this character's own session ever reads or writes this entry.
+        open->Tabs = tabs + 1;
+        SendBankData(player, *open, kind, true);
     }
 
     LOG_INFO("module.ascension_compat", "{} bank: {} unlocked tab {} with a voucher (owner {} id {})",
              kind == REALM ? "Realm" : "Personal", player->GetName(), tabs, uint32(ownerKind), ownerId);
+    return true;
+}
+
+/// The header's form, for a caller that has nothing of its own to write with the tab. A refusal
+/// leaves the transaction unused, which costs nothing: an uncommitted transaction is only a
+/// list of queries and its destructor drops them (TransactionBase::Cleanup).
+bool AddTab(Player* player, uint8 kind)
+{
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    if (!AddTab(player, kind, trans))
+        return false;
+
+    CharacterDatabase.CommitTransaction(trans);
     return true;
 }
 } // namespace AscensionPersonalBank
@@ -1348,8 +1577,14 @@ public:
         // Answer the client's item request before the item is consumed.
         player->SendEquipError(EQUIP_ERR_NONE, item, nullptr);
 
-        if (!AscensionPersonalBank::AddTab(player, kind))
+        // The tab row and the voucher that paid for it go in one commit, like the gold that
+        // pays for a tab bought at the frame: AddTab writes into this transaction, the
+        // destroyed voucher is written into it by SaveInventoryAndGoldToDB, and nothing is
+        // sent to the database until both are in.
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        if (!AscensionPersonalBank::AddTab(player, kind, trans))
         {
+            // Nothing was appended: the transaction is dropped without being committed.
             ChatHandler(player->GetSession())
                 .PSendSysMessage("Your {} already owns every tab.", which);
             return true;
@@ -1360,6 +1595,8 @@ public:
 
         uint32 count = 1;
         player->DestroyItemCount(item, count, true);
+        player->SaveInventoryAndGoldToDB(trans);
+        CharacterDatabase.CommitTransaction(trans);
         return true;
     }
 };

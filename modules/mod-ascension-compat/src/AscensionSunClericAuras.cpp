@@ -134,15 +134,16 @@ class aura_ascension_sun_cleric_lifecycle : public AuraScript
         if (id == 802598 && depleted && player->HasAura(680637))
             Cast(player,player,570187);
         if (id == 680624 && mode == AURA_REMOVE_BY_EXPIRE)
-        {
-            uint32 amount = std::max(0,GetEffect(EFFECT_0)->GetAmount()) / 4;
-            auto enemies = Nearby(target,Radius(570147));
-            if (std::find(enemies.begin(),enemies.end(),target) == enemies.end())
-                enemies.push_front(target);
-            for (Unit* enemy : enemies)
-                if (player->IsValidAttackTarget(enemy))
-                    Copy(player,enemy,570147,amount);
-        }
+            if (AuraEffect const* stored = GetEffect(EFFECT_0))
+            {
+                uint32 amount = uint32(std::max(0,stored->GetAmount())) / 4;
+                auto enemies = Nearby(target,Radius(570147));
+                if (std::find(enemies.begin(),enemies.end(),target) == enemies.end())
+                    enemies.push_front(target);
+                for (Unit* enemy : enemies)
+                    if (player->IsValidAttackTarget(enemy))
+                        Copy(player,enemy,570147,amount);
+            }
         if (id == 572752 && mode == AURA_REMOVE_BY_EXPIRE && target->IsAlive())
         {
             Cast(player,target,572753);

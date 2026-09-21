@@ -82,8 +82,10 @@ class aura_ascension_cultist_lifecycle : public AuraScript
             Cast(player, target, 520418);
         if (id == 582591 && (mode & AURA_EFFECT_HANDLE_REAPPLY))
         {
-            GetEffect(EFFECT_1)->SetAmount(std::min<uint32>(INT32_MAX, player->GetMaxHealth()));
-            GetEffect(EFFECT_2)->SetAmount(0);
+            if (AuraEffect* budget = GetEffect(EFFECT_1))
+                budget->SetAmount(std::min<uint32>(INT32_MAX, player->GetMaxHealth()));
+            if (AuraEffect* recorded = GetEffect(EFFECT_2))
+                recorded->SetAmount(0);
         }
         if (target != player)
             return;
@@ -246,14 +248,16 @@ class aura_ascension_cultist_lifecycle : public AuraScript
         }
         if (id == 706910 && !index)
         {
-            uint32 total = GetEffect(EFFECT_1) ? std::max(0, GetEffect(EFFECT_1)->GetAmount()) : 0;
-            uint32 ticks = GetEffect(EFFECT_2) ? std::max(0, GetEffect(EFFECT_2)->GetAmount()) : 0;
-            if (ticks)
+            AuraEffect* budget = GetEffect(EFFECT_1);
+            AuraEffect* remaining = GetEffect(EFFECT_2);
+            uint32 total = budget ? uint32(std::max(0, budget->GetAmount())) : 0;
+            uint32 ticks = remaining ? uint32(std::max(0, remaining->GetAmount())) : 0;
+            if (budget && remaining && ticks)
             {
                 uint32 amount = total / ticks;
                 const_cast<AuraEffect*>(effect)->SetAmount(amount);
-                GetEffect(EFFECT_1)->SetAmount(total - amount);
-                GetEffect(EFFECT_2)->SetAmount(ticks - 1);
+                budget->SetAmount(total - amount);
+                remaining->SetAmount(ticks - 1);
             }
         }
     }
@@ -262,13 +266,17 @@ class aura_ascension_cultist_lifecycle : public AuraScript
         Player* player = Owner(GetCaster());
         if (!player || GetId() != 582591)
             return;
-        uint32 budget = std::max(0, GetEffect(EFFECT_1)->GetAmount());
+        AuraEffect* budgetEffect = GetEffect(EFFECT_1);
+        AuraEffect* recordedEffect = GetEffect(EFFECT_2);
+        if (!budgetEffect || !recordedEffect)
+            return;
+        uint32 budget = std::max(0, budgetEffect->GetAmount());
         uint32 covered = std::min(budget, damage.GetDamage());
         uint32 health = player->GetHealth();
         amount = covered >= health ? covered - health + 1 : 0;
-        GetEffect(EFFECT_1)->SetAmount(budget - covered);
-        int64 recorded = int64(GetEffect(EFFECT_2)->GetAmount()) + covered;
-        GetEffect(EFFECT_2)->SetAmount(int32(std::min<int64>(INT32_MAX, recorded)));
+        budgetEffect->SetAmount(budget - covered);
+        int64 recorded = int64(recordedEffect->GetAmount()) + covered;
+        recordedEffect->SetAmount(int32(std::min<int64>(INT32_MAX, recorded)));
         if (covered == budget)
             effect->SetAmount(amount); // The native removal after this absorb settles the finite budget.
     }

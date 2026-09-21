@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionVenomancer.h"
+#include "AscensionSpellSafe.h"
 #include "GameTime.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -85,7 +86,7 @@ class aura_ascension_venomancer_event : public AuraScript
             case 680768: return healing && !periodic && Named(info,504342);
             case 680800: return healing && info && info->Id == 560202;
             case 704264: return damage && automatic && player->HasAura(Beetle) &&
-                roll_chance_i(sSpellMgr->GetSpellInfo(560988)->ProcChance);
+                roll_chance_i(AscensionSpellSafe::ProcChance(560988, 15));
             case 705959: return damage && Named(info,803193);
             case 705980: return damage && Named(info,803570);
             case 705982: return damage && critical && Any(info,{803570,803199,803193});
@@ -106,7 +107,7 @@ class aura_ascension_venomancer_event : public AuraScript
             case 805884: return healing && periodic && critical;
             case 805933: return damage && target->GetHealthPct() < 35;
             case 806449: return healing;
-            case 806603: return damage && ((critical && roll_chance_i(sSpellMgr->GetSpellInfo(806604)->ProcChance)) ||
+            case 806603: return damage && ((critical && roll_chance_i(AscensionSpellSafe::ProcChance(806604, 100))) ||
                 (periodic && Chance(player,id)));
             case 806604: return damage && critical && info && (info->SchoolMask & SPELL_SCHOOL_MASK_NATURE) &&
                 !player->HasAura(806603) && Chance(player,id);
@@ -146,7 +147,7 @@ class aura_ascension_venomancer_event : public AuraScript
             case 503812: Cast(player,target,570153); break;
             case 503851:
             {
-                uint32 left = sSpellMgr->GetSpellInfo(503857)->MaxAffectedTargets;
+                uint32 left = AscensionSpellSafe::MaxAffectedTargets(503857, 8);
                 if (player->IsValidAttackTarget(target))
                 {
                     Cast(player,target,503857);
@@ -263,7 +264,7 @@ class aura_ascension_venomancer_event : public AuraScript
             case 707382: Resource(player,Brood,1); break;
             case 707620:
                 Cast(player,player,504404);
-                if (Count(player,504404) >= sSpellMgr->GetSpellInfo(504404)->StackAmount)
+                if (Count(player,504404) >= AscensionSpellSafe::StackAmount(504404, 10))
                 {
                     player->RemoveAurasDueToSpell(504404);
                     Reduce(player,805094,std::abs(Amount(504403)));

@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionTemplar.h"
 #include "AscensionTemplarData.h"
 #include "DBCStores.h"
@@ -13,10 +14,13 @@ namespace AscensionTemplar
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 25)
+    if (!AscensionContract::MatchesFamily(info, 25, "Templar"))
         return;
     uint32 id = info->Id;
     auto dummy = [info](uint8 index) {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, index, "Templar");
         info->Effects[index].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[index].TriggerSpell = 0;
     };
@@ -46,7 +50,7 @@ void ApplyContracts(SpellInfo* info)
                 info->Effects[1].Effect = 0; // no second, delayed chain increment
         }
     if (id == 704576 || id == 706426)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(8); // fifteen seconds
+        AscensionContract::SetDuration(info, 8, "Templar"); // fifteen seconds
     if (id == 804904)
         info->Effects[2].SpellClassMask[0] = 0; // Tempest keeps this bonus on its own aura snapshot
     // Templar's Might raises this per-stack bonus and names Blade of Faith with Lunge, Chastise and Scourgebane,
@@ -71,7 +75,7 @@ void ApplyContracts(SpellInfo* info)
         effect.MiscValue = SPELL_SCHOOL_MASK_ALL;
         effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
         effect.TargetB = SpellImplicitTargetInfo();
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Templar");
         info->ProcFlags = 0;
     }
     if (id == 803237)
@@ -193,7 +197,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 300515)
         info->Effects[1].BasePoints = 5;
     if (id == 801409)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(8);
+        AscensionContract::SetDuration(info, 8, "Templar");
     if (id == 807004)
         dummy(0), dummy(1); // next circle's first tick only; keep its full lifetime
     if (id == 806353)

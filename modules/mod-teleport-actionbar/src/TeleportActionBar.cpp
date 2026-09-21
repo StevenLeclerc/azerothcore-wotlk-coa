@@ -19,6 +19,13 @@
 //
 // The module never creates or grants items; the stones live in the client's
 // collection UI and on the action bar only.
+//
+// Threading: the spell hooks run on the map thread of the caster, so with
+// MapUpdate.Threads > 1 they read the token tables from several threads at once
+// while `.reload config` rebuilds them. Everything the hooks read therefore lives in
+// one immutable ModuleState, published as a shared_ptr under a shared_mutex: a hook
+// takes one snapshot on entry and works on data that nothing can free under it,
+// while a reload builds a fresh state and swaps it in.
 
 #include "Chat.h"
 #include "CommandScript.h"
@@ -31,6 +38,7 @@
 #include "RBAC.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
+#include "SpellDefines.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
@@ -39,12 +47,17 @@
 #include "WorldSession.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
 #include <string>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 using namespace Acore::ChatCommands;
@@ -69,8 +82,33 @@ constexpr uint32 LearnBatchIntervalMs = 250;
 // The client repeats a refused cast, so a refusal is only announced this often.
 constexpr uint32 ForeignNoticeIntervalMs = 3000;
 
-// Per-player storage key for the spells still waiting to be taught.
+// How the teleport a token unlocked is cast when the token item is used.
+//
+// It stays a triggered cast: the 159 stone spells this module loads all carry
+// CastingTimeIndex = 7 (SpellCastTimes.dbc id 7 = 10000 ms), RecoveryTime = 900000,
+// StartRecoveryTime = 1500, InterruptFlags = 0x0F and SPELL_ATTR0_NOT_SHAPESHIFTED
+// (Attributes = 0x10010000, read from /opt/coa/server/data/dbc/Spell.dbc). Casting
+// them untriggered would hang a 10-second cast bar, a 15-minute cooldown, a GCD, a
+// refusal while moving and a refusal in druid forms onto an item button that has
+// always been instant and free - none of which this module was asked to change.
+//
+// Exactly two flags of TRIGGERED_FULL_MASK are dropped:
+//
+//  * TRIGGERED_IGNORE_CASTER_AURASTATE - the one that disarmed the combat rule. It
+//    guards the block at Spell.cpp:5846-5862, which for these spells holds nothing
+//    but the combat refusal: CasterAuraState, ExcludeCasterAuraState, CasterAuraSpell
+//    and ExcludeCasterAuraSpell are all 0 on the 159 of them. Dropping it restores
+//    SPELL_FAILED_AFFECTING_COMBAT and touches nothing else.
+//  * TRIGGERED_DONT_REPORT_CAST_ERROR - Spell::SendCastResult (Spell.cpp:4739)
+//    rewrites every failure to SPELL_FAILED_DONT_REPORT while it is set. Kept, the
+//    stone would refuse itself in combat in complete silence and simply read as
+//    broken; dropped, the player is told why.
+constexpr TriggerCastFlags TokenCastFlags = TriggerCastFlags(
+    TRIGGERED_FULL_MASK & ~(TRIGGERED_IGNORE_CASTER_AURASTATE | TRIGGERED_DONT_REPORT_CAST_ERROR));
+
+// Per-player storage keys.
 constexpr char PendingLearnKey[] = "teleport.actionbar.pending";
+constexpr char ForeignNoticeKey[] = "teleport.actionbar.foreign";
 
 struct Settings
 {
@@ -94,39 +132,109 @@ struct PendingLearn : DataMap::Base
     uint32 Timer = 0;
 };
 
-Settings settings;
-
-// spell taught by a token item -> that item, and the reverse per item.
-std::unordered_map<uint32, uint32> tokenSpellItem;
-std::unordered_map<uint32, uint32> tokenItemSpell;
-
-// teleport spell -> the side allowed to use it (a StoneFaction::Side value).
-std::unordered_map<uint32, uint8> tokenSpellSide;
-
-// Last time each player was told a stone is not theirs.
-std::unordered_map<ObjectGuid, uint32> lastForeignNotice;
-
-bool tokenTeleportsLoaded = false;
-
-void LoadSettings()
+// Last time this player was told a stone is not theirs. Kept on the player rather
+// than in a module-wide table: only that player's map thread ever touches it, and it
+// dies with the Player object, so no logout bookkeeping can leak it.
+struct ForeignNotice : DataMap::Base
 {
-    settings.Enabled = sConfigMgr->GetOption<bool>("TeleportActionBar.Enable", true);
-    settings.OnLogin = sConfigMgr->GetOption<bool>("TeleportActionBar.OnLogin", false);
-    settings.OnLearnSpell = sConfigMgr->GetOption<bool>("TeleportActionBar.OnLearnSpell", false);
-    settings.OnSpecChange = sConfigMgr->GetOption<bool>("TeleportActionBar.OnSpecChange", false);
-    settings.LearnCarriedTokens = sConfigMgr->GetOption<bool>("TeleportActionBar.LearnCarriedTokens", false);
-    settings.LearnFromBank = sConfigMgr->GetOption<bool>("TeleportActionBar.LearnCarriedTokensFromBank", false);
-    settings.CastFromItem = sConfigMgr->GetOption<bool>("TeleportActionBar.CastFromItem", true);
-    settings.EnforceFaction = sConfigMgr->GetOption<bool>("TeleportActionBar.EnforceFaction", true);
-    settings.MaxButtons = sConfigMgr->GetOption<uint32>("TeleportActionBar.MaxButtons", 24);
+    uint32 Last = 0;
+};
+
+// Everything the hooks read, in one block that is never modified once published.
+struct ModuleState
+{
+    Settings Config;
+
+    // teleport spell taught by a token item -> that item, and the reverse per item.
+    std::unordered_map<uint32, uint32> SpellItem;
+    std::unordered_map<uint32, uint32> ItemSpell;
+
+    // teleport spell -> the side allowed to use it (a StoneFaction::Side value).
+    std::unordered_map<uint32, uint8> SpellSide;
+
+    bool TokensLoaded = false;
+};
+
+using ModuleStatePtr = std::shared_ptr<ModuleState const>;
+
+// Function-local statics: their construction is ordered by first use, so a hook that
+// fires before the world script ran still finds a valid, empty state.
+std::shared_mutex& StateMutex()
+{
+    static std::shared_mutex mutex;
+    return mutex;
+}
+
+ModuleStatePtr& StateSlot()
+{
+    static ModuleStatePtr state = std::make_shared<ModuleState const>();
+    return state;
+}
+
+// Cheap pre-filter for the three hooks that run on every player tick and every spell
+// cast in the world, so the common case never touches the state lock at all. These are
+// hints, not the rule: whatever they let through is re-checked on the snapshot, which
+// is authoritative. A reload can leave them lagging by the few instructions between the
+// pointer swap and the store, which at worst skips the module's work for one tick.
+std::atomic<bool> hotLearnCarried{false};
+std::atomic<bool> hotEnforceFaction{false};
+std::atomic<bool> hotCastFromItem{false};
+
+// One snapshot per hook call. The lock only covers the shared_ptr copy, never any
+// game work, so a map thread never waits on another map thread for longer than that.
+ModuleStatePtr GetState()
+{
+    std::shared_lock<std::shared_mutex> lock(StateMutex());
+    return StateSlot();
+}
+
+// Caller holds the write lock. The hint flags are stored next to the swap so they can
+// never describe a state older than the one that is published.
+void PublishLocked(std::shared_ptr<ModuleState> next)
+{
+    Settings const& config = next->Config;
+    hotLearnCarried.store(config.Enabled && config.LearnCarriedTokens, std::memory_order_relaxed);
+    hotEnforceFaction.store(config.Enabled && config.EnforceFaction && next->TokensLoaded, std::memory_order_relaxed);
+    hotCastFromItem.store(config.Enabled && config.CastFromItem && next->TokensLoaded, std::memory_order_relaxed);
+    StateSlot() = std::move(next);
+}
+
+Settings ReadSettings()
+{
+    Settings config;
+    config.Enabled = sConfigMgr->GetOption<bool>("TeleportActionBar.Enable", true);
+    config.OnLogin = sConfigMgr->GetOption<bool>("TeleportActionBar.OnLogin", false);
+    config.OnLearnSpell = sConfigMgr->GetOption<bool>("TeleportActionBar.OnLearnSpell", false);
+    config.OnSpecChange = sConfigMgr->GetOption<bool>("TeleportActionBar.OnSpecChange", false);
+    config.LearnCarriedTokens = sConfigMgr->GetOption<bool>("TeleportActionBar.LearnCarriedTokens", false);
+    config.LearnFromBank = sConfigMgr->GetOption<bool>("TeleportActionBar.LearnCarriedTokensFromBank", false);
+    config.CastFromItem = sConfigMgr->GetOption<bool>("TeleportActionBar.CastFromItem", true);
+    config.EnforceFaction = sConfigMgr->GetOption<bool>("TeleportActionBar.EnforceFaction", true);
+    config.MaxButtons = sConfigMgr->GetOption<uint32>("TeleportActionBar.MaxButtons", 24);
 
     uint32 first = sConfigMgr->GetOption<uint32>("TeleportActionBar.FirstButton", 0);
     uint32 last = sConfigMgr->GetOption<uint32>("TeleportActionBar.LastButton", MAX_ACTION_BUTTONS - 1);
     last = std::min<uint32>(last, MAX_ACTION_BUTTONS - 1);
+    first = std::min<uint32>(first, MAX_ACTION_BUTTONS - 1);
     if (first > last)
         std::swap(first, last);
-    settings.FirstButton = uint8(first);
-    settings.LastButton = uint8(last);
+    config.FirstButton = uint8(first);
+    config.LastButton = uint8(last);
+    return config;
+}
+
+// Republishes the state with fresh configuration values; the token tables carry over
+// untouched, so a plain config load never disturbs a hook that is reading them.
+void LoadSettings()
+{
+    // The config file is read outside the lock; the copy of the published state and the
+    // swap are done under it, so a read-modify-write can never lose another one.
+    Settings const config = ReadSettings();
+
+    std::unique_lock<std::shared_mutex> lock(StateMutex());
+    auto next = std::make_shared<ModuleState>(*StateSlot());
+    next->Config = config;
+    PublishLocked(std::move(next));
 }
 
 // The item name filter is a startup configuration value (never player input) and it
@@ -145,12 +253,12 @@ std::string SanitizeLikePattern(std::string const& pattern)
     return safe;
 }
 
+// Builds the token tables in a state of its own and publishes it in one step. The
+// tables a hook is walking are never cleared under it: they belong to the previous
+// state, which stays alive as long as any reader holds its snapshot.
 void LoadTokenTeleports()
 {
-    tokenTeleportsLoaded = false;
-    tokenSpellItem.clear();
-    tokenItemSpell.clear();
-    tokenSpellSide.clear();
+    auto next = std::make_shared<ModuleState>();
 
     std::string const pattern = SanitizeLikePattern(
         sConfigMgr->GetOption<std::string>("TeleportActionBar.ItemNameFilter", "Stone of Retreat%"));
@@ -179,8 +287,8 @@ void LoadTokenTeleports()
             uint32 const spellId = fields[1].Get<uint32>();
             if (!sSpellMgr->GetSpellInfo(spellId))
                 continue;
-            tokenItemSpell[itemId] = spellId;
-            tokenSpellItem.insert({spellId, itemId});
+            next->ItemSpell[itemId] = spellId;
+            next->SpellItem.insert({spellId, itemId});
         } while (result->NextRow());
     }
 
@@ -190,11 +298,11 @@ void LoadTokenTeleports()
     uint32 horde = 0;
     uint32 shared = 0;
     uint32 unlisted = 0;
-    for (auto const& entry : tokenSpellItem)
+    for (auto const& entry : next->SpellItem)
     {
         uint8 side = StoneFaction::Both;
         bool listed = false;
-        for (uint32 i = 0; i < StoneFaction::TeleportFactionCount; ++i)
+        for (std::size_t i = 0; i < StoneFaction::TeleportFactionCount; ++i)
         {
             if (StoneFaction::TeleportFactions[i].Spell == entry.first)
             {
@@ -213,22 +321,29 @@ void LoadTokenTeleports()
         else
             ++shared;
 
-        tokenSpellSide[entry.first] = side;
+        next->SpellSide[entry.first] = side;
     }
 
-    tokenTeleportsLoaded = true;
+    next->TokensLoaded = true;
 
-    if (tokenSpellItem.empty())
+    if (next->SpellItem.empty())
     {
         LOG_WARN(LogCategory, "No item-taught teleport spells matched the item filter '{}'; the module stays idle",
             pattern.empty() ? std::string("<none>") : pattern);
-        return;
+    }
+    else
+    {
+        LOG_INFO(LogCategory, "Loaded {} teleport token spell(s) from {} item(s) (item filter: '{}')",
+            next->SpellItem.size(), next->ItemSpell.size(), pattern.empty() ? std::string("<none>") : pattern);
+        LOG_INFO(LogCategory, "Token sides: {} Alliance-only, {} Horde-only, {} shared{}", alliance, horde, shared,
+            unlisted ? " (" + std::to_string(unlisted) + " token(s) are not in the faction table and stay usable by both)" : std::string());
     }
 
-    LOG_INFO(LogCategory, "Loaded {} teleport token spell(s) from {} item(s) (item filter: '{}')",
-        tokenSpellItem.size(), tokenItemSpell.size(), pattern.empty() ? std::string("<none>") : pattern);
-    LOG_INFO(LogCategory, "Token sides: {} Alliance-only, {} Horde-only, {} shared{}", alliance, horde, shared,
-        unlisted ? " (" + std::to_string(unlisted) + " token(s) are not in the faction table and stay usable by both)" : std::string());
+    // The query above ran outside the lock; the configuration is picked up at publish
+    // time so a LoadSettings that happened meanwhile is not rolled back.
+    std::unique_lock<std::shared_mutex> lock(StateMutex());
+    next->Config = StateSlot()->Config;
+    PublishLocked(std::move(next));
 }
 
 // The player's own side, in StoneFaction terms.
@@ -244,7 +359,7 @@ char const* SideName(uint8 side)
 
 char const* TokenHub(uint32 spellId)
 {
-    for (uint32 i = 0; i < StoneFaction::TeleportFactionCount; ++i)
+    for (std::size_t i = 0; i < StoneFaction::TeleportFactionCount; ++i)
         if (StoneFaction::TeleportFactions[i].Spell == spellId)
             return StoneFaction::TeleportFactions[i].Hub;
     return "(unknown hub)";
@@ -252,34 +367,38 @@ char const* TokenHub(uint32 spellId)
 
 // True when the spell is a teleport token that belongs to the other faction. Shared
 // hubs and spells that are not tokens at all are never restricted.
-bool IsForeignToken(uint32 spellId, Player const* player)
+bool IsForeignToken(ModuleState const& state, uint32 spellId, Player const* player)
 {
-    auto it = tokenSpellSide.find(spellId);
-    if (it == tokenSpellSide.end() || it->second == StoneFaction::Both)
+    auto it = state.SpellSide.find(spellId);
+    if (it == state.SpellSide.end() || it->second == StoneFaction::Both)
         return false;
     return it->second != PlayerSide(player);
 }
 
-void NotifyForeignToken(Player* player, uint32 spellId)
+void NotifyForeignToken(ModuleState const& state, Player* player, uint32 spellId)
 {
-    auto it = tokenSpellSide.find(spellId);
-    if (it == tokenSpellSide.end())
+    auto it = state.SpellSide.find(spellId);
+    if (it == state.SpellSide.end())
         return;
 
+    WorldSession* session = player->GetSession();
+    if (!session)
+        return;
+
+    ForeignNotice* notice = player->CustomData.GetDefault<ForeignNotice>(ForeignNoticeKey);
     uint32 const now = getMSTime();
-    uint32& last = lastForeignNotice[player->GetGUID()];
-    if (last && now - last < ForeignNoticeIntervalMs)
+    if (notice->Last && now - notice->Last < ForeignNoticeIntervalMs)
         return;
-    last = now;
+    notice->Last = now;
 
-    ChatHandler handler(player->GetSession());
+    ChatHandler handler(session);
     handler.PSendSysMessage("Stone of Retreat: {} is a {} stone - your {} character cannot use it.",
         TokenHub(spellId), SideName(it->second), SideName(PlayerSide(player)));
 }
 
-bool FindFreeButton(Player* player, uint8& slot)
+bool FindFreeButton(Settings const& config, Player* player, uint8& slot)
 {
-    for (uint16 candidate = settings.FirstButton; candidate <= settings.LastButton; ++candidate)
+    for (uint16 candidate = config.FirstButton; candidate <= config.LastButton; ++candidate)
     {
         if (player->GetActionButton(uint8(candidate)))
             continue;
@@ -292,14 +411,14 @@ bool FindFreeButton(Player* player, uint8& slot)
 // Puts every known teleport token spell on a free action button. Buttons the player
 // already arranged are never touched: only empty slots inside the configured range
 // are used, and a spell that already sits on any button in that range is skipped.
-uint32 AssignTokenButtons(Player* player, char const* reason)
+uint32 AssignTokenButtons(ModuleState const& state, Player* player, char const* reason)
 {
-    if (!settings.Enabled || !tokenTeleportsLoaded || !player || !player->IsInWorld())
+    if (!state.Config.Enabled || !state.TokensLoaded || !player || !player->IsInWorld())
         return 0;
 
     std::unordered_set<uint32> assigned;
     uint32 free = 0;
-    for (uint16 slot = settings.FirstButton; slot <= settings.LastButton; ++slot)
+    for (uint16 slot = state.Config.FirstButton; slot <= state.Config.LastButton; ++slot)
     {
         ActionButton const* button = player->GetActionButton(uint8(slot));
         if (!button)
@@ -311,13 +430,13 @@ uint32 AssignTokenButtons(Player* player, char const* reason)
             assigned.insert(button->GetAction());
     }
 
-    uint32 const budget = settings.MaxButtons ? std::min(settings.MaxButtons, free) : free;
+    uint32 const budget = state.Config.MaxButtons ? std::min(state.Config.MaxButtons, free) : free;
     if (!budget)
         return 0;
 
     std::vector<uint32> pending;
-    pending.reserve(tokenSpellItem.size());
-    for (auto const& entry : tokenSpellItem)
+    pending.reserve(state.SpellItem.size());
+    for (auto const& entry : state.SpellItem)
         if (!assigned.contains(entry.first) && player->HasSpell(entry.first))
             pending.push_back(entry.first);
 
@@ -331,7 +450,7 @@ uint32 AssignTokenButtons(Player* player, char const* reason)
             break;
 
         uint8 slot = 0;
-        if (!FindFreeButton(player, slot))
+        if (!FindFreeButton(state.Config, player, slot))
             break;
         if (!player->addActionButton(slot, spellId, ACTION_BUTTON_SPELL))
             continue;
@@ -350,18 +469,18 @@ uint32 AssignTokenButtons(Player* player, char const* reason)
     return placed;
 }
 
-std::vector<uint32> CollectCarriedTokenSpells(Player* player)
+std::vector<uint32> CollectCarriedTokenSpells(ModuleState const& state, Player* player)
 {
     std::vector<uint32> spells;
-    spells.reserve(tokenItemSpell.size());
-    for (auto const& entry : tokenItemSpell)
+    spells.reserve(state.ItemSpell.size());
+    for (auto const& entry : state.ItemSpell)
     {
         uint32 const spellId = entry.second;
-        if (player->HasSpell(spellId) || !player->GetItemCount(entry.first, settings.LearnFromBank))
+        if (player->HasSpell(spellId) || !player->GetItemCount(entry.first, state.Config.LearnFromBank))
             continue;
         // A stone of the other faction is not taught at all: the client would list it
         // and the cast would be refused anyway.
-        if (settings.EnforceFaction && IsForeignToken(spellId, player))
+        if (state.Config.EnforceFaction && IsForeignToken(state, spellId, player))
             continue;
         spells.push_back(spellId);
     }
@@ -380,42 +499,44 @@ void LearnTokenSpellsNow(Player* player, std::vector<uint32> const& spells)
         player->learnSpell(spellId);
 }
 
-void QueueCarriedTokenSpells(Player* player)
+void QueueCarriedTokenSpells(ModuleState const& state, Player* player)
 {
     if (!player)
         return;
 
-    std::vector<uint32> const spells = CollectCarriedTokenSpells(player);
+    std::vector<uint32> const spells = CollectCarriedTokenSpells(state, player);
     if (spells.empty())
         return;
 
-    PendingLearn* state = player->CustomData.GetDefault<PendingLearn>(PendingLearnKey);
-    state->Spells = spells;
-    state->Next = 0;
-    state->Timer = 0;
+    PendingLearn* pending = player->CustomData.GetDefault<PendingLearn>(PendingLearnKey);
+    pending->Spells = spells;
+    pending->Next = 0;
+    pending->Timer = 0;
 }
 
 void DrainPendingTokenSpells(Player* player, uint32 diff)
 {
-    PendingLearn* state = player->CustomData.GetDefault<PendingLearn>(PendingLearnKey);
-    if (state->Next >= state->Spells.size())
+    // Get, not GetDefault: this runs for every player on every tick, and GetDefault
+    // would allocate a queue for every character that never had one to drain.
+    PendingLearn* pending = player->CustomData.Get<PendingLearn>(PendingLearnKey);
+    if (!pending || pending->Next >= pending->Spells.size())
         return;
 
-    state->Timer += diff;
-    if (state->Timer < LearnBatchIntervalMs)
+    pending->Timer += diff;
+    if (pending->Timer < LearnBatchIntervalMs)
         return;
-    state->Timer = 0;
+    pending->Timer = 0;
 
     uint32 taught = 0;
-    while (state->Next < state->Spells.size() && taught < LearnBatchSize)
+    while (pending->Next < pending->Spells.size() && taught < LearnBatchSize)
     {
-        player->learnSpell(state->Spells[state->Next]);
-        ++state->Next;
+        player->learnSpell(pending->Spells[pending->Next]);
+        ++pending->Next;
         ++taught;
     }
 
-    if (state->Next >= state->Spells.size())
-        LOG_INFO(LogCategory, "Taught {} carried token spell(s) to {}", state->Spells.size(), player->GetName());
+    if (pending->Next >= pending->Spells.size())
+        LOG_INFO(LogCategory, "Taught {} carried token spell(s) to {}", pending->Spells.size(), player->GetName());
 }
 
 // Every spell in the world passes through this script, so the token rules apply to any
@@ -431,7 +552,12 @@ public:
 
     void OnSpellCheckCast(Spell* spell, bool /*strict*/, SpellCastResult& result) override
     {
-        if (result != SPELL_CAST_OK || !settings.Enabled || !settings.EnforceFaction || !tokenTeleportsLoaded)
+        if (result != SPELL_CAST_OK || !hotEnforceFaction.load(std::memory_order_relaxed))
+            return;
+
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.Config.Enabled || !state.Config.EnforceFaction || !state.TokensLoaded)
             return;
 
         Unit* caster = spell->GetCaster();
@@ -449,18 +575,18 @@ public:
             // item decides which stone is being asked for.
             if (Item* item = spell->m_CastItem)
             {
-                auto it = tokenItemSpell.find(item->GetEntry());
-                if (it != tokenItemSpell.end())
+                auto it = state.ItemSpell.find(item->GetEntry());
+                if (it != state.ItemSpell.end())
                     checked = it->second;
             }
         }
 
         Player* player = caster->ToPlayer();
-        if (!IsForeignToken(checked, player))
+        if (!IsForeignToken(state, checked, player))
             return;
 
         result = SPELL_FAILED_NOT_HERE;
-        NotifyForeignToken(player, checked);
+        NotifyForeignToken(state, player, checked);
     }
 
     // Using a token casts the teleport that token unlocked, so the item keeps working
@@ -469,8 +595,14 @@ public:
     // id, with the item as the cast item.
     void OnSpellCast(Spell* spell, Unit* caster, SpellInfo const* /*spellInfo*/, bool /*skipCheck*/) override
     {
-        if (!settings.Enabled || !settings.CastFromItem || !tokenTeleportsLoaded)
+        if (!hotCastFromItem.load(std::memory_order_relaxed))
             return;
+
+        // Everything that can be decided without the module state is decided first:
+        // this hook fires for every spell cast in the world, and only a spell cast
+        // from an item can ever be a token. That leaves the shared lock and the
+        // snapshot's atomic refcount off the path of ordinary casts, which is nearly
+        // all of them.
         if (!caster || !caster->IsPlayer())
             return;
 
@@ -478,8 +610,13 @@ public:
         if (!item)
             return;
 
-        auto it = tokenItemSpell.find(item->GetEntry());
-        if (it == tokenItemSpell.end())
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.Config.Enabled || !state.Config.CastFromItem || !state.TokensLoaded)
+            return;
+
+        auto it = state.ItemSpell.find(item->GetEntry());
+        if (it == state.ItemSpell.end())
             return;
 
         Player* player = caster->ToPlayer();
@@ -492,7 +629,19 @@ public:
 
         LOG_DEBUG(LogCategory, "Token item {} used by {}: casting teleport {}", item->GetEntry(),
             player->GetName(), teleportSpell);
-        player->CastSpell(player, teleportSpell, true);
+
+        // TokenCastFlags, never `true`: the stone spells carry
+        // SPELL_ATTR0_NOT_IN_COMBAT_ONLY_PEACEFUL (0x10000000, verified in Spell.dbc),
+        // and a plain `true` runs with TRIGGERED_FULL_MASK, whose
+        // TRIGGERED_IGNORE_CASTER_AURASTATE skips the combat refusal in
+        // Spell::CheckCast. Using the item would then teleport out of combat, while
+        // the same spell pressed on the action bar is refused. See TokenCastFlags for
+        // why the other seventeen flags are kept. Spell::prepare reports the failure
+        // to the player by itself.
+        SpellCastResult const castResult = player->CastSpell(player, teleportSpell, TokenCastFlags);
+        if (castResult != SPELL_CAST_OK)
+            LOG_DEBUG(LogCategory, "Teleport {} from token item {} refused for {}: result {}",
+                teleportSpell, item->GetEntry(), player->GetName(), uint32(castResult));
     }
 };
 
@@ -525,32 +674,41 @@ public:
 
     void OnPlayerLogin(Player* player) override
     {
-        if (!settings.Enabled)
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.Config.Enabled)
             return;
 
-        if (settings.LearnCarriedTokens)
-            QueueCarriedTokenSpells(player);
-        if (settings.OnLogin)
-            AssignTokenButtons(player, "login");
+        if (state.Config.LearnCarriedTokens)
+            QueueCarriedTokenSpells(state, player);
+        if (state.Config.OnLogin)
+            AssignTokenButtons(state, player, "login");
     }
 
     void OnPlayerLearnSpell(Player* player, uint32 spellId) override
     {
-        if (!settings.Enabled || !settings.OnLearnSpell || !tokenSpellItem.contains(spellId))
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.Config.Enabled || !state.Config.OnLearnSpell || !state.SpellItem.contains(spellId))
             return;
-        AssignTokenButtons(player, "teleport token learned");
+        AssignTokenButtons(state, player, "teleport token learned");
     }
 
     void OnPlayerAfterSpecSlotChanged(Player* player, uint8 /*newSlot*/) override
     {
-        if (!settings.Enabled || !settings.OnSpecChange)
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.Config.Enabled || !state.Config.OnSpecChange)
             return;
-        AssignTokenButtons(player, "spec change");
+        AssignTokenButtons(state, player, "spec change");
     }
 
+    // Runs for every player on every map tick, so this one hook reads the hint flag and
+    // stops there: what it guards only drains a queue that was already built for this
+    // player, which one extra tick after a reload cannot make wrong.
     void OnPlayerUpdate(Player* player, uint32 diff) override
     {
-        if (!settings.Enabled || !settings.LearnCarriedTokens)
+        if (!hotLearnCarried.load(std::memory_order_relaxed))
             return;
         DrainPendingTokenSpells(player, diff);
     }
@@ -558,7 +716,7 @@ public:
     void OnPlayerLogout(Player* player) override
     {
         player->CustomData.Erase(PendingLearnKey);
-        lastForeignNotice.erase(player->GetGUID());
+        player->CustomData.Erase(ForeignNoticeKey);
     }
 };
 
@@ -590,7 +748,8 @@ public:
         if (!player)
             return false;
 
-        uint32 const placed = AssignTokenButtons(player, "command");
+        ModuleStatePtr const snapshot = GetState();
+        uint32 const placed = AssignTokenButtons(*snapshot, player, "command");
         handler->PSendSysMessage("Teleport tokens: placed {} button(s).", placed);
         return true;
     }
@@ -601,7 +760,9 @@ public:
         if (!player)
             return false;
 
-        if (!tokenTeleportsLoaded)
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.TokensLoaded)
         {
             handler->SendSysMessage("Teleport token data is not loaded.");
             return true;
@@ -609,9 +770,9 @@ public:
 
         // An explicit request, so carried tokens are taught regardless of
         // TeleportActionBar.LearnCarriedTokens and without batching.
-        std::vector<uint32> const spells = CollectCarriedTokenSpells(player);
+        std::vector<uint32> const spells = CollectCarriedTokenSpells(state, player);
         LearnTokenSpellsNow(player, spells);
-        uint32 const placed = AssignTokenButtons(player, "command learn");
+        uint32 const placed = AssignTokenButtons(state, player, "command learn");
         handler->PSendSysMessage("Teleport tokens: learned {} spell(s), placed {} button(s).",
             uint32(spells.size()), placed);
         return true;
@@ -625,7 +786,9 @@ public:
         if (!player)
             return false;
 
-        if (!tokenTeleportsLoaded)
+        ModuleStatePtr const snapshot = GetState();
+        ModuleState const& state = *snapshot;
+        if (!state.TokensLoaded)
         {
             handler->SendSysMessage("Teleport token data is not loaded.");
             return true;
@@ -635,14 +798,14 @@ public:
         uint32 shared = 0;
         uint32 foreign = 0;
         std::string foreignHubs;
-        for (auto const& entry : tokenSpellItem)
+        for (auto const& entry : state.SpellItem)
         {
             uint32 const spellId = entry.first;
             if (!player->HasSpell(spellId))
                 continue;
 
-            auto side = tokenSpellSide.find(spellId);
-            if (side == tokenSpellSide.end() || side->second == StoneFaction::Both)
+            auto side = state.SpellSide.find(spellId);
+            if (side == state.SpellSide.end() || side->second == StoneFaction::Both)
             {
                 ++shared;
                 continue;

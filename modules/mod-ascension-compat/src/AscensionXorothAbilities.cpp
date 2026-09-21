@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionXoroth.h"
 #include "Creature.h"
 #include "MotionMaster.h"
@@ -483,7 +484,7 @@ class xoroth_casts : public AllSpellScript
                 }
             if (Infernal(info) && player->HasAura(707666))
                 Summon(player, 50301, player->GetNearPosition(2, 0),
-                       uint32(sSpellMgr->GetSpellInfo(807699)->GetDuration()));
+                       uint32(AscensionSpellSafe::Duration(807699, 30000)));
             if (Named(info, 801059) && fire == 6 && player->HasAura(704452))
                 Cast(player, player, 801006);
             if (Named(info, 800340) && Chance(player, 704975))

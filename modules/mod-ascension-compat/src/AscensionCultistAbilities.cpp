@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionCultist.h"
 #include "AscensionCultistData.h"
+#include "AscensionSpellSafe.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
@@ -274,7 +275,7 @@ public:
                 uint32 stacksB = b->GetAura(BlackBlood, player->GetGUID()) ? b->GetAura(BlackBlood, player->GetGUID())->GetStackAmount() : 0;
                 return stacksA != stacksB ? stacksA < stacksB : a->GetHealthPct() < b->GetHealthPct();
             });
-            uint32 count = sSpellMgr->GetSpellInfo(BlackBlood)->MaxAffectedTargets;
+            uint32 count = AscensionSpellSafe::MaxAffectedTargets(BlackBlood, 1);
             for (Unit* ally : allies)
             {
                 if (!count--)

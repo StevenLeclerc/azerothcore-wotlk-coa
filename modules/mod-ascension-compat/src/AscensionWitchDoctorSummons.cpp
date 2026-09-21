@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionSpellSafe.h"
 #include "AscensionWitchDoctorCompletion.h"
 #include "Creature.h"
 #include "MotionMaster.h"
@@ -148,7 +149,7 @@ void Summon(Player* player, uint32 spell, Unit* target, Position const& location
     uint32 count = spell == CallSseratus ? 4 + (player->HasAura(SerpentHandler) ? 2 : 0) : spell == Marionette ? 5 : 1;
     if (spell == Mimic)
         count = uint32(std::max(1, info->Effects[EFFECT_2].CalcValue(player)));
-    int32 duration = spell == SpiritLink ? sSpellMgr->GetSpellInfo(LinkTimer)->GetDuration() : info->GetDuration();
+    int32 duration = spell == SpiritLink ? AscensionSpellSafe::Duration(LinkTimer, 30000) : info->GetDuration();
     player->ApplySpellMod(spell, SPELLMOD_DURATION, duration);
     if (spell == Marionette)
         duration = 8500;
@@ -398,7 +399,7 @@ class npc_ascension_witch_doctor : public ScriptedAI
                                 break;
                         }
                 }
-                if (entry == NpcViper && roll_chance_f(sSpellMgr->GetSpellInfo(ViperProc)->ProcChance +
+                if (entry == NpcViper && roll_chance_f(AscensionSpellSafe::ProcChance(ViperProc, 0) +
                                                        player->GetRatingBonusValue(CR_CRIT_RANGED)))
                     me->CastSpell(target, ViperFire, true, nullptr, nullptr, _owner);
             }
@@ -518,7 +519,13 @@ class spell_ascension_witch_doctor_summon : public SpellScript
     }
     void Register() override
     {
-        SpellInfo const* info = sSpellMgr->GetSpellInfo(m_scriptSpellId);
+        // Garde defensive, jamais franchie en pratique : _Register() n'est appele
+        // qu'avec l'Id d'un SpellInfo existant (ObjectMgr.cpp:6432-6434 et
+        // ScriptMgr::CreateSpellScripts). On la garde pour ne pas laisser un
+        // deref nu si le chemin d'appel change.
+        SpellInfo const* info = AscensionSpellSafe::Get(m_scriptSpellId);
+        if (!info)
+            return;
         if (info->HasEffect(SPELL_EFFECT_SUMMON))
         {
             OnEffectHit +=

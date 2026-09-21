@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionFelsworn.h"
 #include "AscensionFelswornData.h"
 #include "DBCStores.h"
@@ -13,13 +14,16 @@ namespace AscensionFelsworn
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 20)
+    if (!AscensionContract::MatchesFamily(info, 20, "Felsworn"))
         return;
     uint32 id = info->Id;
     // Blood of Mannoroth's sole resource helper must grant all six charges, including from zero.
     if (id == MannorothFelfury)
         info->Effects[EFFECT_0].MiscValue = 6;
     auto dummy = [info](uint8 slot) {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Felsworn");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -57,7 +61,7 @@ void ApplyContracts(SpellInfo* info)
         }
     if (id == 804216)
     {
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Felsworn");
         info->Effects[2].Effect = 0;
         // Inner Demon is the only Felsworn button the client DBC leaves out of the shared global
         // cooldown, so it can be recast without delay and cast during another spell's cooldown.
@@ -116,7 +120,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 801573)
     {
         dummy(0), dummy(1); // exact health boundary, including the hit that crosses it
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Felsworn");
     }
     if (id == 800220)
         dummy(0); // preserve native radius and cooldown, select all eligible allies in the cast hook
@@ -175,7 +179,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 561216)
     {
         periodic(0, 500);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(27); // six assaults in three seconds
+        AscensionContract::SetDuration(info, 27, "Felsworn"); // six assaults in three seconds
         info->Effects[1].Effect = 0;
         info->Effects[2].ApplyAuraName = SPELL_AURA_MECHANIC_IMMUNITY_MASK;
         info->Effects[2].MiscValue = IMMUNE_TO_MOVEMENT_IMPAIRMENT_AND_LOSS_CONTROL_MASK;
@@ -240,7 +244,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 706818)
     {
         dummy(0), dummy(1);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "Felsworn");
     }
     if (id == 712483)
         dummy(0); // target casts accumulate; expiry pays the result once

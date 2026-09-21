@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionTinker.h"
 #include "AscensionTinkerData.h"
 #include "DBCStores.h"
@@ -24,7 +25,7 @@ uint32 SummonVulnerability(Player* player, Unit* attacker, Unit* target)
 }
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 34)
+    if (!AscensionContract::MatchesFamily(info, 34, "Tinker"))
         return;
     uint32 id = info->Id;
     // Overcharged is a beacon-only one-use guard. The native exclusion field also applies it on hit.
@@ -44,11 +45,14 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].Effect = info->Effects[2].Effect = 0;
         info->SpellFamilyFlags = flag96();
         info->StackAmount = 1;
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Tinker");
         info->Attributes |= SPELL_ATTR0_DO_NOT_DISPLAY;
     }
     auto dummy = [info](uint8 slot)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "Tinker");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
         if (info->Effects[slot].Effect == 190)
@@ -119,7 +123,7 @@ void ApplyContracts(SpellInfo* info)
     {
         info->Effects[0].Effect = SPELL_EFFECT_APPLY_AURA;
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Tinker");
     }
     if (Named(info,504519))
         info->Effects[1].Effect = 0; // The owned turret distributes the summon damage field.
@@ -146,7 +150,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == 680999)
     {
         info->Effects[0].MiscValue = SPELL_SCHOOL_MASK_NORMAL;
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "Tinker");
     }
     if (id == 801744)
         for (auto& effect : info->Effects)

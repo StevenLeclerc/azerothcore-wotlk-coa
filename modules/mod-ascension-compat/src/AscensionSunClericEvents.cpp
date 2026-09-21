@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionSunCleric.h"
 #include "AscensionSunClericData.h"
+#include "AscensionSpellSafe.h"
 #include "ObjectAccessor.h"
 #include "GameTime.h"
 #include "Player.h"
@@ -258,7 +259,7 @@ class aura_ascension_sun_cleric_event : public AuraScript
             case 300349: ReduceInvocations(player,std::abs(Amount(804512))); break;
             case 804632:
             {
-                uint32 count=sSpellMgr->GetSpellInfo(573449)->MaxAffectedTargets;
+                uint32 count=AscensionSpellSafe::MaxAffectedTargets(573449, 5);
                 auto enemies=Nearby(target,Radius(573449));
                 if (std::find(enemies.begin(),enemies.end(),target)==enemies.end())
                     enemies.push_front(target);
@@ -290,7 +291,7 @@ class aura_ascension_sun_cleric_event : public AuraScript
                     }
                 break;
             case 704920:
-                if (roll_chance_i(Named(info,500141) ? GetSpellInfo()->ProcChance : sSpellMgr->GetSpellInfo(707520)->ProcChance))
+                if (roll_chance_i(Named(info,500141) ? GetSpellInfo()->ProcChance : AscensionSpellSafe::ProcChance(707520, 40)))
                     Cast(player,player,Named(info,500141) ? 301293 : 300354);
                 break;
             case 806123:
@@ -301,7 +302,7 @@ class aura_ascension_sun_cleric_event : public AuraScript
             {
                 auto allies=Allies(player,target,Radius(801215));
                 allies.remove(target);
-                uint32 count=sSpellMgr->GetSpellInfo(801215)->MaxAffectedTargets;
+                uint32 count=AscensionSpellSafe::MaxAffectedTargets(801215, 5);
                 for (Unit* ally:allies)
                 {
                     if (!count--)

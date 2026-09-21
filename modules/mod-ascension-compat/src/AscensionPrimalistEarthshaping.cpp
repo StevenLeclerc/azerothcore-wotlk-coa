@@ -92,7 +92,8 @@ class spell_ascension_primalist_earthshaping : public AuraScript
 
     bool Load() override
     {
-        return IsEarthshapingOwner(GetTarget()) && GetCasterGUID() == GetTarget()->GetGUID();
+        Unit* owner = GetUnitOwner();
+        return IsEarthshapingOwner(owner) && GetCasterGUID() == owner->GetGUID();
     }
 
     void Apply(AuraEffect const*, AuraEffectHandleModes)
@@ -130,7 +131,8 @@ class spell_ascension_primalist_therazane_update : public AuraScript
 
     bool Load() override
     {
-        return IsEarthshapingOwner(GetTarget()) && GetCasterGUID() == GetTarget()->GetGUID();
+        Unit* owner = GetUnitOwner();
+        return IsEarthshapingOwner(owner) && GetCasterGUID() == owner->GetGUID();
     }
 
     void Update(AuraEffect const*, AuraEffectHandleModes)

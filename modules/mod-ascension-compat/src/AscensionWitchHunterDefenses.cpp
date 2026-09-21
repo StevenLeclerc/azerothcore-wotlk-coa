@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "AscensionSpellSafe.h"
 #include "AscensionWitchHunterCompletion.h"
 #include "GameTime.h"
 #include "Player.h"
@@ -436,9 +437,14 @@ class witch_hunter_state : public UnitScript
         if (player && player->HasAura(681173) && !player->HasSpellCooldown(681173) &&
             uint64(damage) + player->CountPctFromMaxHealth(35) >= player->GetHealth())
         {
-            player->AddSpellCooldown(681173, 0, 120000);
-            SummonHounds(player, 3, sSpellMgr->GetSpellInfo(681172)->GetDuration(), 681172, attacker);
-            Reset(player, 500085);
+            // 681172 porte la duree ET l'identite des molosses : s'il a disparu il n'y a
+            // rien a invoquer, et le cooldown de 681173 n'a pas lieu d'etre consomme.
+            if (SpellInfo const* unleash = AscensionSpellSafe::Get(681172))
+            {
+                player->AddSpellCooldown(681173, 0, 120000);
+                SummonHounds(player, 3, unleash->GetDuration(), 681172, attacker);
+                Reset(player, 500085);
+            }
         }
     }
 
@@ -452,7 +458,9 @@ class witch_hunter_state : public UnitScript
         for (auto const& [key, application] : player->GetAppliedAuras())
             if (!application->IsPositive() && application->GetBase()->GetSpellInfo()->Dispel == DISPEL_CURSE)
                 ++count;
-        SpellInfo const* info = sSpellMgr->GetSpellInfo(704570);
+        SpellInfo const* info = AscensionSpellSafe::Get(704570);
+        if (!info)
+            return;
         int32 percent =
             std::min(95, std::abs(info->Effects[EFFECT_0].CalcValue(player)) + 5 * int32(count > 0 ? count - 1 : 0));
         CustomSpellValues values;

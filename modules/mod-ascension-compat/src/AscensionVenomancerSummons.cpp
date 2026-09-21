@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "AscensionVenomancer.h"
 #include "DBCStores.h"
 #include "GameTime.h"
@@ -55,7 +56,7 @@ void Summon(Player* player, Unit* target, uint32 spell, Position const* position
     }
     uint32 entry = spell == 504344 ? FungarianEntry : spell == 560989 ? ScarabEntry :
         spell == 803525 ? BroodTrapEntry : SpiderlingEntry;
-    uint32 duration = spell == 807611 ? 15000 : uint32(std::max(1,sSpellMgr->GetSpellInfo(spell)->GetDuration()));
+    uint32 duration = spell == 807611 ? 15000 : uint32(std::max(1,AscensionSpellSafe::Duration(spell, 15000)));
     uint32 count = spell == 807611 ? 2 : spell == 807702 ? uint32(std::max(1,Amount(807702))) : 1;
     for (uint32 n = 0; n < count; ++n)
     {
@@ -105,8 +106,8 @@ void ExitParasite(Player* player)
         if (host && player->IsValidAttackTarget(host))
             Cast(player,host,807758);
     }
-    SpellInfo const* info = sSpellMgr->GetSpellInfo(800921);
-    uint32 seconds = std::max(info->RecoveryTime,info->CategoryRecoveryTime) / 1000;
+    SpellInfo const* info = AscensionSpellSafe::Get(800921);
+    uint32 seconds = info ? std::max(info->RecoveryTime,info->CategoryRecoveryTime) / 1000 : 0;
     player->AddSpellCooldown(800921,0,uint32(GameTime::GetGameTime().count())+seconds,true);
     player->removeSpell(803537,SPEC_MASK_ALL,true);
     state.parasiteExit = false;

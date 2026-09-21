@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionContract.h"
 #include "AscensionSunCleric.h"
 #include "AscensionSunClericData.h"
 #include "DBCStores.h"
@@ -12,7 +13,7 @@ namespace AscensionSunCleric
 {
 void ApplyContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 33)
+    if (!AscensionContract::MatchesFamily(info, 33, "SunCleric"))
         return;
     uint32 id = info->Id;
     if (id == Rejuvenating)
@@ -24,6 +25,9 @@ void ApplyContracts(SpellInfo* info)
             }
     auto dummy = [info](uint8 slot)
     {
+        // Journals once, without changing the write, when the slot cannot carry an
+        // aura: the ApplyAuraName below is then inert (P-049).
+        AscensionContract::ExpectAuraSlot(info, slot, "SunCleric");
         info->Effects[slot].ApplyAuraName = SPELL_AURA_DUMMY;
         info->Effects[slot].TriggerSpell = 0;
     };
@@ -106,7 +110,7 @@ void ApplyContracts(SpellInfo* info)
     {
         // Spell.dbc gives the Sun Ray marker no effect, so casting it applied no aura for Refresh to find.
         aura(0, SPELL_AURA_DUMMY, 0, 0, TARGET_UNIT_CASTER);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "SunCleric");
     }
     if (id == 806118)
     {
@@ -165,10 +169,10 @@ void ApplyContracts(SpellInfo* info)
     if (id == 707776)
     {
         aura(0, SPELL_AURA_MOD_SHIELD_BLOCKVALUE, 0, 0, TARGET_UNIT_CASTER);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "SunCleric");
     }
     if (id == 301006)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "SunCleric");
     if (id == 301368)
         info->Effects[1].Effect = 0;
     if (id == 800602)
