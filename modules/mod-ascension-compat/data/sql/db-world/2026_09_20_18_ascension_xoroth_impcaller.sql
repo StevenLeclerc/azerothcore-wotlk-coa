@@ -43,25 +43,44 @@
 -- temps d'incantation, ni recharge : elle ne peut pas devenir un bouton par accident.
 --
 -- -------------------------------------------------------------------------------------
--- ⚠ SECOND DÉFAUT, MESURÉ ET **NON CORRIGÉ ICI** — à lire avant de prendre ce talent.
+-- ⚠ RETRACTÉ LE 2026-09-21 — ce fichier a porté, du 2026-09-20 au 2026-09-21, un
+-- « SECOND DÉFAUT » annonçant que l'effet 1 de 706755 était un SPELLMOD_COST +100 à
+-- `EffectSpellClassMask` VIDE, donc appliqué à toute la famille 23 (P-071).
+-- **C'ÉTAIT FAUX** : une erreur d'index de lecture du DBC, pas un défaut du talent.
+-- Seul le texte est corrigé ; la ligne SQL ci-dessous n'a jamais changé.
 --
--- L'effet 1 de 706755 est un `SPELL_AURA_ADD_FLAT_MODIFIER`, `MiscValue 14`
--- (SPELLMOD_COST), valeur **+100**, avec un `EffectSpellClassMask` **VIDE** (0,0,0) et
--- une famille non nulle (23). Or `SpellInfo::IsAffected` ne teste les drapeaux que si
--- le masque est non nul :
---       if (!familyName)                                       return true;
---       if (familyName != SpellFamilyName)                     return false;
---       if (familyFlags && !(familyFlags & SpellFamilyFlags))  return false;
--- Un masque vide ne rate donc pas sa cible : **il touche toute la famille 23**. Le
--- surcoût que l'infobulle attribue à la seule capacité transformée (« but its Rage cost
--- is increased ») s'applique en réalité à TOUS les sorts de la classe.
+-- L'index juste, lu dans les sources et non de mémoire :
+--   `src/server/shared/DataStores/DBCStructure.h:1750`
+--       std::array<flag96, MAX_SPELL_EFFECTS> EffectSpellClassMask;  // 122-130
+--   chargé à plat par `src/server/shared/DataStores/DBCfmt.h:110` (`SpellEntryfmt`,
+--   un caractère de format par champ) : trois mots par effet, donc
+--   **122+3e, 123+3e, 124+3e** — effet 0 = 122,123,124 ; effet 1 = 125,126,127.
+--   La formule « 123+e / 126+e / 129+e » qui circule encore est la notation 1-based
+--   A/B/C de TrinityCore appliquée à tort en 0-based. Elle donne (0,0,0) partout.
+--   Témoin décisif hors CoA : 17800 « Shadow Mastery » n'a QU'UN effet (champs 71,72,73
+--   = 6,0,0). À 122+3e, l'effet 0 porte (524417, 360448, 0) et les effets 1 et 2 sont
+--   nuls — cohérent. À 123+e/126+e/129+e, (360448,0,0) atterrirait sur un effet 1 qui
+--   n'existe pas.
 --
--- Ce n'est corrigé ni ici ni ailleurs, pour une raison de méthode : le masque juste
--- n'est écrit nulle part. Le candidat évident est le masque de l'effet 0 du même sort,
--- (0, 768, 0), qui désigne les sorts que ce talent transforme — mais c'est une
--- déduction, pas une lecture, et poser un masque faux ne rate pas non plus sa cible.
--- Personne ne porte ce talent aujourd'hui (`character_spell` : 0 pour 706755), donc le
--- défaut est LATENT. Il mordra le premier joueur qui le prendra.
+-- Relu avec le bon index, 706755 effet 1 = aura 107 ADD_FLAT_MODIFIER, MiscValue 14
+-- (SPELLMOD_COST), +100, masque **(0, 768, 0) — NON VIDE**. P-071 ne s'applique pas ici,
+-- et il n'y a rien à désarmer. Balayage complet de la famille 23 avec le bon index :
+-- **0 effet aura 107/108 à masque vide**. Sonde : /opt/coa/coa-project/sonde-xoroth-masques.py
+--
+-- Ce que ce masque vise réellement, résolu contre les `SpellFamilyFlags` (champs
+-- 209-211) : dix-neuf sorts — Infernal Strike rangs 1-11 (801016, 501511-501520),
+-- Shieldgore rangs 1-7 (804353, 806869-806874) et **Annihilation 504581**, dont le
+-- drapeau 0x200 est dans 768 = 0x300. Annihilation est la transformation de Meatsaw
+-- promise par Dread 706502, pas celle d'Infernal Strike — mais elle n'est pas touchée par
+-- accident : son infobulle dit « Scales with modifiers to |cffffffffInfernal Strike|r »,
+-- et le DBC l'écrit en lui donnant le drapeau 0x200 d'Infernal Strike en plus du sien
+-- (0x20000). Le surcoût de 100 (10 de rage) la frappe donc par construction. Consigné et
+-- non corrigé : rien n'écrit un masque « juste », et un masque deviné ne raterait pas sa
+-- cible non plus.
+--
+-- NOTE D'EXPLOITATION : ce fichier est déjà appliqué (`updates`, état MODULE,
+-- 2026-09-20 21:20:31). Réécrire ces commentaires change son empreinte, donc le
+-- mécanisme d'update le rejouera. C'est sans effet : DELETE puis INSERT, idempotent.
 -- -------------------------------------------------------------------------------------
 
 DELETE FROM `spell_linked_spell` WHERE `spell_trigger` = 706755 AND `spell_effect` = 707666;
