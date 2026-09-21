@@ -31,6 +31,16 @@ enum ReaperEventSpells : uint32
     SPELL_WEAKENED_SOUL = 803433
 };
 
+// Weakened Soul lasts 15 s. This number is a DESIGN DECISION taken by the realm owner on
+// 2026-09-21, not a reading: 803433 carries DurationIndex 21, and line 21 of
+// SpellDuration.dbc is (-1, 0, -1) — infinite. No source writes a duration for it (neither
+// tooltip, nor the client DBC, nor the upstream world dump coa-world-20260912.zip, nor
+// baseline.json, nor the 4 436 entries of the upstream issue tracker; the Wayback archives
+// of db.ascension.gg were offline when checked). It is applied here rather than through a
+// `spell_dbc` row because that table needs a complete 234-column row and is read at startup
+// only, while the module already owns this cast.
+constexpr int32 WEAKENED_SOUL_DURATION = 15 * IN_MILLISECONDS;
+
 // Every talent whose tooltip reads "generating a Reaped Soul ..." reacts here, on the
 // resource aura itself. Two producers exist and neither is a proc: the declarative one
 // (ModifyAuraStacks, AscensionCompat.cpp:2939 -> HandleAscensionReaperResource,
@@ -209,19 +219,24 @@ class aura_ascension_reaper_soul_infusion : public AuraScript
 // spell_proc row (family 36, Soulrend's family bit, melee spell damage, hit phase); the
 // row disables effect 1, a private Ascension aura 354 whose core handler is nullptr.
 //
-// NOT WIRED TODAY, ON PURPOSE. 2026_09_20_09_ascension_reaper_events.sql deliberately
-// omits both the `spell_proc` row for 92146 and the `spell_script_names` row for this
-// script, because the debuff this script would apply, 803433, is unfit to ship as its
-// data stands (permanent, and not restricted to Shadow/Frost — both measured below).
-// The class stays compiled and registered, which costs exactly one startup line,
-// LOG_ERROR "Script named 'aura_ascension_weakened_souls' is not assigned in the
-// database." (ScriptMgr.h:921-926, because ObjectMgr::GetScriptId returns 0 for an
-// unassigned name, ObjectMgr.cpp:10512-10524). That line is the marker: it disappears
-// the day the two rows go in.
+// WIRED ON 2026-09-21 (2026_09_21_07_ascension_reaper_weakened_souls.sql). It had been
+// withheld since 2026-09-20 because 803433 was unfit to ship on two counts. One is now
+// settled, the other is knowingly accepted:
 //
-// DO NOT ADD THOSE TWO ROWS before 803433 has a `spell_dbc` row fixing its DurationIndex
-// and the EffectSpellClassMask of its effect 0. Wiring this script as it stands puts a
-// permanent +10% damage-taken debuff on players in PvP.
+//   SETTLED — the debuff was PERMANENT. The realm owner set it to 15 s, and Weaken()
+//   applies that duration on every proc (see WEAKENED_SOUL_DURATION above). It is a
+//   decision, not a reading: no source anywhere writes a duration for this spell.
+//
+//   ACCEPTED, NOT FIXED — it is still NOT restricted to Shadow and Frost. That
+//   restriction is NOT EXPRESSIBLE for aura 271: both of its consumers filter on the
+//   caster GUID and IsAffectedOnSpell only, and never read MiscValue (measured, see the
+//   block in Weaken()). Consequence, measured on Spell.dbc: family 36 holds 1 018 spells,
+//   of which 529 touch neither Shadow nor Frost (487 of them physical). The +10% reaches
+//   those too. Narrowing would mean inventing a mask the tooltip does not write.
+//
+// The startup line LOG_ERROR "Script named 'aura_ascension_weakened_souls' is not
+// assigned in the database." (ScriptMgr.h:921-926) disappears with this wiring; its
+// absence is now the marker that the two rows are in place.
 class aura_ascension_weakened_souls : public AuraScript
 {
     PrepareAuraScript(aura_ascension_weakened_souls);
@@ -256,17 +271,14 @@ class aura_ascension_weakened_souls : public AuraScript
         // 803433 holds the percentage (effect 0, BasePoints 9 -> 10%). The caster is the
         // Reaper, which is what "damage taken from you" needs.
         //
-        // TWO MEASURED DIVERGENCES FROM THE TOOLTIP. They are what keeps this script
-        // UNWIRED (see the block above the class): nothing applied 803433 in game before
-        // this file, so shipping it would be this work introducing both of them.
+        // TWO MEASURED DIVERGENCES FROM THE TOOLTIP. The first is settled, the second is
+        // accepted knowingly — see the block above the class.
         //
-        // 1. The debuff is PERMANENT. 803433 carries DurationIndex 21 and line 21 of
-        //    SpellDuration.dbc is (-1, 0, -1), i.e. infinite. On a player it lasts until
-        //    death or a dispel, on an NPC until the evade. No source anywhere writes a
-        //    duration for it: neither the tooltip of 92146 nor that of 803433 announces one,
-        //    so none is invented here, and no DurationIndex is guessed. Giving it one means
-        //    a `spell_dbc` row on 803433 with a duration someone has to DECIDE, which is why
-        //    the wiring is withheld rather than shipped with a made-up number.
+        // 1. SETTLED. The debuff WAS permanent: 803433 carries DurationIndex 21 and line 21
+        //    of SpellDuration.dbc is (-1, 0, -1), i.e. infinite; on a player it lasted until
+        //    death or a dispel, on an NPC until the evade. It is now capped at
+        //    WEAKENED_SOUL_DURATION right after the cast below. Still a decision and not a
+        //    reading: no source writes a duration for this spell.
         //
         // 2. It is NOT limited to Shadow and Frost. Effect 0 is aura 271
         //    SPELL_AURA_MOD_DAMAGE_FROM_CASTER, and that aura never reads its MiscValue: its
@@ -286,6 +298,14 @@ class aura_ascension_weakened_souls : public AuraScript
         //    it is not made here. For contrast, 573320 "Soulrend / aura"
         //    carries the same aura 271 with mask (2,0,0) and is correctly framed.
         owner->CastSpell(victim, SPELL_WEAKENED_SOUL, true);
+        // Both calls are required and in this order: Aura::IsPermanent() is
+        // GetMaxDuration() == -1 (SpellAuras.h:163), so the aura stays permanent until the
+        // max duration is overwritten. Re-applied on every proc, which refreshes the timer.
+        if (Aura* debuff = victim->GetAura(SPELL_WEAKENED_SOUL, owner->GetGUID()))
+        {
+            debuff->SetMaxDuration(WEAKENED_SOUL_DURATION);
+            debuff->SetDuration(WEAKENED_SOUL_DURATION);
+        }
     }
 
     void Register() override
