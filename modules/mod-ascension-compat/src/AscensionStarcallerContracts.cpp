@@ -3,6 +3,7 @@
 #include "AscensionStarcaller.h"
 #include "AscensionStarcallerData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellAuraEffects.h"
@@ -262,7 +263,18 @@ void ApplyContracts(SpellInfo* info)
     {
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_DEST_TARGET_ENEMY);
         info->Effects[0].TargetB = SpellImplicitTargetInfo(TARGET_UNIT_DEST_AREA_ENEMY);
-        info->Effects[0].RadiusEntry = info->Effects[2].RadiusEntry;
+        // Slot 0 becomes the area hit and borrows the radius authored on slot 2, which is
+        // disarmed on the next line. Copying a null pointer is not a crash -- CalcRadius is
+        // guarded on HasRadius() and returns 0 (SpellInfo.cpp:603-611) -- it is worse: the
+        // comet lands on the destination and reaches nobody, without a word. Keep whatever
+        // radius the client gave slot 0 and journal the refusal instead.
+        if (info->Effects[2].RadiusEntry)
+            info->Effects[0].RadiusEntry = info->Effects[2].RadiusEntry;
+        else
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Starcaller: spell {} slot 2 carries no SpellRadius row, "
+                "slot 0 keeps its client radius.",
+                id);
         info->Effects[2].Effect = 0; // One authored comet amount per target; no extra 199-point second hit.
     }
     if (id == 807992)

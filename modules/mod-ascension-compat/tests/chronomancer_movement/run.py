@@ -6,6 +6,10 @@ import runpy
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -26,7 +30,7 @@ def main():
 using uint32=std::uint32_t;using ObjectGuid=uint32;
 using SpellEffIndex=int;using AuraEffectHandleModes=int;
 enum SpellCastResult {SPELL_CAST_OK,SPELL_FAILED_CANT_DO_THAT_RIGHT_NOW};
-enum {CLASS_CHRONOMANCER=22,POWER_MANA=0,REACT_PASSIVE=0,EFFECT_0=0,EFFECT_1=1,
+enum {CLASS_CHRONOMANCER=22,POWER_MANA=0,REACT_PASSIVE=0,EFFECT_0=0,EFFECT_1=1,EFFECT_2=2,
     SPELL_EFFECT_DUMMY=3,SPELL_AURA_DUMMY=4,AURA_REMOVE_BY_EXPIRE=1,AURA_REMOVE_BY_ENEMY_SPELL=2,
     AURA_EFFECT_HANDLE_REAL=1,AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK=3,GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR=1,
     UNIT_FLAG_DISABLE_MOVE=4};
@@ -54,6 +58,11 @@ struct Unit
     uint32 GetMapId()const{return mapId;}uint32 GetInstanceId()const{return instanceId;}
     uint32 GetMap()const{return mapId*100+instanceId;}
     bool InSamePhase(Unit* unit)const{return phase && unit->phase;}
+    // Object.h:495 : Position GetNearPosition(float dist, float angle);
+    Position GetNearPosition(float dist,float angle)const{assert(angle==0);Position near=pos;near.x+=dist;return near;}
+    // Unit.h:1420 : void RemoveMovementImpairingAuras(bool withRoot);
+    int impairingCleared=-1;
+    void RemoveMovementImpairingAuras(bool withRoot){impairingCleared=withRoot?1:0;}
     void NearTeleportTo(Position const& target,bool=false){pos=target;}
     void SetHealth(uint32 value){hp=value;}void SetPower(int,uint32 value){mp=value;}
     SpellCastResult CastSpell(Unit*,uint32 id,bool)
@@ -85,6 +94,8 @@ struct SpellScript
 {
     Unit* caster=nullptr;bool prevented=false;Hook OnCheckCast,OnEffectHitTarget;
     virtual ~SpellScript()=default;virtual bool Validate(SpellInfo const*){return true;}virtual void Register(){}
+    Unit* hit=nullptr;// SpellScript.h:421 : Unit* GetHitUnit();
+    Unit* GetHitUnit(){return hit;}
     Unit* GetCaster(){return caster;}bool ValidateSpellInfo(std::initializer_list<uint32>){return true;}
     void PreventHitDefaultEffect(int){prevented=true;}
 };
@@ -155,15 +166,28 @@ int main()
     SpellInfo info;info.Id=706973;info.Effects[0].Effect=140;info.Effects[1].Effect=6;
     chronomancer_movement_contracts contracts;contracts.OnLoadSpellCustomAttr(&info);
     assert(!info.Effects[0].Effect && info.Effects[1].Effect==6 && info.maskRefreshed);
+    // Displacement : le troisieme effet devient un marqueur DUMMY, les deux autres ne bougent pas.
+    SpellInfo pull;pull.Id=806727;pull.Effects[0].Effect=140;pull.Effects[1].Effect=6;
+    contracts.OnLoadSpellCustomAttr(&pull);
+    assert(pull.Effects[2].Effect==SPELL_EFFECT_DUMMY && pull.Effects[0].Effect==140
+        && pull.Effects[1].Effect==6 && pull.maskRefreshed);
+
+    // Displace : la cible arrive pres du lanceur et perd ses entraves, racine comprise.
+    Player puller;puller.pos.x=30;Unit pulled;pulled.pos.x=80;
+    spell_ascension_displacement displacement;displacement.caster=&puller;displacement.hit=&pulled;
+    displacement.Displace(EFFECT_2);
+    assert(displacement.prevented && pulled.pos.x==32 && pulled.impairingCleared==1);
+    // Sans cible, ou sur soi-meme, rien ne bouge.
+    displacement.hit=nullptr;displacement.Displace(EFFECT_2);assert(pulled.pos.x==32);
+    displacement.hit=&puller;displacement.Displace(EFFECT_2);
+    assert(puller.pos.x==30 && puller.impairingCleared==-1);
 }
 '''
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-chrono-movement-') as directory:
         out = Path(directory)
         cpp, exe = out / 'movement.cpp', out / 'movement.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: owned live clone, bounded restoration, departure slow, Backtrack expiry/dispel/map/instance gates')
 

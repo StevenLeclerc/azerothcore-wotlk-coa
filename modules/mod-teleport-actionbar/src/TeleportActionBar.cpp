@@ -396,6 +396,19 @@ void NotifyForeignToken(ModuleState const& state, Player* player, uint32 spellId
         TokenHub(spellId), SideName(it->second), SideName(PlayerSide(player)));
 }
 
+// True the first time a given token item is found broken, false ever after. A player
+// whose stone does nothing clicks it again and again, and every map thread can reach
+// this, so the report is said once per item entry and guarded by its own lock. The set
+// only ever grows by the number of broken token items, which is normally zero.
+bool ShouldReportBrokenToken(uint32 itemEntry)
+{
+    static std::mutex reportLock;
+    static std::unordered_set<uint32> reported;
+
+    std::lock_guard<std::mutex> guard(reportLock);
+    return reported.insert(itemEntry).second;
+}
+
 bool FindFreeButton(Settings const& config, Player* player, uint8& slot)
 {
     for (uint16 candidate = config.FirstButton; candidate <= config.LastButton; ++candidate)
@@ -622,10 +635,37 @@ public:
         Player* player = caster->ToPlayer();
         uint32 const teleportSpell = it->second;
 
-        // The item's own learn effect runs before this hook, so the teleport is known
-        // by now unless the template points at a spell the server does not have.
-        if (!player->HasSpell(teleportSpell) || !sSpellMgr->GetSpellInfo(teleportSpell))
+        // The item's own learn effect runs before this hook - Spell::cast calls
+        // handle_immediate() before sScriptMgr->OnSpellCast - so the teleport is known by
+        // now, and LoadTokenTeleports already dropped every token whose spell the server
+        // does not have. Both refusals below are therefore broken data, not a normal path,
+        // and a bare `return` on them is a button that does nothing for ever without a word
+        // to the player or a line in the log. LOG_DEBUG would not do either: Logger.module
+        // runs at 4 (INFO) in service and DEBUG is 5, so a debug line is never emitted here.
+        if (!sSpellMgr->GetSpellInfo(teleportSpell))
+        {
+            if (ShouldReportBrokenToken(item->GetEntry()))
+                LOG_ERROR(LogCategory, "Token item {} points at teleport spell {}, which this server "
+                    "does not have; using the item does nothing.", item->GetEntry(), teleportSpell);
+
+            if (WorldSession* session = player->GetSession())
+                ChatHandler(session).SendSysMessage("This teleport stone has no spell on this server; "
+                    "it cannot teleport you. Please report it.");
             return;
+        }
+
+        if (!player->HasSpell(teleportSpell))
+        {
+            // No chat line here: the item is sound, only this character did not end up
+            // knowing what it teaches, and the core already reports a failed item use.
+            // The guard keys on the item, not the character, so only the first character
+            // to hit this is logged - deliberate: a token that fails to teach fails for
+            // everyone, and one line naming one victim is enough to go looking.
+            if (ShouldReportBrokenToken(item->GetEntry()))
+                LOG_WARN(LogCategory, "Token item {} did not teach its teleport spell {} to {}; "
+                    "nothing was cast.", item->GetEntry(), teleportSpell, player->GetName());
+            return;
+        }
 
         LOG_DEBUG(LogCategory, "Token item {} used by {}: casting teleport {}", item->GetEntry(),
             player->GetName(), teleportSpell);

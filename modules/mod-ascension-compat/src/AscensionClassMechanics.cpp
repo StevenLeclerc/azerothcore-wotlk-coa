@@ -1031,9 +1031,17 @@ std::unordered_map<uint32, ClientSpellCharge> const& ClientSpellCharges()
         std::unordered_map<uint32, ClientSpellCharge> result;
         ClientDBC categories;
         ClientDBC links;
+        // Le catalogue vide est indiscernable d'un catalogue charge : tous les sorts a charges
+        // redeviennent silencieusement des sorts sans charge, et la seule trace serait l'ABSENCE
+        // du "Loaded N client spell charge records" plus bas - un negatif que personne ne cherche.
         if (!categories.Load(GetClientDBCPath("SpellChargesCategory.dbc"), 3) ||
             !links.Load(GetClientDBCPath("SpellCharges.dbc"), 2))
+        {
+            LOG_ERROR("module.ascension_compat",
+                "Impossible de lire {} ou {} : aucun sort a charges ne fonctionnera pour cette execution",
+                GetClientDBCPath("SpellChargesCategory.dbc"), GetClientDBCPath("SpellCharges.dbc"));
             return result;
+        }
 
         std::unordered_map<uint32, std::pair<uint32, uint32>> byCategory;
         for (uint32 row = 0; row < categories.GetRecordCount(); ++row)

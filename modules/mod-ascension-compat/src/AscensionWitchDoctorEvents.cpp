@@ -194,15 +194,28 @@ class aura_ascension_witch_doctor_event : public AuraScript
                 Copy(owner, owner, DevotionHeal, uint64(damage) * Amount(Devotion) / 100);
                 break;
             case Frenzy:
-                Copy(owner, owner, FrenzyHeal, uint64(damage) * GetEffect(EFFECT_2)->GetAmount() / 100);
+                // 560748 porte aujourd'hui trois APPLY_AURA, mais GetEffect() rend nullptr des
+                // que l'effet 2 change de forme au Spell.dbc (P-047) : sans ce garde le premier
+                // coup porte par un Witch Doctor talente tuait le fil de carte. std::max borne
+                // aussi un montant negatif, qui deviendrait enorme en uint64.
+                if (AuraEffect const* share = GetEffect(EFFECT_2))
+                    Copy(owner, owner, FrenzyHeal,
+                         uint64(damage) * uint64(std::max(0, share->GetAmount())) / 100);
                 break;
             case PotionThistle:
             case SplashThistle:
             {
                 // The recipient supplies the damage; combat credit stays with the Witch Doctor.
                 Unit* caster = GetCaster();
-                Copy(caster ? caster : owner, owner, ThistleHeal,
-                     uint64(damage) * std::max(0, GetEffect(EFFECT_0)->GetAmount()) / 100);
+                // Degradation ASSUMEE : le Copy etait inconditionnel, il devient conditionnel.
+                // Sans effet tant que le porteur garde ses APPLY_AURA au DBC ; si le DBC change,
+                // ce chemin de soin s'eteint en silence plutot que de dereferencer nullptr sur un
+                // fil de MapUpdate. Non journalise : chemin de proc, un LOG_ERROR sans
+                // etranglement y noierait le journal.
+                AuraEffect const* share = GetEffect(EFFECT_0);
+                if (share)
+                    Copy(caster ? caster : owner, owner, ThistleHeal,
+                         uint64(damage) * uint64(std::max(0, share->GetAmount())) / 100);
                 break;
             }
             case Crystal:

@@ -89,6 +89,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstring>
 #include <type_traits>
 #include <deque>
@@ -1808,10 +1809,19 @@ public:
     if (packet.size())
       body.assign(packet.contents(), packet.contents() + packet.size());
     queue.push_back(std::move(body));
+    _pendingUploadCount.fetch_add(1, std::memory_order_relaxed);
   }
 
   void ProcessKnownEntriesUploads(Player* player)
   {
+    // Portillon atomique : appele pour chaque joueur et chaque bot a chaque tick, alors que
+    // _pendingUploads n'est non vide que dans les quelques ticks qui suivent un televersement
+    // de talents. _stateLock est un mutex unique partage par les dix fils de MapUpdate.
+    // Meme patron qu'AscensionRulesets.cpp. Le compteur est global : une file en attente pour
+    // un compte fait prendre le verrou aux autres, ce qui reste le cas rare.
+    if (_pendingUploadCount.load(std::memory_order_relaxed) == 0)
+      return;
+
     std::deque<std::vector<uint8>> uploads;
     {
       std::lock_guard<std::mutex> lock(_stateLock);
@@ -1820,6 +1830,9 @@ public:
         return;
       uploads = std::move(itr->second);
       _pendingUploads.erase(itr);
+      // Sous le verrou : le compteur et la table se defont ensemble, sans quoi une
+      // deconnexion concurrente pourrait decompter deux fois la meme file.
+      _pendingUploadCount.fetch_sub(uint32(uploads.size()), std::memory_order_relaxed);
     }
 
     if (!IsAscensionCustomClass(player))
@@ -2049,7 +2062,12 @@ public:
     _proficiencySynchronizations.erase(player->GetGUID().GetCounter());
     _advancementPending.erase(player->GetGUID().GetCounter());
     _advancementSent.erase(player->GetGUID().GetCounter());
-    _pendingUploads.erase(player->GetSession()->GetAccountId());
+    if (auto uploads = _pendingUploads.find(player->GetSession()->GetAccountId());
+        uploads != _pendingUploads.end())
+    {
+      _pendingUploadCount.fetch_sub(uint32(uploads->second.size()), std::memory_order_relaxed);
+      _pendingUploads.erase(uploads);
+    }
   }
 
     static uint32 GetSelectableFreeGroup(uint32 entryId)
@@ -2184,6 +2202,10 @@ private:
   // Known-entries uploads by account, copied off the network thread for the player's own update.
   static constexpr std::size_t MAX_QUEUED_KNOWN_ENTRIES_UPLOADS = 8;
   std::unordered_map<uint32, std::deque<std::vector<uint8>>> _pendingUploads;
+  // Nombre total d'entrees de _pendingUploads, tenu par les memes sections critiques que la
+  // table elle-meme : il n'existe que pour epargner la prise de _stateLock au tick de tout le
+  // monde quand il n'y a rien a traiter. Lu hors verrou, donc atomique.
+  std::atomic<uint32> _pendingUploadCount{0};
 };
 
 class AscensionResourceService
@@ -2901,10 +2923,25 @@ private:
             player->GetName(), player->GetName(), 0, false);
         player->GetSession()->SendPacket(&packet);
 
-        LOG_INFO("module.ascension_compat",
-            "Sent Reaper resource state to {}: souls={}, fragments={}, infused={}, runic={}/{}",
-            player->GetName(), uint32(souls), uint32(fragments), infused,
-            runicPower, maximumRunicPower);
+        // Le paquet part a chaque changement d'etat, et la puissance runique bouge a
+        // presque chaque tick d'un Reaper en combat ou en regeneration : en INFO, un
+        // seul Reaper bot noie le journal, qui est le dernier instrument de diagnostic
+        // de ce serveur (P-050). L'envoi force - la connexion - reste en INFO, comme
+        // SendCharacterAdvancementBridge qui journalise un envoi de meme nature en DEBUG.
+        if (force)
+        {
+            LOG_INFO("module.ascension_compat",
+                "Sent Reaper resource state to {}: souls={}, fragments={}, infused={}, runic={}/{}",
+                player->GetName(), uint32(souls), uint32(fragments), infused,
+                runicPower, maximumRunicPower);
+        }
+        else
+        {
+            LOG_DEBUG("module.ascension_compat",
+                "Sent Reaper resource state to {}: souls={}, fragments={}, infused={}, runic={}/{}",
+                player->GetName(), uint32(souls), uint32(fragments), infused,
+                runicPower, maximumRunicPower);
+        }
     }
 
     static bool Matches(Player const* player, uint32 spellId, uint8 classId,
@@ -3061,9 +3098,19 @@ private:
 
     void DecayStatic(Player* player, uint32 diff) const
     {
+        // Portillon avant le verrou. Ce crochet tourne pour chaque joueur de classe CoA a
+        // chaque tick, sur les dix fils de MapUpdate, et _resourceLock est un mutex unique :
+        // pour les vingt classes CoA qui ne sont pas Stormbringer, la prise de verrou plus
+        // bas ne servait qu'a effacer une entree qui ne peut pas exister - la seule insertion
+        // dans _staticDecayTimers est celle de cette fonction, en aval du meme test. Ce que
+        // le cas tordu d'un changement de classe laisserait derriere est efface de toute
+        // facon par OnPlayerLogin et OnPlayerLogout.
+        if (player->getClass() != CLASS_STORMBRINGER)
+            return;
+
         ObjectGuid const guid = player->GetGUID();
         uint8 const stacks = GetAuraStacks(player, SPELL_STORMBRINGER_STATIC);
-        if (player->getClass() != CLASS_STORMBRINGER || !player->IsAlive() || !stacks || player->IsInCombat())
+        if (!player->IsAlive() || !stacks || player->IsInCombat())
         {
             std::lock_guard<std::mutex> lock(_resourceLock);
             _staticDecayTimers.erase(guid);
@@ -3325,6 +3372,7 @@ public:
     }
 
     queue.emplace_back(packet);
+    _pendingPacketCount.fetch_add(1, std::memory_order_relaxed);
   }
 
   void OnPlayerLogin(Player *player) {
@@ -3382,19 +3430,28 @@ public:
     }
 
     std::lock_guard lock(_packetMutex);
-    _pendingPackets.erase(player->GetSession()->GetAccountId());
+    if (auto itr = _pendingPackets.find(player->GetSession()->GetAccountId());
+        itr != _pendingPackets.end())
+    {
+      _pendingPacketCount.fetch_sub(uint32(itr->second.size()), std::memory_order_relaxed);
+      _pendingPackets.erase(itr);
+    }
   }
 
   void OnPlayerUpdate(Player *player, uint32 diff) {
     std::deque<WorldPacket> packets;
-    uint32 accountId = player->GetSession()->GetAccountId();
+    // Portillon atomique avant _packetMutex : ce crochet tourne pour chaque joueur et chaque
+    // bot a chaque tick, et la file est vide sauf juste apres un paquet d'extension.
+    if (_pendingPacketCount.load(std::memory_order_relaxed) != 0)
     {
+      uint32 accountId = player->GetSession()->GetAccountId();
       std::lock_guard lock(_packetMutex);
       auto itr = _pendingPackets.find(accountId);
       if (itr != _pendingPackets.end())
       {
         packets = std::move(itr->second);
         _pendingPackets.erase(itr);
+        _pendingPacketCount.fetch_sub(uint32(packets.size()), std::memory_order_relaxed);
       }
     }
 
@@ -4529,6 +4586,8 @@ private:
 
   std::mutex _packetMutex;
   std::unordered_map<uint32, std::deque<WorldPacket>> _pendingPackets;
+  // Total des paquets en attente, tenu sous _packetMutex, lu hors verrou par le portillon.
+  std::atomic<uint32> _pendingPacketCount{0};
 
   std::mutex _stateMutex;
   std::unordered_map<uint32, std::shared_ptr<PlayerCollectionState>>
@@ -4998,7 +5057,15 @@ public:
 
     [[nodiscard]] bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
     {
-        if (session && session->GetPlayer())
+        // Le drapeau en premier, comme chaque autre crochet du module. Il etait consulte APRES
+        // le bloc de la banque personnelle : un administrateur qui posait AscensionCompat.Enable = 0
+        // pour isoler le module gardait un coffre encore pose detournant CMSG_GUILD_BANKER_ACTIVATE
+        // et une fenetre restee ouverte avalant toute la conversation de banque de guilde - le seul
+        // chemin qu'il n'aurait pas soupconne.
+        if (!session || !session->GetPlayer() ||
+            !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
+            return true;
+
         {
             Player* player = session->GetPlayer();
 
@@ -5026,10 +5093,6 @@ public:
                 return false;
         }
 
-        if (!session || !session->GetPlayer() ||
-            !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
-            return true;
-
         // The core keeps this packet; it only tells the module the client is out of its loading screen.
         if (packet.GetOpcode() == CMSG_SET_ACTIVE_MOVER)
             AscensionClassService::Instance().OnPlayerActiveMover(session->GetPlayer());
@@ -5037,7 +5100,9 @@ public:
         if (packet.GetOpcode() == CMSG_GET_MIRRORIMAGE_DATA && packet.size() >= sizeof(uint64))
         {
             ObjectGuid guid = packet.read<ObjectGuid>(0);
-            CreatureDisplayPreset const* preset = nullptr;
+            // Une COPIE, pas un pointeur dans la table du gestionnaire : le paquet ci-dessous
+            // est bati sur une dizaine de lignes, apres que le verrou du catalogue est rendu.
+            std::optional<CreatureDisplayPreset> preset;
 
             if (guid.IsCreatureOrVehicle())
             {
@@ -5573,7 +5638,7 @@ public:
 
   static bool HandleLocalReloadPresetsCommand(ChatHandler* handler) {
     sAscensionPresets->LoadFromDB();
-    handler->PSendSysMessage("Reloaded %u creature display presets into cache.", uint32(sAscensionPresets->GetPresetCount()));
+    handler->PSendSysMessage("Reloaded {} creature display presets into cache.", uint32(sAscensionPresets->GetPresetCount()));
     return true;
   }
 
@@ -5585,7 +5650,7 @@ public:
       return false;
 
     uint32 displayId = displayIdOpt ? *displayIdOpt : 0;
-    CreatureDisplayPreset const* preset = nullptr;
+    std::optional<CreatureDisplayPreset> preset;
 
     if (displayId != 0) {
       preset = sAscensionPresets->GetPreset(entry, displayId);
@@ -5596,7 +5661,7 @@ public:
     }
 
     if (!preset) {
-      handler->PSendSysMessage("No creature display preset found for entry %u.", entry);
+      handler->PSendSysMessage("No creature display preset found for entry {}.", entry);
       return false;
     }
 
@@ -5620,7 +5685,7 @@ public:
       response << uint32(item);
 
     target->SendMessageToSet(&response, true);
-    handler->PSendSysMessage("Morphed into creature display preset for entry %u (display %u, %s).",
+    handler->PSendSysMessage("Morphed into creature display preset for entry {} (display {}, {}).",
         entry, preset->display_id, preset->gender == 1 ? "Female" : "Male");
     return true;
   }
@@ -5663,9 +5728,16 @@ class AscensionCompatPlayerScript : public PlayerScript {
     // different map threads: every access to the pending list goes through this lock.
     std::mutex _pendingEquipmentLock;
     std::unordered_map<ObjectGuid, std::vector<ObjectGuid>> _pendingEquipment;
+    // Nombre total d'objets en attente, tenu sous _pendingEquipmentLock et lu hors verrou :
+    // EquipNewItems tourne pour chaque joueur et chaque bot a chaque tick, alors que la table
+    // n'est non vide que dans le tick qui suit un ramassage. Meme portillon qu'ailleurs.
+    std::atomic<uint32> _pendingEquipmentCount{0};
 
     void EquipNewItems(Player* player)
     {
+        if (_pendingEquipmentCount.load(std::memory_order_relaxed) == 0)
+            return;
+
         std::vector<ObjectGuid> items;
         {
             std::lock_guard<std::mutex> lock(_pendingEquipmentLock);
@@ -5676,6 +5748,7 @@ class AscensionCompatPlayerScript : public PlayerScript {
             // Finish the acquisition before moving items; its caller still uses the original bag positions.
             items = std::move(itr->second);
             _pendingEquipment.erase(itr);
+            _pendingEquipmentCount.fetch_sub(uint32(items.size()), std::memory_order_relaxed);
         }
 
         for (ObjectGuid guid : items)
@@ -5913,11 +5986,21 @@ public:
   void OnPlayerLogout(Player *player) override {
     {
       std::lock_guard<std::mutex> lock(_pendingEquipmentLock);
-      _pendingEquipment.erase(player->GetGUID());
+      if (auto itr = _pendingEquipment.find(player->GetGUID()); itr != _pendingEquipment.end())
+      {
+        _pendingEquipmentCount.fetch_sub(uint32(itr->second.size()), std::memory_order_relaxed);
+        _pendingEquipment.erase(itr);
+      }
     }
     AscensionClassService::Instance().OnPlayerLogout(player);
     AscensionResourceService::Instance().OnPlayerLogout(player);
     AscensionCollectionService::Instance().OnPlayerLogout(player);
+    // Le morphe de preset ne vit qu'en memoire, indexe sur un GUID de personnage qui est stable.
+    // Sans cet effacement, la reconnexion rendait l'apparence normale (InitDisplayIds) mais le
+    // premier OnPlayerUpdate reposait UNIT_FLAG2_MIRROR_IMAGE, a chaque tick et pour toute la vie
+    // du processus, sans que le joueur puisse rien y faire. Un morphe qui doit survivre a une
+    // deconnexion demande une persistance en base, pas une table memoire qui ne se vide jamais.
+    sAscensionPresets->ClearActivePresetOverride(player->GetGUID());
   }
 
   void OnPlayerUpdate(Player *player, uint32 diff) override {
@@ -5928,7 +6011,7 @@ public:
       AscensionResourceService::Instance().OnPlayerUpdate(player, diff);
       AscensionCollectionService::Instance().OnPlayerUpdate(player, diff);
       EquipNewItems(player);
-      if (sAscensionPresets->GetActivePresetOverride(player->GetGUID())) {
+      if (sAscensionPresets->HasActivePresetOverride(player->GetGUID())) {
         if (!player->HasUnitFlag2(UNIT_FLAG2_MIRROR_IMAGE))
           player->SetUnitFlag2(UNIT_FLAG2_MIRROR_IMAGE);
       }
@@ -5954,6 +6037,7 @@ public:
     {
         std::lock_guard<std::mutex> lock(_pendingEquipmentLock);
         _pendingEquipment[player->GetGUID()].push_back(item->GetGUID());
+        _pendingEquipmentCount.fetch_add(1, std::memory_order_relaxed);
     }
   }
 
@@ -6272,6 +6356,22 @@ public:
     }
 };
 
+/// COUT CONNU, DELIBEREMENT NON CORRIGE (revue du 2026-09-21, gravite "mineur/signalement").
+///
+/// Deux points chauds, mesures par lecture du code et non corriges ici :
+///  - `_lock` est un mutex unique pris par creature et par tick des que `CanScale` passe, y compris
+///    pour ne faire que decrementer `State::Timer` ;
+///  - `DesiredLevel` parcourt `map->GetPlayers()` en entier, avec `InSamePhase`, `IsWithinDistInMap`
+///    et `IsValidAttackTarget` par couple, une fois par seconde et par creature eligible.
+///
+/// Le correctif evident - restreindre le balayage aux joueurs proches, ou memoriser le maximum -
+/// touche a l'entree du `std::max` de `DesiredLevel`, c'est-a-dire a l'algorithme d'equilibrage
+/// lui-meme. `references/level-scaling.md` du skill designe `DesiredLevel` comme le "coeur du
+/// sujet" : cette boucle-ci est deja le resultat de deux retraits - c240d39 "restore upstream
+/// creature level scaling in full" et 1eae9e8 "drop the creature level scaling cap, keep the
+/// nearest player rule" - et la page ne veut la retoucher qu'avec une mesure derriere. On ne la
+/// reecrit donc pas au detour d'un lot de defauts mineurs : cela demande un lot dedie, avec une
+/// mesure avant/apres sur un serveur peuple, pas une intuition.
 class AscensionCompatLevelScalingScript : public AllCreatureScript
 {
 public:
@@ -6287,11 +6387,12 @@ public:
     uint64 guid = creature->GetGUID().GetRawValue();
     uint8 original = level;
     {
+      // try_emplace construit State{level, 1000} quand il insere : Original vaut deja level
+      // sur le chemin d'insertion, et sur l'autre c'est la valeur deja retenue qu'il faut.
+      // Les deux lignes qui relisaient puis reecrivaient Original a l'identique ne pouvaient
+      // rien changer et laissaient croire a un cas de reentrance traite.
       std::lock_guard<std::mutex> guard(_lock);
-      auto [itr, inserted] = _states.try_emplace(guid, State{level, 1000});
-      original = itr->second.Original;
-      if (inserted)
-        itr->second.Original = level;
+      original = _states.try_emplace(guid, State{level, 1000}).first->second.Original;
     }
 
     level = DesiredLevel(creature, original);
@@ -6403,7 +6504,16 @@ public:
   }
 
   void OnStartup() override {
-    AscensionCompatData::LoadCoATalentData();
+    // L'echec est silencieux cote chargeur, et sa seule trace serait l'ABSENCE de la ligne
+    // "Loaded N CoA talent entries" - un negatif que personne ne cherche. Consequence en jeu :
+    // FindTalentEntry rend toujours nullptr, aucune capacite automatique n'est accordee, et les
+    // 21 classes personnalisees perdent tout leur arbre de talents sans un mot au journal.
+    if (!AscensionCompatData::LoadCoATalentData())
+    {
+      LOG_ERROR("module.ascension_compat",
+                "Catalogue de talents CoA indisponible (lecture des DBC client en echec) : "
+                "aucun talent personnalise ne fonctionnera pour cette execution");
+    }
     if (!ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED))
       return;
@@ -6980,6 +7090,15 @@ public:
         creature->SetUnitFlag2(UNIT_FLAG2_MIRROR_IMAGE);
       }
     }
+  }
+
+  void OnCreatureRemoveWorld(Creature* creature) override {
+    // Sans cela, l'entree d'une creature morphee a la main survit a sa disparition, et le
+    // compteur de GUID que la carte redistribue a un autre objet en herite. Le drapeau ENABLED
+    // n'est pas consulte ici : effacer une entree est sur en toutes circonstances, et une
+    // desactivation a chaud laisserait autrement la table grossir sans personne pour la purger.
+    if (creature)
+      sAscensionPresets->ClearActivePresetOverride(creature->GetGUID());
   }
 };
 

@@ -10,6 +10,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir  # noqa: E402
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
@@ -19,8 +23,10 @@ method = runpy.run_path(str(HERE.parent / "client_compat/run.py"))["method"]
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-ref", help="Test a local Git revision to demonstrate the regression.")
-    parser.add_argument("--dbc-dir", type=Path, required=True)
+    parser.add_argument("--dbc-dir", type=Path, default=None)
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
 
     def source(path):
         if args.source_ref:

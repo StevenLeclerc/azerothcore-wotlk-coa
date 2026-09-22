@@ -10,6 +10,17 @@
 namespace
 {
 using namespace AscensionStarcaller;
+
+// std::map::operator[] INSERE une entree a 0 meme en contexte de lecture. Appele depuis Check(),
+// qui doit rester pure dans les vingt fichiers de classe, il allouait un nœud par attaquant
+// jamais vu, sur un chemin chaud. find() rend le meme verdict sans ecrire dans l'etat du joueur.
+// (La carte est purgee par ailleurs, AscensionStarcaller.cpp:461-463 : il n'y avait pas de fuite.)
+bool CounterElapsed(StarcallerState const& state, ObjectGuid guid)
+{
+    auto it = state.counters.find(guid);
+    return it == state.counters.end() || it->second <= state.clock;
+}
+
 class aura_ascension_starcaller_event : public AuraScript
 {
     PrepareAuraScript(aura_ascension_starcaller_event);
@@ -58,8 +69,9 @@ class aura_ascension_starcaller_event : public AuraScript
             case 801155:
                 return damage != 0;
             case 704777:
-                return !periodic && meleeTaken && damage && player->HasInArc(float(M_PI), e.GetActor()) &&
-                       State(player).counters[e.GetActor()->GetGUID()] <= State(player).clock;
+                return !periodic && meleeTaken && damage && e.GetActor() &&
+                       player->HasInArc(float(M_PI), e.GetActor()) &&
+                       CounterElapsed(State(player), e.GetActor()->GetGUID());
             case 806155:
                 return !periodic && damage && info && (info->GetSchoolMask() & SPELL_SCHOOL_MASK_MAGIC);
             default:

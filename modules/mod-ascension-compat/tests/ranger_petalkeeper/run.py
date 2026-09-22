@@ -6,6 +6,10 @@ import sqlite3
 import struct
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -21,7 +25,7 @@ def main():
     parser.add_argument("--workspace-tools", type=Path, default=ROOT.parent / "tools")
     parser.add_argument("--spell-dbc", type=Path)
     args = parser.parse_args()
-    native = load("petal_compile", args.workspace_tools / "Test-LocalLoginCollections.py")
+    native = load("petal_compile", require_helper(args.workspace_tools / "Test-LocalLoginCollections.py"))
     base = load("flower_fixture", Path(__file__).parent.parent / "ranger_flowers/run.py")
     code = base.make_harness(native, ROOT / "modules/mod-ascension-compat/src/AscensionRangerPetalkeeper.cpp",
                              "npc_ascension_ranger_red_flower")

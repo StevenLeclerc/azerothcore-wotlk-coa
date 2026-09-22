@@ -3,6 +3,10 @@ from pathlib import Path
 import runpy
 import struct
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 
@@ -23,14 +27,17 @@ struct ObjectGuid
 template<class T> T CalculatePct(T value,int32 percent) { return T(value*percent/100); }
 struct Unit;''', 1)
     code = code.replace('uint32 AttributesEx2=0,', 'uint32 AttributesEx5=512, AttributesEx2=0,')
+    # `duration` et `SetDuration` viennent deja du fixture de runemaster_secondary :
+    # les redeclarer ici casse la compilation. On n'ajoute que ce qui manque, et on
+    # ramene la duree a celle qu'attendent les cas de Hurricane.
     code = code.replace('uint8 stacks=1;', '''
     std::map<uint32,uint64> values;
     void SetScriptValue(uint32 key,uint64 value) { values[key]=value; }
     uint64 GetScriptValue(uint32 key) { return values[key]; }
-    int32 duration=2000, maximum=2000;
+    int32 maximum=2000;
     void SetMaxDuration(int32 value) { maximum=value; }
-    void SetDuration(int32 value) { duration=value; }
     uint8 stacks=1;''')
+    code = code.replace('int32 duration=3000;', 'int32 duration=2000;')
     code = code.replace('Aura* aura=nullptr; Aura* GetBase()',
                         'uint32 mode=1; uint32 GetRemoveMode() const { return mode; } Aura* aura=nullptr; Aura* GetBase()')
     code = code.replace('appStore[index]={&aura};', 'appStore[index].aura=&aura;')
@@ -56,6 +63,11 @@ struct Spell
     void SetSpellValue(uint32 key,int32 value) { values[key]=uint64(value); }
     Unit* caster=nullptr;
     SpellInfo info;''')
+    # Hurricane veut une vraie AuraApplication ; on retire celle, minimale, que le
+    # fixture de runemaster_secondary pose sur AuraScript, sinon les deux se redeclarent.
+    code = code.replace('''    struct Application { uint32 mode=AURA_REMOVE_BY_EXPIRE; uint32 GetRemoveMode() const { return mode; } } fixtureApplication;
+    Application const* GetTargetApplication() const { return &fixtureApplication; }
+''', '')
     code = code.replace('Hook DoCheckProc, OnEffectProc, AfterEffectRemove;', '''
     AuraApplication fixtureApplication;
     AuraApplication* GetTargetApplication() { return &fixtureApplication; }
@@ -127,7 +139,7 @@ int main()
     assert(info.AttributesCu&SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED);
 }
 ''')
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     ids = {645435, 645437, 645440, 706672, 500469}
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20+count*936]) if r[0] in ids}

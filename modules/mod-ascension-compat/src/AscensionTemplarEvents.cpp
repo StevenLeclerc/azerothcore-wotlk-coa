@@ -33,6 +33,19 @@ class aura_ascension_templar_event : public AuraScript
         if (id == 801482 || id == 801483)
             return outgoing && damage && event.GetActionTarget() != player &&
                    (id != 801483 || !player->HasAura(801482));
+        // Garde de reentrance. Sa position EST la specification : 801482 et 801483 doivent
+        // pouvoir partir pendant un autre proc Templar, et sont donc au-dessus. Ils se nourrissent
+        // des degats derives emis par les autres branches du handler Proc ci-dessous vers une
+        // cible ennemie -- Copy(player, target, 801456), Copy(player, event.GetActor(), 707720),
+        // Copy(player, target, 525028) -- qui satisfont leur Check (ActionTarget != player), et
+        // que la ligne `if (!outgoing || Derived(info))` plus bas n'ecarte pas pour cette branche.
+        // Leur propre charge utile est auto-ciblee (Copy(player, player, 803331)) et deja exclue
+        // par ActionTarget != player : pas de bouclage.
+        // Ces sorts declenches procent bien : acore_world.spell_proc porte AttributesMask = 2
+        // (PROC_ATTR_TRIGGERED_CAN_PROC, SpellMgr.h:277) pour 801482 et 801483, ce qui desactive
+        // le blocage des procs issus de sorts declenches de SpellAuras.cpp
+        // (Aura::GetProcEffectMask, SpellAuras.cpp:2165-2172).
+        // NE PAS remonter ce garde au-dessus des branches par id : cela nerf les deux talents.
         if (State(player).event)
             return false;
         if (id == 300513)

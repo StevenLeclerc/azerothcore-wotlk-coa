@@ -5,6 +5,10 @@ import os
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -66,9 +70,7 @@ int main()
         out = Path(directory)
         cpp, exe = out / "rage.cpp", out / "rage.exe"
         cpp.write_text(code, encoding="utf-8")
-        compiler = Path(os.environ["VCToolsInstallDir"]) / "bin/Hostx64/x64/cl.exe"
-        subprocess.run([str(compiler), "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/utf-8",
-                        str(cpp), "/Fe" + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print("PASS: Barbaric Rage retargets ability cooldowns; unrelated spells are untouched")
 

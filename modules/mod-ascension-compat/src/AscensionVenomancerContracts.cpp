@@ -3,6 +3,7 @@
 #include "AscensionVenomancer.h"
 #include "AscensionVenomancerData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellAuraEffects.h"
@@ -78,6 +79,15 @@ void ApplyContracts(SpellInfo* info)
         // Guarded on the three fields it depends on, so a DBC import that authors something else
         // here is left alone rather than silently neutered. -> P-071
         dummy(EFFECT_0);
+    else if (id == 680800)
+        // The guard above refused: 680800 no longer carries the empty-mask cooldown modifier this
+        // contract was written for. Leaving it alone is the intent, but it must not be silent --
+        // an unconditional second disarm used to sit further down this function and neutered the
+        // talent whatever the import said, which is exactly what the guard exists to prevent.
+        LOG_ERROR("module.ascension_compat",
+            "Ascension contract Venomancer: spell 680800 no longer matches the empty-mask cooldown "
+            "modifier this contract disarms (aura {}, misc {}); it is left as the client authored it.",
+            uint32(info->Effects[EFFECT_0].ApplyAuraName), info->Effects[EFFECT_0].MiscValue);
     if (id == 630887 && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
         info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT1 &&
         info->Effects[EFFECT_0].SpellClassMask == flag96())
@@ -149,8 +159,10 @@ void ApplyContracts(SpellInfo* info)
         // Spider/Beetle are plain auras, not real shapeshift forms, so the native Stances
         // requirement can never be met; venomancer_spells::OnSpellCheckCast enforces the OR instead.
         info->Stances = 0;
-    if (id == 680800)
-        dummy(0); // Empty cooldown selector would otherwise affect every class spell.
+    // 680800 is disarmed above (line 67), under the three-field guard that makes the
+    // decision reversible when a DBC import authors a real class mask. The unconditional
+    // copy that used to sit here re-disarmed it whatever the import said, which is exactly
+    // the outcome the guard was written to avoid.
     if (id == 706035)
         dummy(1);
     if (id == 631226)

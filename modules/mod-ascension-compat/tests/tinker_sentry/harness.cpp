@@ -163,6 +163,9 @@ struct Device
 {
     Creature* me;
     uint32 focus = 0, owner = 0;
+    // Miroir du membre homonyme de l'IA reelle (AscensionTinkerSummons.cpp) : IsSummonedBy
+    // le remet a false, Cleanup() le pose. Sans lui, la tranche extraite ne compile pas.
+    bool deregistered = false;
     // ACTUAL_INITIALIZATION
     // ACTUAL_TARGET
     // ACTUAL_UPDATE

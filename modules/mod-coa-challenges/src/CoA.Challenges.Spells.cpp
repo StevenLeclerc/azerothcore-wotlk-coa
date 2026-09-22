@@ -85,7 +85,15 @@ namespace CoAChallenges
             if (b != std::string::npos)
             {
                 tok = tok.substr(b, e - b + 1);
-                try { out.push_back(uint32(std::stoul(tok))); } catch (...) {}
+                // A malformed id used to be swallowed here: the challenge then
+                // activated with one aura silently missing, which is a different
+                // challenge from the one the player thinks he is playing.
+                try { out.push_back(uint32(std::stoul(tok))); }
+                catch (...)
+                {
+                    LOG_ERROR("module.coa_challenges",
+                        "Unreadable spell id '{}' in a challenge spell list, ignored", tok);
+                }
             }
             start = end + 1;
         }
@@ -312,13 +320,12 @@ namespace CoAChallenges
                 spell, player->GetName());
     }
 
-    // Total lives for a challenge/mode (CoAChallenges.Lives.<id>). Used by the
+    // Total lives for a challenge/mode (coa_challenge_definition.lives). Used by the
     // death handling; the lives COUNTER AURA display is deferred (needs a
     // client Spell.dbc edit).
     uint32 LivesTotal(uint32 challengeID)
     {
-        return DefField<uint32>(challengeID, &ChallengeDef::lives,
-            "CoAChallenges.Lives." + std::to_string(challengeID), 0);
+        return DefField<uint32>(challengeID, &ChallengeDef::lives, 0u);
     }
 
     // Per-mode deaths (mode on without its base challenge). Kept in its own

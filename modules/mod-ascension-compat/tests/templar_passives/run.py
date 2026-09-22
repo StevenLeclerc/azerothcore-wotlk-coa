@@ -11,6 +11,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import require_helper  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 CASES = r'''
@@ -91,7 +95,7 @@ def main():
     parser.add_argument("--source-ref", help="Use older Templar source as a negative control")
     parser.add_argument("--spell-dbc", type=Path)
     args = parser.parse_args()
-    path = args.workspace_tools / "Test-TemplarCompletion.py"
+    path = require_helper(args.workspace_tools / "Test-TemplarCompletion.py")
     spec = importlib.util.spec_from_file_location("templar_completion_fixture", path)
     fixture = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixture)

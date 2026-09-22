@@ -3,6 +3,7 @@
 #include "AscensionCultist.h"
 #include "AscensionCultistData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -206,7 +207,16 @@ void ApplyContracts(SpellInfo* info)
     {
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER_AREA_RAID);
         info->Effects[0].TargetB = SpellImplicitTargetInfo();
-        info->Effects[0].RadiusEntry = sSpellRadiusStore.LookupEntry(10);
+        // A missing SpellRadius row is not a crash: SpellEffectInfo::CalcRadius returns 0 when
+        // HasRadius() is false (SpellInfo.cpp:608-611). It is worse than a crash here -- an area
+        // spell that reaches nobody, without a word. Keep the client row and journal instead of
+        // writing a null pointer, the same contract as AscensionContract::SetDuration.
+        if (SpellRadiusEntry const* radius = sSpellRadiusStore.LookupEntry(10))
+            info->Effects[0].RadiusEntry = radius;
+        else
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Cultist: SpellRadius row 10 is missing, spell {} keeps its client radius.",
+                id);
     }
     if (id == 255281)
     {

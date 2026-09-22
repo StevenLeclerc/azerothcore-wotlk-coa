@@ -12,6 +12,13 @@ namespace CoAChallenges
     void QueueRemoteDeactivate(ObjectGuid const& target, uint32 challengeID, bool suppressSync);
     void DeactivateChallengeDbOnly(uint32 guid, uint32 challengeID);
 
+    // Tolerance added to the sync timeout announced to the client. ::time
+    // truncates, so the deadline stored below is already up to one second
+    // early, and the client's own auto-decline leaves at exactly T0+timeout:
+    // without a margin that nominal answer arrives "expired" and is dropped,
+    // taking the party rollback with it (nothing else replays it).
+    uint32 const SYNC_RESPONSE_GRACE_SECONDS = 10;
+
     void SendActiveList(Player* player)
     {
         WorldSession* session = player->GetSession();
@@ -103,13 +110,25 @@ namespace CoAChallenges
         session->SendPacket(&data);
 
         {
+            uint32 const now = uint32(::time(nullptr));
             std::lock_guard<std::mutex> lock(PendingSyncMutex);
+            // Opportunistic sweep: nothing purges this map on logout, so an
+            // ignored invitation would sit here until the realm restarts.
+            for (auto it = PendingSyncByGuid.begin(); it != PendingSyncByGuid.end(); )
+            {
+                if (it->second.expiresAt && it->second.expiresAt <= now)
+                    it = PendingSyncByGuid.erase(it);
+                else
+                    ++it;
+            }
+
             PendingSync& pending = PendingSyncByGuid[player->GetGUID().GetCounter()];
             pending.requesterGuid = requesterGuid;
             pending.remove = remove;
             pending.rollbackOnDecline = rollbackOnDecline;
             pending.pairs = pairs;
             pending.rollback = rollback;
+            pending.expiresAt = now + std::max<uint32>(1, timeoutMs / 1000) + SYNC_RESPONSE_GRACE_SECONDS;
         }
 
         LOG_INFO("module.coa_challenges", "Sent SMSG 0x59B SYNC_REQUEST to {}: {} {} challenge(s) from {}",
@@ -191,6 +210,25 @@ namespace CoAChallenges
             }
             pending = it->second;
             PendingSyncByGuid.erase(it);
+
+            // Honour the timeout announced to the client: a late answer (a
+            // reconnect, an auto-decline fired after the window) must not
+            // activate a set the player no longer has in front of him, nor
+            // revert an activation for a group that has since dissolved.
+            if (pending.expiresAt && uint32(::time(nullptr)) > pending.expiresAt)
+            {
+                // Never leave this silently: a decline dropped here is a
+                // rollback that will never run, i.e. a requester (and party)
+                // left activated for a formation nobody joined.
+                if (!accept && pending.rollbackOnDecline && !pending.rollback.empty())
+                    LOG_WARN("module.coa_challenges",
+                        "CMSG 0x59C SYNC_RESPONSE from {}: decline expired at {}, rollback of {} challenge(s) for requester {} NOT applied",
+                        player->GetName(), pending.expiresAt, pending.rollback.size(), pending.requesterGuid);
+                LOG_INFO("module.coa_challenges",
+                    "CMSG 0x59C SYNC_RESPONSE from {}: request expired at {}, ignored",
+                    player->GetName(), pending.expiresAt);
+                return;
+            }
         }
 
         if (accept)
@@ -288,25 +326,15 @@ namespace CoAChallenges
         // an orphan left by a row deleted out-of-band).
         StripOrphanChallengeAuras(player);
 
-        // Safety: no hunger active -> no meter icons lingering.
-        {
-            uint32 guid = player->GetGUID().GetCounter();
-            bool anyHunger = false;
-            if (QueryResult r = CharacterDatabase.Query(
-                    "SELECT challengeId FROM coa_character_challenge WHERE guid = {}", guid))
-            {
-                do
-                {
-                    if (IsHungerChallenge(r->Fetch()[0].Get<uint32>()))
-                    {
-                        anyHunger = true;
-                        break;
-                    }
-                } while (r->NextRow());
-            }
-            if (!anyHunger)
-                RemoveMeterAuras(player);
-        }
+        // Safety: no hunger tracked -> no meter icons lingering. Asked of the
+        // cache RefreshHungerTracking has just rebuilt, NOT of
+        // coa_character_challenge: hunger also comes from the Survivalist game
+        // mode, which owns no challenge row (its counters live in
+        // coa_character_survival). Querying the challenge table alone stripped
+        // the icons SyncMeterAuras had just posted for a Survivalist character,
+        // and they only came back on the next counter change.
+        if (!HasTrackedHunger(player->GetGUID().GetCounter()))
+            RemoveMeterAuras(player);
 
         // A character that logs in already at the cap with an active challenge
         // (or one activated at the cap) completes it here.

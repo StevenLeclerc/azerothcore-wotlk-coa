@@ -45,7 +45,7 @@ def check_data(header, catalog, replacement_header, dbc, trainer):
                                   for node in nodes)
         assert ranks and ranks[0][1] == 0 and sorted(ranks, key=lambda rank: rank[1]) == ranks
         replacements.append((cls, parent, original, ranks))
-    assert len(replacements) == 13
+    assert len(replacements) == 16
     children = {spell for _, _, _, ranks in replacements for spell, _ in ranks}
     assert not children & {value for _, parent, original, _ in replacements for value in (parent, original)}
     assert not children & {entry[4] for entry in entries}, "Replacement and taught ownership must be disjoint"

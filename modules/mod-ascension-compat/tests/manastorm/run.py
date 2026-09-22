@@ -23,6 +23,10 @@ def method(source, signature):
 def main():
     source = (MODULE / 'AscensionManastorm.cpp').read_text(encoding='utf-8')
     harness = (HERE / 'harness.cpp').read_text(encoding='utf-8')
+    import re
+    entries = re.findall(r'constexpr uint32 (?:Bolt|Bullion)Entry = \d+;', source)
+    assert len(entries) == 2, entries
+    harness = harness.replace('// ACTUAL_ENTRIES', '\n'.join(entries))
     for marker, signature in [('QUEUE', 'bool Queue('), ('COMPLETE', 'void Complete('),
                               ('GADGET', 'static Gadget const* FindGadget('), ('SET_LOADOUT', 'void SetLoadout(')]:
         harness = harness.replace('// ACTUAL_' + marker, method(source, signature))

@@ -373,6 +373,32 @@ namespace
         {
             if (!enabled.load())
                 return;
+
+            // Les quatre lectures de la base se font AVANT de prendre le verrou.
+            // `mutex` est unique pour tous les joueurs et il est repris a chaque
+            // tick par UpdatePlayer, donc sur les fils de carte : le tenir pendant
+            // quatre allers-retours SQL synchrones faisait payer a toutes les
+            // cartes le temps de connexion d'un seul joueur, et le prix montait
+            // avec la base (P-009 : un MySQL qui redemarre rend le worldserver
+            // indisponible ~2 min). Aucune de ces requetes ne lit d'etat du
+            // module : elles ne dependent que du GUID du personnage, les sortir
+            // de la section critique ne change donc aucun resultat.
+            auto* clearsStatement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_CLEARS);
+            clearsStatement->SetData(0, player->GetGUID().GetCounter());
+            PreparedQueryResult clearsResult = CharacterDatabase.Query(clearsStatement);
+
+            auto* bonusStatement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_BONUS);
+            bonusStatement->SetData(0, player->GetGUID().GetCounter());
+            PreparedQueryResult bonusResult = CharacterDatabase.Query(bonusStatement);
+
+            auto* slotsStatement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_LOADOUT);
+            slotsStatement->SetData(0, player->GetGUID().GetCounter());
+            PreparedQueryResult slotsResult = CharacterDatabase.Query(slotsStatement);
+
+            auto* xpStatement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_XP);
+            xpStatement->SetData(0, player->GetGUID().GetCounter());
+            PreparedQueryResult xpResult = CharacterDatabase.Query(xpStatement);
+
             std::lock_guard<std::recursive_mutex> lock(mutex);
             auto& run = runs[player->GetGUID()];
             run.token = ++nextToken;
@@ -382,16 +408,13 @@ namespace
             run.cacheSpaceWarning = false;
             run.uiEvents.ScheduleEvent(EventCacheDelivery, 250ms);
             player->GetSession()->SetScriptPacketToken(run.token);
-            auto* statement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_CLEARS);
-            statement->SetData(0, player->GetGUID().GetCounter());
-            PreparedQueryResult result = CharacterDatabase.Query(statement);
             run.progress = {};
             run.databaseReady = false;
-            if (result)
+            if (clearsResult)
             {
                 do
                 {
-                    Field* fields = result->Fetch();
+                    Field* fields = clearsResult->Fetch();
                     uint8 const mode = fields[0].Get<uint8>();
                     uint32 const depth = fields[1].Get<uint32>();
                     if (mode == 255 && !depth)
@@ -399,10 +422,10 @@ namespace
                         run.databaseReady = true;
                     else if (mode < run.progress.size() && depth)
                         run.progress[mode].push_back(depth);
-                } while (result->NextRow());
+                } while (clearsResult->NextRow());
             }
             SendProgress(player, run, true);
-            LoadBonusAndSlots(player, run);
+            ApplyBonusAndSlots(player, run, bonusResult, slotsResult, xpResult);
             SendCapability(player, run.databaseReady);
             SendLoadout(player, run);
 
@@ -1044,16 +1067,18 @@ namespace
             return itr == Gadgets.end() ? nullptr : &*itr;
         }
 
-        void LoadBonusAndSlots(Player* player, Run& run)
+        // Ne lit plus la base : les trois jeux de resultats sont demandes par
+        // Login avant qu'il ne prenne le verrou, et cette fonction ne fait que
+        // les verser dans le Run. Son seul appelant est Login.
+        void ApplyBonusAndSlots(Player* player, Run& run, PreparedQueryResult const& bonusResult,
+            PreparedQueryResult const& slotsResult, PreparedQueryResult const& xpResult)
         {
             bool bonusReady = false;
             bool slotsReady = false;
-            auto* bonus = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_BONUS);
-            bonus->SetData(0, player->GetGUID().GetCounter());
-            if (PreparedQueryResult result = CharacterDatabase.Query(bonus))
+            if (bonusResult)
                 do
                 {
-                    Field* fields = result->Fetch();
+                    Field* fields = bonusResult->Fetch();
                     uint8 const mode = fields[0].Get<uint8>();
                     if (mode == 255)
                         bonusReady = true;
@@ -1062,13 +1087,11 @@ namespace
                         run.pity[mode] = std::min(10000u, fields[1].Get<uint32>());
                         run.caches[mode] = fields[2].Get<uint32>();
                     }
-                } while (result->NextRow());
-            auto* slots = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_LOADOUT);
-            slots->SetData(0, player->GetGUID().GetCounter());
-            if (PreparedQueryResult result = CharacterDatabase.Query(slots))
+                } while (bonusResult->NextRow());
+            if (slotsResult)
                 do
                 {
-                    Field* fields = result->Fetch();
+                    Field* fields = slotsResult->Fetch();
                     uint8 const slot = fields[0].Get<uint8>();
                     if (slot == 255)
                         slotsReady = true;
@@ -1077,10 +1100,7 @@ namespace
                         uint32 const spell = fields[1].Get<uint32>();
                         run.slots[slot] = player->HasSpell(spell) && FindGadget(spell) ? spell : 0;
                     }
-                } while (result->NextRow());
-            auto* xp = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_XP);
-            xp->SetData(0, player->GetGUID().GetCounter());
-            PreparedQueryResult xpResult = CharacterDatabase.Query(xp);
+                } while (slotsResult->NextRow());
             if (xpResult)
                 run.pendingXP = uint32(std::min<uint64>(xpResult->Fetch()[0].Get<uint64>(), 1000000000));
             run.databaseReady = run.databaseReady && bonusReady && slotsReady && bool(xpResult);
@@ -1152,9 +1172,34 @@ namespace
             auto* statement = CharacterDatabase.GetPreparedStatement(CHAR_SEL_MANASTORM_CACHES);
             statement->SetData(0, player->GetGUID().GetCounter());
             PreparedQueryResult result = CharacterDatabase.Query(statement);
-            // A sentinel distinguishes an empty queue from a failed read. Process at most three items per tick.
+            // A sentinel distinguishes an empty queue from a failed read.
             if (!result)
                 return;
+            // Une seule caisse par passage. Le commentaire precedent annoncait
+            // « at most three items per tick » sans que rien ne le fasse : la
+            // boucle allait au bout du jeu de resultats, et chaque tour attend
+            // un aller-retour SQL complet sur CE fil de carte (le m_future.get()
+            // plus bas). Cinq caisses en attente au retour d'un joueur, c'etaient
+            // cinq attentes d'affilee pendant lesquelles aucun joueur ni aucun
+            // bot de la carte n'etait mis a jour. Le reste part au passage
+            // suivant : UpdatePlayer reprogramme EventCacheDelivery toutes les
+            // 2 s tant que run.cachesPending est vrai.
+            // Ce que ce plafond COUTE, et qui est assume : le SELECT synchrone
+            // d'ouverture ci-dessus repart a chaque passage, donc une fois
+            // toutes les 2 s par joueur ayant des caisses en attente, la ou il
+            // partait une fois pour toutes. On echange du debit total contre de
+            // la gigue : ce qui bloquait la carte etait la rafale de
+            // m_future.get() (un commit complet chacun), pas la lecture. Le
+            // m_future.get() lui-meme, lui, SUBSISTE — une attente par passage —
+            // et sa suppression demande de rendre la livraison asynchrone,
+            // c'est-a-dire de revalider la place en sac au retour : refonte, pas
+            // correctif ponctuel. De meme, une ligne invalide (IsCache faux)
+            // rend la main sans abaisser cachesPending : la relecture repart
+            // toutes les 2 s jusqu'a la deconnexion. Comportement d'avant cette
+            // passe, laisse tel quel faute de pouvoir distinguer « ligne morte »
+            // de « ligne pas encore ecrite ».
+            constexpr uint32 MaxDeliveriesPerPass = 1;
+            uint32 delivered = 0;
             bool found = false;
             do
             {
@@ -1163,6 +1208,15 @@ namespace
                 if (!itemGuid)
                     continue;
                 found = true;
+                if (delivered >= MaxDeliveriesPerPass)
+                {
+                    // Il reste des lignes : garder le rendez-vous des 2 s. Le
+                    // drapeau est deja vrai (l'appelant ne vient ici que dans ce
+                    // cas, et rien ne l'abaisse en chemin) ; on l'ecrit pour que
+                    // l'invariant se lise ici, pas pour reparer un oubli.
+                    run.cachesPending = true;
+                    return;
+                }
                 uint32 const entry = fields[12].Get<uint32>();
                 if (!IsCache(entry) || fields[2].Get<uint32>() != 1)
                 {
@@ -1228,6 +1282,7 @@ namespace
                 sScriptMgr->OnPlayerStoreNewItem(player, stored, 1);
                 player->SendNewItem(stored, 1, true, false);
                 run.cacheSpaceWarning = false;
+                ++delivered;
             } while (result->NextRow());
             run.cachesPending = found;
         }
@@ -1952,6 +2007,22 @@ namespace
         std::atomic<bool> enabled{false};
         std::atomic<uint64> nextToken{0};
         std::mutex queueMutex;
+        // SIGNALEMENT CONNU, NON CORRIGE — verrou unique pour tous les joueurs,
+        // repris a chaque tick par UpdatePlayer, donc concurremment par tous les
+        // fils de MapUpdate. Il est encore tenu pendant du code de jeu :
+        // Player::TeleportTo (Login, UpdatePlayer, Transfer, Exit),
+        // Map::SummonCreature et SendDirectMessage (Finish, appele sous le
+        // verrou d'UpdateInstance ; Complete de meme depuis Death).
+        // Tant qu'il reste ainsi, chaque carte paie le temps de la carte
+        // voisine, et tout appel de jeu ajoute pris sous ce verrou est un ordre
+        // de prise supplementaire a verifier. Login n'y fait plus ses quatre
+        // lectures SQL (voir le commentaire de Login). Le reste demande de
+        // decouper `runs` par joueur (shared_mutex + copie par valeur, patron du
+        // projet) et de sortir les appels de jeu de la section critique : c'est
+        // une refonte, pas un correctif ponctuel, et elle n'a pas ete faite ici.
+        // A noter dans le meme dossier : le rappel AfterComplete de Complete
+        // touche `runs` et `readyMails` depuis un fil de base SANS prendre ce
+        // verrou — defaut preexistant, non introduit par cette passe.
         std::recursive_mutex mutex;
         std::map<uint32, std::deque<Request>> requests;
         std::map<ObjectGuid, Run> runs;
@@ -1985,7 +2056,16 @@ namespace
     class ManastormPlayers final : public PlayerScript
     {
     public:
-        ManastormPlayers() : PlayerScript("AscensionManastormPlayers") { }
+        // Masque explicite, une entree par redefinition ci-dessous : sans lui,
+        // PlayerScript::PlayerScript inscrit le script dans la totalite des
+        // listes de crochets joueur. PLAYERHOOK_ON_MAP_CHANGED est declare pour
+        // l'intention ; ce crochet part par ExecuteScript<PlayerScript>
+        // (AllMapScript.cpp) et ignore le masque.
+        ManastormPlayers() : PlayerScript("AscensionManastormPlayers",
+            {PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LOGOUT, PLAYERHOOK_ON_DELETE_FROM_DB,
+             PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_GIVE_EXP,
+             PLAYERHOOK_PASSED_QUEST_KILLED_MONSTER_CREDIT,
+             PLAYERHOOK_ON_BEFORE_CRITERIA_PROGRESS}) { }
         void OnPlayerLogin(Player* player) override { ManastormService::Get().Login(player); }
         void OnPlayerLogout(Player* player) override { ManastormService::Get().Logout(player); }
         void OnPlayerDeleteFromDB(CharacterDatabaseTransaction transaction, uint32 guid) override

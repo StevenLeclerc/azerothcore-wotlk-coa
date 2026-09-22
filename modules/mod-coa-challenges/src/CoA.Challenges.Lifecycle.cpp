@@ -21,13 +21,36 @@ namespace CoAChallenges
     // Defined in CoA.Challenges.Fatigue.cpp.
     void ClearFatigueForChallenge(Player* player, uint32 challengeID);
 
+    // Defined further down this file, used by ResetCoaCharacterState above it.
+    void ClearConditionFlagCache(uint32 guid);
+
+    // Marker prefix put on ConditionState::detail when a condition is broken
+    // because its DEFINITION could not be read, not because the character did
+    // anything. The `broken` flag has two readers that want opposite things:
+    // ValidateChallenge reads it as "refuse to start", which is the safe
+    // reading of a row we cannot parse; IsPristine reads it as "the character
+    // is no longer pristine", which is the dangerous one -- it turns a free
+    // cancel into a definitive coa_challenge_failure row, and with
+    // BlockAllAfterFailure (default true) that condemns every future
+    // activation of the character. A mistyped
+    // coa_challenge_definition.conditions must block the start WITHOUT
+    // condemning anyone, so IsPristine skips the states carrying this prefix.
+    static constexpr char const CONDITION_DEF_ERROR_PREFIX[] = "malformed definition: ";
+
+    static bool IsDefinitionError(ConditionState const& s)
+    {
+        return s.detail.rfind(CONDITION_DEF_ERROR_PREFIX, 0) == 0;
+    }
+
     // Activation conditions that describe a PRISTINE character. They gate the
     // ENTRY into a challenge, not each of its tiers: a multi-level challenge
     // with no tracked objective only advances through CompleteAtLevelCap, so a
     // character asking for tier N>1 has necessarily broken all of them. Tier
     // N>1 is gated by HasCompletionLevel(N-1) instead. Anything else
     // (GROUP_SIZE, HAVE_FREE_INVENTORY_SLOTS, and an unknown type, which fails
-    // closed) keeps applying to every tier.
+    // closed) keeps applying to every tier. Orthogonal to that: a state broken
+    // only because the definition is unreadable is filtered by
+    // IsDefinitionError, and only in IsPristine -- see its comment above.
     static bool IsEntryOnlyCondition(std::string const& label)
     {
         return label == "LEVEL_UP"
@@ -471,6 +494,10 @@ namespace CoAChallenges
         CharacterDatabase.DirectExecute("DELETE FROM coa_challenge_completion WHERE guid = {}", guid);
         CharacterDatabase.DirectExecute("DELETE FROM coa_challenge_failure WHERE guid = {}", guid);
         CharacterDatabase.DirectExecute("DELETE FROM coa_character_condition WHERE guid = {}", guid);
+        // The rows are gone, so the "already written" set must go with them:
+        // otherwise the next loot would skip the INSERT and LOOT_INTERACTION
+        // would read a clean character forever.
+        ClearConditionFlagCache(guid);
         CharacterDatabase.DirectExecute("DELETE FROM coa_character_gamemode WHERE guid = {}", guid);
         CharacterDatabase.DirectExecute("DELETE FROM coa_character_gamemode_lives WHERE guid = {}", guid);
         CharacterDatabase.DirectExecute("DELETE FROM coa_character_survival WHERE guid = {}", guid);
@@ -602,6 +629,31 @@ namespace CoAChallenges
         {
             ChatHandler(player->GetSession()).PSendSysMessage("Challenge {} was not found.", challengeID);
             return 1;
+        }
+        {
+            // The client sends the tier it wants; nothing else looks at it, so
+            // an out-of-range value used to be written straight into
+            // coa_character_challenge.level. Tier 4000000000 on a one-tier
+            // challenge then made GetChallengeRewards find nothing (no reward
+            // at completion) and SendDeathUpdate, which packs the level in 16
+            // bits, display garbage. HandleSaveTrial already bounds its own
+            // level the same way; this is the gate the three activation paths
+            // (CMSG 0x592, trial activation, group sync answer) share.
+            // levelCount is 1, 25 or 100 in every shipped definition; the
+            // clamp only guards a future row left at 0, which must not make the
+            // challenge unstartable.
+            uint32 maxLevel = ChallengeLevelCount(challengeID);
+            if (maxLevel == 0)
+                maxLevel = 1;
+            if (level < 1 || level > maxLevel)
+            {
+                ChatHandler(player->GetSession()).PSendSysMessage(
+                    "Level {} does not exist for {} (1..{}).", level, ChallengeName(challengeID), maxLevel);
+                LOG_WARN("module.coa_challenges",
+                    "Activation of challenge {} refused for {}: level {} out of range (1..{})",
+                    challengeID, player->GetName(), level, maxLevel);
+                return 1;
+            }
         }
         if (sConfigMgr->GetOption<bool>("CoAChallenges.EnforceNoRewards", false)
             && NoRewards(challengeID))                           // 2 NO_REWARDS
@@ -987,9 +1039,39 @@ namespace CoAChallenges
     // "broken" (blocking activation) when the player violates it. Loot/level
     // flags persist per character; group/inventory are checked live.
 
+    // Condition flags are write-once per character ("LOOTED" is set the first
+    // time a loot window is opened and only `.coa reset` clears it), but
+    // SetConditionFlag is called from OnPlayerBeforeSendLoot: every loot of
+    // every character. On a realm carrying ~700 bots that loot continuously
+    // this queued thousands of INSERT IGNORE a minute into CharacterDatabase,
+    // all no-ops after the first one, and that noise sits in front of the
+    // writes that matter (character saves, reward transactions).
+    //
+    // This set remembers what has already been written for a connected
+    // character so the repeats never reach the queue. It is a WRITE-side cache
+    // only: HasConditionFlag still reads the table, so no gameplay gate ever
+    // depends on it being fresh. Cleared at logout (CoA.Challenges.Scripts.cpp,
+    // OnPlayerLogout) and by ResetCoaCharacterState, the two places the rows
+    // themselves go away.
+    std::mutex ConditionFlagMutex;
+    std::unordered_map<uint32, std::unordered_set<std::string>> WrittenConditionFlags;
+
+    void ClearConditionFlagCache(uint32 guid)
+    {
+        std::lock_guard<std::mutex> lock(ConditionFlagMutex);
+        WrittenConditionFlags.erase(guid);
+    }
+
     void SetConditionFlag(uint32 guid, char const* flag)
     {
         std::string eflag = flag ? flag : "";
+        {
+            // insert() tells us in one step whether this character already had
+            // the flag written since login; if so there is nothing to do.
+            std::lock_guard<std::mutex> lock(ConditionFlagMutex);
+            if (!WrittenConditionFlags[guid].insert(eflag).second)
+                return;
+        }
         CharacterDatabase.EscapeString(eflag);
         CharacterDatabase.Execute(
             "INSERT IGNORE INTO coa_character_condition (guid, flag) VALUES ({}, '{}')",
@@ -1020,6 +1102,17 @@ namespace CoAChallenges
         return free;
     }
 
+    // coa_challenge_definition.conditions is hand-editable, so a stray space
+    // around a token or a value must not change how the entry reads.
+    static std::string TrimSpaces(std::string const& text)
+    {
+        size_t const b = text.find_first_not_of(" \t\r\n");
+        if (b == std::string::npos)
+            return std::string();
+        size_t const e = text.find_last_not_of(" \t\r\n");
+        return text.substr(b, e - b + 1);
+    }
+
     std::vector<ConditionState> EvaluateConditions(Player* player, uint32 challengeID)
     {
         std::vector<ConditionState> out;
@@ -1028,26 +1121,55 @@ namespace CoAChallenges
             return out;
 
         uint32 guid = player->GetGUID().GetCounter();
-        size_t start = 0;
-        while (start <= conds.size())
+        // CoAParse::Split drops empty tokens, so a hand-edited definition that
+        // ends with ';' no longer produces a nameless entry. That empty token
+        // used to reach the "unknown type" branch below, which fails closed:
+        // one stray semicolon made the challenge permanently unstartable for
+        // the whole realm, with only a LOG_WARN naming type '' to say so.
+        for (std::string const& entry : CoAParse::Split(conds, ';'))
         {
-            size_t end = conds.find(';', start);
-            if (end == std::string::npos)
-                end = conds.size();
-            std::string entry = conds.substr(start, end - start);
             size_t colon = entry.find(':');
-            std::string type = (colon == std::string::npos) ? entry : entry.substr(0, colon);
+            std::string type = TrimSpaces((colon == std::string::npos) ? entry : entry.substr(0, colon));
+            if (type.empty())
+                continue;   // whitespace-only token, same story as the empty one
             uint32 v1 = 0;
+            bool valueReadable = true;
             if (colon != std::string::npos)
             {
                 std::string v = entry.substr(colon + 1);
                 size_t slash = v.find('/');
                 if (slash != std::string::npos)
                     v = v.substr(0, slash);
-                try { v1 = (uint32)std::stoul(v); } catch (...) { v1 = 0; }
+                v = TrimSpaces(v);
+                // An unreadable value is NOT zero. std::stoul used to throw on
+                // "5x" or " 5" and the catch put 0 there, which is a different
+                // rule: GROUP_SIZE 0 means "must be solo", so a typo silently
+                // turned "party of 5 required" into "party forbidden", with no
+                // log line at all. CoAParse::ToU32 is strict (no sign, no
+                // partial parse, no overflow) and returns 0 on refusal, so a
+                // zero that did not come from an all-zero string is a refusal.
+                v1 = CoAParse::ToU32(v);
+                if (v.empty() || (v1 == 0 && v.find_first_not_of('0') != std::string::npos))
+                    valueReadable = false;
             }
 
             ConditionState s;
+            if (!valueReadable)
+            {
+                // Fail closed, like the unknown-type branch: refusing to start
+                // is the safe reading of a definition we could not parse, and
+                // inventing a value is what this defect was about. The error
+                // line names the challenge and the token so the row can be
+                // fixed, and the player is told which condition blocked them.
+                s.label = type;
+                s.broken = true;
+                s.detail = CONDITION_DEF_ERROR_PREFIX + std::string("unreadable value in '") + entry + "'";
+                LOG_ERROR("module.coa_challenges",
+                    "Challenge {}: condition '{}' has an unreadable value -> blocked",
+                    challengeID, entry);
+                out.push_back(s);
+                continue;
+            }
             if (type == "CHALLENGE_CONDITIONS_TYPE_GROUP_SIZE")
             {
                 uint32 g = player->GetGroup() ? player->GetGroup()->GetMembersCount() : 1;
@@ -1103,16 +1225,13 @@ namespace CoAChallenges
                 // silently allow activation.
                 s.label = type;
                 s.broken = true;
-                s.detail = "unhandled condition type";
+                s.detail = CONDITION_DEF_ERROR_PREFIX + std::string("unhandled condition type");
                 LOG_WARN("module.coa_challenges",
                     "Unhandled activation condition type '{}' (challenge {}) -> blocked",
                     type, challengeID);
             }
 
             out.push_back(s);
-            if (end == conds.size())
-                break;
-            start = end + 1;
         }
         return out;
     }
@@ -1160,6 +1279,13 @@ namespace CoAChallenges
         for (ConditionState const& s : EvaluateConditions(player, challengeID))
         {
             if (!s.broken)
+                continue;
+            // A definition we could not read says nothing about the character.
+            // Counting it as "not pristine" here is what would send a cancel
+            // on a lives >= 1 challenge straight into FailChallenge. The start
+            // stays blocked (ValidateChallenge keeps its refusal) and the
+            // error is already logged by EvaluateConditions.
+            if (IsDefinitionError(s))
                 continue;
             if (higherTier && IsEntryOnlyCondition(s.label))
                 continue;

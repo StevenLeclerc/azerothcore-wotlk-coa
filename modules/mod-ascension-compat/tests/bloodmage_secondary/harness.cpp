@@ -64,6 +64,10 @@ struct Player : Unit
     void RemoveAurasDueToSpell(uint32 id){auras.erase(id);}
     void RemoveSpellCooldown(uint32 id,bool update){assert(update);removedCooldowns.insert(id);}
     void ModifyPower(uint32 type,int32 amount){assert(type==1);rage+=amount;}
+    // Unit::GetCreatePowers (src/server/game/Entities/Unit/Unit.cpp:13091) :
+    // la rage plafonne a 1000 pour tout le monde. Black Heart en rend le cinquieme.
+    uint32 maxRage=1000;
+    uint32 GetMaxPower(uint32 type)const{assert(type==POWER_RAGE);return maxRage;}
     void CastCustomSpell(uint32 id,uint32 key,int32 amount,Unit* target,bool triggered)
     {assert(key==0 && triggered);casts.push_back({id,target,amount});if(killOnCopy)target->alive=false;}
     void CastSpell(Unit* target,uint32 id,bool triggered)

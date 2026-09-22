@@ -159,6 +159,31 @@ namespace CoAChallenges
         if (!player)
             return;
         uint32 guid = player->GetGUID().GetCounter();
+
+        // Survivalist runs the hunger/thirst system globally, independent of
+        // whether a base challenge row exists for the bit. Driven by the masks
+        // and NOT by GameModeBaseSnapshot: the seed has no definition carrying
+        // requiredGameMode = 0x4, so the map never holds that bit and a test
+        // inside the loop below would never run (hunger would never start, and
+        // turning the mode off would never stop it).
+        {
+            bool wasSurv = (oldMask & GAMEMODE_SURVIVALIST) != 0;
+            bool nowSurv = (newMask & GAMEMODE_SURVIVALIST) != 0;
+            if (nowSurv && !wasSurv)
+                TrackSurvivalist(player);
+            else if (wasSurv && !nowSurv)
+            {
+                RemoveHungerChallenge(player, SURVIVALIST_HUNGER_ID);
+                // RemoveHungerChallenge only clears the cache. The food/drink
+                // meter auras are shared by every hunger challenge and would
+                // stay on screen, frozen on their last value, until the next
+                // relog. They may only go when NO hunger challenge is left
+                // (HungerAccum can still carry other challenge ids).
+                if (!HasTrackedHunger(guid))
+                    RemoveMeterAuras(player);
+            }
+        }
+
         for (auto const& [bit, base] : GameModeBaseSnapshot())
         {
             bool was = (oldMask & bit) != 0;
@@ -175,18 +200,6 @@ namespace CoAChallenges
             {
                 RemoveChallengeSpell(player, base);
                 UntrackModeLives(player, bit);
-            }
-
-            // Survivalist runs the hunger/thirst system globally, independent of
-            // whether the base challenge row is active. Handled here (not only in
-            // ApplyGameModeToggle) so a trial-driven recompute that clears the bit
-            // also stops hunger instead of leaving it running forever.
-            if (bit == GAMEMODE_SURVIVALIST)
-            {
-                if (now && !was)
-                    TrackSurvivalist(player);
-                else if (was && !now)
-                    RemoveHungerChallenge(player, SURVIVALIST_HUNGER_ID);
             }
         }
     }

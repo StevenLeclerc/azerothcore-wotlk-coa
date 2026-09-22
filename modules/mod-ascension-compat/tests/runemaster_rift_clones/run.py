@@ -3,6 +3,10 @@ from pathlib import Path
 import runpy
 import struct
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 
@@ -13,7 +17,11 @@ def main():
     code = '#include <cmath>\n#include <memory>\n#include <chrono>\n' + code
     code = code.replace('struct Unit;', '''
 constexpr uint32 TEMPSUMMON_TIMED_DESPAWN=1, MOVE_RUN=0, REACT_PASSIVE=0, FORCED_MOVEMENT_RUN=1;
+// <cmath>, inclus juste au-dessus, definit deja M_PI comme MACRO sur cette
+// plateforme : sans garde, la ligne devient `constexpr double 3.14...=...`.
+#ifndef M_PI
 constexpr double M_PI=3.14159265358979323846;
+#endif
 using Milliseconds=std::chrono::milliseconds;
 struct Creature; struct TempSummon;
 struct SpellRadiusEntry { float RadiusMin=5.0f; };
@@ -133,7 +141,7 @@ int main()
     assert(info.Effects[0].RadiusEntry->RadiusMin==5.0f);
 }
 ''')
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     ids = {707464, 707465, 707466}
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20+count*936]) if r[0] in ids}
@@ -141,7 +149,7 @@ int main()
     assert rows[707465][95] == 23 and rows[707465][116] == 707466 and rows[707465][98] == 999
     assert rows[707466][86] == 22 and rows[707466][89] == 15  # Native pulse centered on clone, no explicit unit.
     assert rows[707466][92] == 14  # Legacy 8 yards is normalized to the current talent's 5 yards.
-    raw = (ROOT.parent / 'runtime/server/data/dbc/SpellRadius.dbc').read_bytes()
+    raw = (dbc_dir() / 'SpellRadius.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     radius = {r[0]: r[1:] for r in struct.iter_unpack('<I3f', raw[20:20+count*16])}
     assert radius[8] == (5.0, 0.0, 5.0)

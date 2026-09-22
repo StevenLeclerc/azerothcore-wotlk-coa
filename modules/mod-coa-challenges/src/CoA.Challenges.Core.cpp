@@ -234,6 +234,19 @@ namespace CoAChallenges
     // Set while a group sync answer (CMSG 0x59C) is being applied, so the
     // re-activation/deactivation does not bounce a fresh 0x59B back to the
     // group (would ping-pong between members).
+    //
+    // KNOWN HAZARD -- this is ONE process-wide flag, and the opcodes that arm
+    // it run on several MapUpdate threads. Two overlapping sections must not
+    // use a bare `= true` / `= false` pair: the inner one clearing the flag on
+    // exit re-opens the broadcast for the outer one, which then lets a burst
+    // of SMSG 0x59B out to the group. Every writer must save and restore
+    // instead:
+    //     bool const prev = g_suppressSyncBroadcast.exchange(true);
+    //     ... ; g_suppressSyncBroadcast.store(prev);
+    // History.cpp (226/234, 273/280) and Lifecycle.cpp (218/220) follow that
+    // form. CoA.Challenges.Trials.cpp:785/788 and 828/866 still hold four bare
+    // assignments, and the 828-866 window spans a whole deactivation loop --
+    // still open, and owned by another file.
     std::atomic<bool> g_suppressSyncBroadcast{ false };
 
     // Record the death cause for a player. Mechanic deaths call this right

@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionWitchHunterCompletion.h"
+#include "AscensionContract.h"
 #include "AscensionWitchHunterCoefficients.h"
 #include "CellImpl.h"
 #include "DBCStores.h"
@@ -187,7 +188,9 @@ void ApplyContracts(SpellInfo* info)
         info->CasterAuraSpell = 805771;
     }
     if (id == 805771)
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        // A null DurationEntry is read by GetDuration() as 0 ms (SpellInfo.cpp:2916): the aura
+        // would land already expired without a word. SetDuration keeps the client row and says so.
+        AscensionContract::SetDuration(info, 1, "WitchHunter");
     if (id == 680492 || id == 807733)
     {
         SpellEffectInfo& absorb = info->Effects[id == 680492 ? EFFECT_0 : EFFECT_1];

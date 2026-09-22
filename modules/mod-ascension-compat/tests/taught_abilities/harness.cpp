@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <set>
 #include <unordered_map>
 #include <vector>
@@ -181,6 +182,9 @@ struct AscensionClassService
     bool AffectsProficiencies(uint32) const { return false; }
     void SynchronizeProficiencies(Player*) { }
     static void ReconcileRunemasterFists(Player*, uint32) { }
+    // Miroir du membre reel : AscensionCompat.cpp:2195 declare
+    // `mutable std::mutex _stateLock;`, pris par les methodes injectees ci-dessous.
+    mutable std::mutex _stateLock;
     // ACTUAL_SERVICE
 };
 namespace AscensionCompatConfig

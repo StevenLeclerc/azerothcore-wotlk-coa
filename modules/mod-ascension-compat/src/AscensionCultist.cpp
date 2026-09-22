@@ -103,16 +103,31 @@ bool Chance(Player* player, uint32 id, uint32 cooldown)
         State(player).timers.ScheduleEvent(id, Milliseconds(cooldown));
     return true;
 }
+// Les deux balayages ci-dessous partent a chaque proc, plusieurs fois par coup porte, sur
+// l'integralite de GetSpellMap() -- 715 sorts en moyenne sur le royaume vivant, jusqu'a 1670.
+// Deux recherches par entree y etaient inutiles et sont supprimees ici, a semantique
+// rigoureusement identique :
+//  * player->HasSpell(pair.first) refaisait un find() dans la carte qu'on est en train de
+//    parcourir. Player::HasSpell (Player.cpp:4133-4137) teste State != PLAYERSPELL_REMOVED
+//    ET IsInSpec(GetActiveSpec()) : les DEUX conditions sont reprises telles quelles. Tester
+//    le seul State, comme le fait AscensionWitchHunterEvents.cpp:300, ferait entrer les rangs
+//    de la specialisation inactive dans Reduce et dans Highest -- c'est un ecart de
+//    comportement de jeu, pas une optimisation, et il n'est pas fait ici ;
+//  * Named() appelle GetFirstSpellInChain(root) a chaque tour alors que root est constant.
+// Reste le cout de fond -- un balayage lineaire par appel -- qui demande l'index par joueur
+// decrit dans la revue, hors de ce lot.
 uint32 Highest(Player* player, uint32 root)
 {
     uint32 result = root;
     // GetSpellInfo(root) peut rendre nullptr : root est un id en dur. Le niveau du
     // meilleur candidat est garde de cote, ce qui evite aussi trois lectures par tour.
     uint32 best = AscensionSpellSafe::SpellLevel(root, 0);
+    uint32 const chain = sSpellMgr->GetFirstSpellInChain(root);
+    uint8 const spec = player->GetActiveSpec();
     for (auto const& pair : player->GetSpellMap())
-        if (player->HasSpell(pair.first))
+        if (pair.second && pair.second->State != PLAYERSPELL_REMOVED && pair.second->IsInSpec(spec))
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(pair.first);
-                Named(info, root) && info->SpellLevel >= best)
+                info && sSpellMgr->GetFirstSpellInChain(info->Id) == chain && info->SpellLevel >= best)
             {
                 result = pair.first;
                 best = info->SpellLevel;
@@ -121,14 +136,18 @@ uint32 Highest(Player* player, uint32 root)
 }
 void Reduce(Player* player, uint32 root, int32 milliseconds)
 {
+    uint32 const chain = sSpellMgr->GetFirstSpellInChain(root);
+    uint8 const spec = player->GetActiveSpec();
     for (auto const& pair : player->GetSpellMap())
-        if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
-        {
-            if (milliseconds == INT32_MAX)
-                player->RemoveSpellCooldown(pair.first, true);
-            else
-                player->ModifySpellCooldown(pair.first, -milliseconds);
-        }
+        if (pair.second && pair.second->State != PLAYERSPELL_REMOVED && pair.second->IsInSpec(spec))
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(pair.first);
+                info && sSpellMgr->GetFirstSpellInChain(info->Id) == chain)
+            {
+                if (milliseconds == INT32_MAX)
+                    player->RemoveSpellCooldown(pair.first, true);
+                else
+                    player->ModifySpellCooldown(pair.first, -milliseconds);
+            }
 }
 void RestoreBlade(Player* player)
 {
@@ -256,6 +275,7 @@ void Refresh(Player* player)
     else
         SetHelper(player, 807883, false);
     SetHelper(player, 500727, player->IsAlive() && player->HasSpell(500706));
+    uint8 const spec = player->GetActiveSpec();
     for (auto [root, replacement, active] : {std::tuple(804670u, 804711u, player->HasAura(706182)),
              std::tuple(800416u, 504719u, player->HasAura(255070)),
              std::tuple(500110u, 680576u, player->HasAura(681794)),
@@ -264,9 +284,16 @@ void Refresh(Player* player)
         active = active && player->IsAlive() && player->HasSpell(Highest(player, root));
         if (active && !player->HasSpell(replacement))
             player->learnSpell(replacement, true);
+        // Troisieme copie du meme balayage dans ce fichier, et la plus chere : elle repart
+        // pour chacune des quatre lignes ci-dessus. Meme traitement qu'en 119-152, meme
+        // semantique -- HasSpell(pair.first) refaisait un find() dans la carte parcourue et
+        // Named() relisait GetFirstSpellInChain(root) a chaque tour.
+        uint32 const chain = sSpellMgr->GetFirstSpellInChain(root);
         for (auto const& pair : player->GetSpellMap())
-            if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
-                player->SetTemporarySpellReplacement(pair.first, active ? replacement : 0);
+            if (pair.second && pair.second->State != PLAYERSPELL_REMOVED && pair.second->IsInSpec(spec))
+                if (SpellInfo const* known = sSpellMgr->GetSpellInfo(pair.first);
+                    known && sSpellMgr->GetFirstSpellInChain(known->Id) == chain)
+                    player->SetTemporarySpellReplacement(pair.first, active ? replacement : 0);
         if (!active)
             player->removeSpell(replacement, SPEC_MASK_ALL, true);
     }

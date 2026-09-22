@@ -712,13 +712,22 @@ public:
 
     void OnPlayerUpdate(Player* player, uint32 /*diff*/) override
     {
-        if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskIsFFA", true))
-            return;
+        // Ordre voulu : les filtres qui ne coutent rien d'abord, la relecture de
+        // configuration en dernier. ConfigMgr::GetValueDefault construit a chaque
+        // appel le nom de variable d'environnement ("AC_" + majuscules, donc deux
+        // allocations) avant de consulter son cache ; ce crochet tourne pour chaque
+        // joueur et chaque bot a chaque tick. Le predicat sur l'aura et l'etat FFA
+        // rend la main pour la quasi-totalite d'entre eux, et l'option n'est plus
+        // relue qu'aux transitions. Aucun de ces tests n'a d'effet de bord, l'ordre
+        // ne change donc rien au resultat.
         if (!player || !player->IsInWorld() || player->IsGameMaster())
             return;
 
         bool highRisk = player->HasAura(SPELL_HIGH_RISK);
         if (highRisk == player->pvpInfo.IsInFFAPvPArea)
+            return;
+
+        if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskIsFFA", true))
             return;
 
         // Setting IsInFFAPvPArea is a deliberate abuse of that field, and it is

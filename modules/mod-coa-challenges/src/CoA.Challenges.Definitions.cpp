@@ -91,6 +91,10 @@ namespace CoAChallenges
     {
         EnsureDefinitionTables();
 
+        // How many orphan rows get named individually before only the totals
+        // are reported.
+        uint32 const ORPHAN_LOG_CAP = 10;
+
         std::unordered_map<uint32, ChallengeDef> fresh;
         if (QueryResult r = WorldDatabase.Query(
                 "SELECT id, name, icon, levelCount, isTrial, isPrestige, exclusiveGroup,"
@@ -123,19 +127,34 @@ namespace CoAChallenges
             } while (r->NextRow());
         }
 
+        // Rows whose challengeId matches no definition are dropped. Counted, so
+        // a content SQL inserted with a shifted id (or before its definition)
+        // shows up in the summary line below instead of vanishing.
+        uint32 spellRows = 0, spellOrphans = 0;
         if (QueryResult r = WorldDatabase.Query(
                 "SELECT challengeId, level, pve, pvp FROM coa_challenge_spell"))
         {
             do
             {
                 Field* f = r->Fetch();
+                ++spellRows;
                 auto it = fresh.find(f[0].Get<uint32>());
                 if (it == fresh.end())
+                {
+                    // Capped: an empty definition table would otherwise make
+                    // every row of this one shout. The count below is the
+                    // authoritative figure.
+                    if (++spellOrphans <= ORPHAN_LOG_CAP)
+                        LOG_WARN("module.coa_challenges",
+                            "coa_challenge_spell: row challengeId={} level={} matches no definition, dropped",
+                            f[0].Get<uint32>(), f[1].Get<uint32>());
                     continue;
+                }
                 it->second.spells[f[1].Get<uint32>()] = f[2].Get<std::string>();
             } while (r->NextRow());
         }
 
+        uint32 rewardRows = 0, rewardOrphans = 0;
         if (QueryResult r = WorldDatabase.Query(
                 "SELECT challengeId, level, itemId, amount, achievement, isSpecial, isFirst"
                 " FROM coa_challenge_reward"))
@@ -143,9 +162,17 @@ namespace CoAChallenges
             do
             {
                 Field* f = r->Fetch();
+                ++rewardRows;
                 auto it = fresh.find(f[0].Get<uint32>());
                 if (it == fresh.end())
+                {
+                    if (++rewardOrphans <= ORPHAN_LOG_CAP)
+                        LOG_WARN("module.coa_challenges",
+                            "coa_challenge_reward: row challengeId={} level={} itemId={} achievement={} "
+                            "matches no definition, dropped",
+                            f[0].Get<uint32>(), f[1].Get<uint32>(), f[2].Get<uint32>(), f[4].Get<uint32>());
                     continue;
+                }
                 RewardDef reward;
                 reward.itemId = f[2].Get<uint32>();
                 reward.amount = f[3].Get<uint32>() ? f[3].Get<uint32>() : 1;
@@ -168,8 +195,10 @@ namespace CoAChallenges
         }
         BuildGameModeBaseMap();
 
-        LOG_INFO("module.coa_challenges", "Challenge definitions loaded from world DB: {} row(s)",
-            DefCount());
+        LOG_INFO("module.coa_challenges",
+            "Challenge definitions loaded from world DB: {} definition(s), "
+            "{} spell row(s) ({} orphan), {} reward row(s) ({} orphan)",
+            DefCount(), spellRows, spellOrphans, rewardRows, rewardOrphans);
         if (DefCount() == 0)
         {
             LOG_ERROR("module.coa_challenges",

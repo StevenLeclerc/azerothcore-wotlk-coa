@@ -7,6 +7,10 @@ import runpy
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 method = runpy.run_path(str(HERE.parent / "client_compat/run.py"))["method"]
@@ -21,7 +25,7 @@ def main():
               if args.source_ref else ROOT.joinpath(path).read_text(encoding="utf-8"))
     shared = (ROOT / "src/server/shared/SharedDefines.h").read_text(encoding="utf-8")
     code = "#include <algorithm>\n#include <array>\n#include <cassert>\n#include <cstdint>\n"
-    code += "#include <map>\n#include <unordered_set>\n"
+    code += "#include <map>\n#include <mutex>\n#include <unordered_set>\n"
     code += "using uint8=std::uint8_t;using uint16=std::uint16_t;using uint32=std::uint32_t;\n"
     code += method(shared, "enum SkillType") + ";\n"
     for name in ("AscensionCustomClassData.h", "AscensionLiveBaselineData.h"):
@@ -57,6 +61,9 @@ auto sSpellMgr=&manager;
 struct Service
 {
     std::unordered_set<uint32> _proficiencySynchronizations;
+    // Miroir de AscensionCompat.cpp:2195 — le mutex unique que les fils de MapUpdate
+    // partagent. La tranche extraite le verrouille ; sans lui elle ne compile pas.
+    mutable std::mutex _stateLock;
 '''
     code += method(source, "void SynchronizeProficiencies(") + "};\n"
     code += r'''
@@ -89,13 +96,11 @@ int main()
 '''
     # The tested callback serves both repair/login and the actual level-change hook.
     assert "SynchronizeProficiencies(player);" in method(source, "void OnPlayerLevelChanged(")
-    compiler = str(Path(os.environ["VCToolsInstallDir"]) / "bin/Hostx64/x64/cl.exe")
     with tempfile.TemporaryDirectory(prefix="coa-combat-skills-") as directory:
         out = Path(directory)
         cpp, exe = out / "skills.cpp", out / "skills.exe"
         cpp.write_text(code, encoding="utf-8")
-        subprocess.run([compiler, "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/utf-8",
-                        str(cpp), "/Fe" + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print("PASS: all CoA classes, login/level changes, Defense bonuses, professions and legacy classes")
 

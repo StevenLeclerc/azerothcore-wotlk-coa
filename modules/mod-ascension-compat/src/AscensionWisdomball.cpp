@@ -466,7 +466,16 @@ public:
 class wisdomball_player_script : public PlayerScript
 {
 public:
-    wisdomball_player_script() : PlayerScript("wisdomball_player_script") { }
+    // Masque explicite : sans lui, PlayerScript::PlayerScript inscrit le script
+    // dans les listes des PLAYERHOOK_END crochets joueur ("If empty - enable all
+    // available hooks", PlayerScript.cpp), et chaque evenement joueur du serveur
+    // paie un appel virtuel vide de plus. Les quatre entrees sont les quatre
+    // redefinitions de cette classe. PLAYERHOOK_ON_MAP_CHANGED y figure pour dire
+    // l'intention : ce crochet-la part par ExecuteScript<PlayerScript>
+    // (AllMapScript.cpp) et parcourt tous les scripts, masque ou non.
+    wisdomball_player_script() : PlayerScript("wisdomball_player_script",
+        {PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_LOGOUT,
+         PLAYERHOOK_ON_PLAYER_COMPLETE_QUEST}) { }
 
     /// The mark over the ball is pushed here because the core only marks creatures that own
     /// quest relations. It is only recomputed twice a second, and only for characters that

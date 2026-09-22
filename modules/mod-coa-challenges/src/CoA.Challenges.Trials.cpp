@@ -84,6 +84,31 @@ namespace CoAChallenges
         return "Unknown";
     }
 
+    // The trialID is an opaque client-chosen string that ends up inside quoted
+    // SQL literals: it must be escaped at EVERY site, not at most of them. This
+    // returns the escaped copy so a call site cannot forget the two-step dance.
+    static std::string Esc(std::string s)
+    {
+        CharacterDatabase.EscapeString(s);
+        return s;
+    }
+
+    // Second line of defence, applied where the id ENTERS the server (save):
+    // the ids the server generates are "trial-<guid>-<unixtime>", and the client
+    // only ever echoes back one it was given. Anything else is a forged packet.
+    // Checked at ingress so the stored value is safe for the sites this file
+    // does not own either (the active-trial id is read back from the DB).
+    static bool IsValidTrialId(std::string const& id)
+    {
+        if (id.empty() || id.size() > 64)
+            return false;
+        for (char c : id)
+            if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.'))
+                return false;
+        return true;
+    }
+
     // Trials are browsable by any character, but a trial's bundled-challenge
     // rows live under the CREATOR's guid -> resolve the owner from the trialID.
     uint32 TrialOwnerGuid(std::string const& trialID)
@@ -111,7 +136,7 @@ namespace CoAChallenges
             return false;
         if (!CharacterDatabase.Query(
                 "SELECT 1 FROM coa_custom_trial_entry WHERE guid = {} AND trialId = '{}' AND challengeId = {} LIMIT 1",
-                ownerGuid, trialID, challengeID))
+                ownerGuid, Esc(trialID), challengeID))
             return false;
         std::string eTrialId = trialID;
         CharacterDatabase.EscapeString(eTrialId);
@@ -132,7 +157,7 @@ namespace CoAChallenges
         down = 0;
         if (QueryResult r = CharacterDatabase.Query(
                 "SELECT upvote, downvote FROM coa_custom_trial_vote WHERE guid = {} AND trialId = '{}'",
-                selfGuid, trialID))
+                selfGuid, Esc(trialID)))
         {
             Field* f = r->Fetch();
             up = f[0].Get<uint8>();
@@ -339,7 +364,7 @@ namespace CoAChallenges
         std::vector<std::pair<uint32, uint32>> bundled; // (challengeId, level)
         if (QueryResult r = CharacterDatabase.Query(
                 "SELECT challengeId, level FROM coa_custom_trial_entry WHERE guid = {} AND trialId = '{}'",
-                ownerGuid, trialID))
+                ownerGuid, Esc(trialID)))
         {
             do
             {
@@ -369,7 +394,7 @@ namespace CoAChallenges
         uint32 startTime = 0;
         if (QueryResult r = CharacterDatabase.Query(
                 "SELECT startTime FROM coa_custom_trial_active WHERE guid = {} AND trialId = '{}'",
-                guid, trialID))
+                guid, Esc(trialID)))
             startTime = r->Fetch()[0].Get<uint32>();
         uint32 completeTime = uint32(::time(nullptr));
 
@@ -506,6 +531,18 @@ namespace CoAChallenges
         if (off + 4 > packet.size())
         {
             SendTrialResult(player, SMSG_COA_TRIAL_SAVE_RESULT, "", "SAVE_CHALLENGE_NO_TITLE");
+            return;
+        }
+        // An empty id means "new trial" (one is generated below); anything else
+        // must look like an id this server handed out. Refused here so no forged
+        // id can reach the DB, and from there the SQL of the whole module.
+        if (!trialID.empty() && !IsValidTrialId(trialID))
+        {
+            LOG_INFO("module.coa_challenges",
+                "SaveTrial by {} rejected: malformed trial id ({} byte(s))",
+                player->GetName(), trialID.size());
+            SendTrialResult(player, SMSG_COA_TRIAL_SAVE_RESULT, "",
+                "SAVE_CHALLENGE_CANNOT_EDIT_CHALLENGES");
             return;
         }
         uint32 count = packet.read<uint32>(off);
@@ -691,7 +728,7 @@ namespace CoAChallenges
         std::vector<std::pair<uint32, uint32>> entries;
         if (QueryResult r = CharacterDatabase.Query(
                 "SELECT challengeId, level FROM coa_custom_trial_entry WHERE guid = {} AND trialId = '{}'",
-                ownerGuid, trialID))
+                ownerGuid, Esc(trialID)))
         {
             do
             {
@@ -797,7 +834,7 @@ namespace CoAChallenges
             std::set<uint32> actives = ActiveChallenges(guid);
             if (QueryResult r = CharacterDatabase.Query(
                     "SELECT challengeId FROM coa_custom_trial_entry WHERE guid = {} AND trialId = '{}'",
-                    ownerGuid, trialID))
+                    ownerGuid, Esc(trialID)))
             {
                 do
                 {

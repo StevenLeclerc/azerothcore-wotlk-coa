@@ -151,6 +151,15 @@ struct Creature : RegenUnit
     uint32 GetPower(int32) const { return mana; }
     void RegenerateHealth();
 };
+// AzerothCore interroge le gestionnaire de scripts avant de regenerer
+// (Player.cpp:2088). Aucun script de ce serveur ne surcharge OnPlayerCanRegenerate :
+// le defaut de PlayerScript.h:882 rend true, et c'est ce que la fixture reproduit.
+struct ScriptMgrFixture
+{
+    bool OnPlayerCanRegenerate(Player*, int32) { return true; }
+};
+ScriptMgrFixture scriptMgrFixture;
+ScriptMgrFixture* const sScriptMgr = &scriptMgrFixture;
 // NATIVE_REGEN
 std::map<ObjectGuid, Unit*> world;
 namespace ObjectAccessor

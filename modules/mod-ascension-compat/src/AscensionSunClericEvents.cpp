@@ -329,7 +329,14 @@ class aura_ascension_sun_cleric_event : public AuraScript
             case 300339: Copy(player,target,301005,CalculatePct(healing,Amount(id))); break;
             case 301005:
             {
-                uint32 amount=std::max(0,GetEffect(EFFECT_0)->GetAmount());
+                // GetEffect() rend nullptr si l'effet 0 n'est plus une aure au Spell.dbc (P-047).
+                // Degradation ASSUMEE, pas un oubli : si EFFECT_0 manque (sort ampute au DBC),
+                // le montant reporte tombe a 0 et le Remove() ci-dessous consomme quand meme
+                // l'aure. Le joueur perd la ressource sans compensation. Prefere a un deref nul
+                // sur un fil de MapUpdate. Non journalise ici : ce chemin est un proc, un
+                // LOG_ERROR sans etranglement y noierait le journal.
+                AuraEffect const* carried=GetEffect(EFFECT_0);
+                uint32 amount=carried?uint32(std::max(0,carried->GetAmount())):0u;
                 Unit* ally=GetTarget();
                 GetAura()->Remove();
                 Copy(player,ally,707522,amount);

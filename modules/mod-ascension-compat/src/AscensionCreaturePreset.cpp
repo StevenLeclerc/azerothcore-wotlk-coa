@@ -2,6 +2,7 @@
 #include "DatabaseEnv.h"
 #include "QueryResult.h"
 #include "Log.h"
+#include <utility>
 
 AscensionCreaturePresetMgr* AscensionCreaturePresetMgr::Instance()
 {
@@ -11,8 +12,12 @@ AscensionCreaturePresetMgr* AscensionCreaturePresetMgr::Instance()
 
 void AscensionCreaturePresetMgr::LoadFromDB()
 {
-    _presets.clear();
-    _entryToDisplays.clear();
+    // La requete court HORS du verrou : on ne tient jamais un verrou du module en appelant du
+    // code qui peut bloquer. Le catalogue est bati a cote, puis echange sous unique_lock, de
+    // sorte qu'un lecteur voit soit l'ancien catalogue entier, soit le nouveau, jamais un
+    // catalogue vide au milieu du remplissage.
+    std::unordered_map<uint64, CreatureDisplayPreset> presets;
+    std::unordered_map<uint32, std::vector<uint32>> entryToDisplays;
 
     QueryResult result = WorldDatabase.Query(
         "SELECT entry, display_id, race, gender, class, skin, face, hair, haircolor, facialhair, guild_id, "
@@ -22,6 +27,10 @@ void AscensionCreaturePresetMgr::LoadFromDB()
     if (!result)
     {
         LOG_WARN("module.ascension_compat", ">> Table creature_display_preset is empty or missing.");
+
+        std::unique_lock<std::shared_mutex> lock(_lock);
+        _presets.clear();
+        _entryToDisplays.clear();
         return;
     }
 
@@ -47,15 +56,24 @@ void AscensionCreaturePresetMgr::LoadFromDB()
         }
 
         uint64 key = MakeKey(preset.entry, preset.display_id);
-        _presets[key] = preset;
-        _entryToDisplays[preset.entry].push_back(preset.display_id);
+        presets[key] = preset;
+        entryToDisplays[preset.entry].push_back(preset.display_id);
     } while (result->NextRow());
 
+    std::size_t const presetCount = presets.size();
+    std::size_t const entryCount = entryToDisplays.size();
+
+    {
+        std::unique_lock<std::shared_mutex> lock(_lock);
+        _presets = std::move(presets);
+        _entryToDisplays = std::move(entryToDisplays);
+    }
+
     LOG_INFO("module.ascension_compat", ">> Loaded {} creature display presets into cache across {} unique creature entries.",
-        _presets.size(), _entryToDisplays.size());
+        presetCount, entryCount);
 }
 
-CreatureDisplayPreset const* AscensionCreaturePresetMgr::GetPreset(uint32 entry, uint32 displayId) const
+CreatureDisplayPreset const* AscensionCreaturePresetMgr::FindPresetUnlocked(uint32 entry, uint32 displayId) const
 {
     if (displayId != 0)
     {
@@ -75,7 +93,7 @@ CreatureDisplayPreset const* AscensionCreaturePresetMgr::GetPreset(uint32 entry,
     return nullptr;
 }
 
-CreatureDisplayPreset const* AscensionCreaturePresetMgr::GetPresetByGender(uint32 entry, uint8 gender) const
+CreatureDisplayPreset const* AscensionCreaturePresetMgr::FindPresetByGenderUnlocked(uint32 entry, uint8 gender) const
 {
     auto listItr = _entryToDisplays.find(entry);
     if (listItr != _entryToDisplays.end())
@@ -97,33 +115,83 @@ CreatureDisplayPreset const* AscensionCreaturePresetMgr::GetPresetByGender(uint3
     return nullptr;
 }
 
+std::optional<CreatureDisplayPreset> AscensionCreaturePresetMgr::GetPreset(uint32 entry, uint32 displayId) const
+{
+    std::shared_lock<std::shared_mutex> lock(_lock);
+    if (CreatureDisplayPreset const* preset = FindPresetUnlocked(entry, displayId))
+        return *preset;
+    return std::nullopt;
+}
+
+std::optional<CreatureDisplayPreset> AscensionCreaturePresetMgr::GetPresetByGender(uint32 entry, uint8 gender) const
+{
+    std::shared_lock<std::shared_mutex> lock(_lock);
+    if (CreatureDisplayPreset const* preset = FindPresetByGenderUnlocked(entry, gender))
+        return *preset;
+    return std::nullopt;
+}
+
 bool AscensionCreaturePresetMgr::HasPreset(uint32 entry, uint32 displayId) const
 {
+    std::shared_lock<std::shared_mutex> lock(_lock);
     if (displayId != 0)
         return _presets.find(MakeKey(entry, displayId)) != _presets.end();
     return _entryToDisplays.find(entry) != _entryToDisplays.end();
 }
 
+std::size_t AscensionCreaturePresetMgr::GetPresetCount() const
+{
+    std::shared_lock<std::shared_mutex> lock(_lock);
+    return _presets.size();
+}
+
 void AscensionCreaturePresetMgr::SetActivePresetOverride(ObjectGuid guid, uint32 entry, uint32 displayId)
 {
-    CreatureDisplayPreset const* preset = displayId ? GetPreset(entry, displayId) : GetPreset(entry);
+    std::unique_lock<std::shared_mutex> lock(_lock);
+    CreatureDisplayPreset const* preset = FindPresetUnlocked(entry, displayId);
     if (preset)
+    {
         _activePresetOverrides[guid] = MakeKey(preset->entry, preset->display_id);
+        _activeOverrideCount.store(uint32(_activePresetOverrides.size()), std::memory_order_release);
+    }
 }
 
 void AscensionCreaturePresetMgr::ClearActivePresetOverride(ObjectGuid guid)
 {
+    // Appele pour chaque deconnexion et pour chaque creature qui quitte le monde : ne pas
+    // prendre le verrou exclusif quand il n'y a rien a effacer.
+    if (_activeOverrideCount.load(std::memory_order_acquire) == 0)
+        return;
+
+    std::unique_lock<std::shared_mutex> lock(_lock);
     _activePresetOverrides.erase(guid);
+    _activeOverrideCount.store(uint32(_activePresetOverrides.size()), std::memory_order_release);
 }
 
-CreatureDisplayPreset const* AscensionCreaturePresetMgr::GetActivePresetOverride(ObjectGuid guid) const
+std::optional<CreatureDisplayPreset> AscensionCreaturePresetMgr::GetActivePresetOverride(ObjectGuid guid) const
 {
+    if (_activeOverrideCount.load(std::memory_order_acquire) == 0)
+        return std::nullopt;
+
+    std::shared_lock<std::shared_mutex> lock(_lock);
     auto itr = _activePresetOverrides.find(guid);
     if (itr != _activePresetOverrides.end())
     {
         auto presetItr = _presets.find(itr->second);
         if (presetItr != _presets.end())
-            return &presetItr->second;
+            return presetItr->second;
     }
-    return nullptr;
+    return std::nullopt;
+}
+
+bool AscensionCreaturePresetMgr::HasActivePresetOverride(ObjectGuid guid) const
+{
+    // Ce test tourne pour chaque joueur et chaque bot a chaque tick : le portillon atomique
+    // lui epargne la prise du verrou partage tant qu'aucun morphe n'est pose.
+    if (_activeOverrideCount.load(std::memory_order_acquire) == 0)
+        return false;
+
+    std::shared_lock<std::shared_mutex> lock(_lock);
+    auto itr = _activePresetOverrides.find(guid);
+    return itr != _activePresetOverrides.end() && _presets.find(itr->second) != _presets.end();
 }

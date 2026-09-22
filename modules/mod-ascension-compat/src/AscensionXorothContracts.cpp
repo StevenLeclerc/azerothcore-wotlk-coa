@@ -3,6 +3,7 @@
 #include "AscensionXoroth.h"
 #include "AscensionXorothData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -33,7 +34,14 @@ void ApplyContracts(SpellInfo* info)
         // Do not roll melee avoidance again or reject an enemy that approaches during the delay.
         // Native spell/mechanic immunities still apply to this non-damaging pull.
         info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
-        info->RangeEntry = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS);
+        // SpellInfo::GetMaxRange returns 0 for a null RangeEntry (SpellInfo.cpp:2898-2901), which
+        // would make the pull castable at point blank only, without a word. Keep the client row.
+        if (SpellRangeEntry const* range = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS))
+            info->RangeEntry = range;
+        else
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Xoroth: SpellRange row {} is missing, spell {} keeps its client range.",
+                uint32(SPELL_RANGE_THIRTY_YARDS), id);
     }
     if (id == 520440 || id == 520441)
         for (auto& effect : info->Effects)
@@ -236,7 +244,15 @@ void ApplyContracts(SpellInfo* info)
             {
                 e.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_SRC_AREA_ENEMY);
                 e.TargetB = SpellImplicitTargetInfo();
-                e.RadiusEntry = sSpellRadiusStore.LookupEntry(13);
+                // A missing SpellRadius row is read by SpellEffectInfo::CalcRadius as a radius of 0
+                // (SpellInfo.cpp:608-611): the area effect reaches nobody, silently. The client row
+                // is kept and the refusal journalled instead of writing a null pointer.
+                if (SpellRadiusEntry const* radius = sSpellRadiusStore.LookupEntry(13))
+                    e.RadiusEntry = radius;
+                else
+                    LOG_ERROR("module.ascension_compat",
+                        "Ascension contract Xoroth: SpellRadius row 13 is missing, spell {} keeps its client radius.",
+                        id);
             }
     if (id == 806219)
         info->Effects[0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ENEMY);
@@ -377,7 +393,12 @@ class xoroth_scaling : public UnitScript
         }
         if (!pet && Sever(info) && player->HasAura(300375) && target->HasAuraState(AuraStateType(30), info, player))
             factor *= 1 + Amount(300375) / 100.0f;
-        if (info->Id == 806219 && target->GetCreatureType() == CREATURE_TYPE_HUMANOID)
+        // Amount() reads the DBC value of Spiked Chains whether the player owns the talent or
+        // not, so the talent itself has to be tested here. Today the only caster of 806219
+        // (AscensionXorothAbilities.cpp) is already gated on HasAura(704987), which is exactly
+        // what made the omission invisible: any other caster -- event, bot, SQL -- would hand
+        // out the bonus talentless.
+        if (info->Id == 806219 && player->HasAura(704987) && target->GetCreatureType() == CREATURE_TYPE_HUMANOID)
             factor *= 1 + Amount(704987, 1) / 100.0f;
         return factor;
     }

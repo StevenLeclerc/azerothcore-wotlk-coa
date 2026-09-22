@@ -38,8 +38,11 @@ void CarryBleed(Unit* caster, Unit* target, uint32 id, uint32 damage, uint32 per
         total += uint64(std::max(0, old->GetAmount())) *
             std::max(0, old->GetTotalTicks() - int32(old->GetTickNumber()));
     int32 amount = int32(std::min<uint64>(total / ticks, std::numeric_limits<int32>::max()));
-    caster->CastCustomSpell(id, SPELLVALUE_BASE_POINT0, amount, target,
-        TriggerCastFlags(TRIGGERED_FULL_MASK & ~TRIGGERED_NO_PERIODIC_RESET));
+    // Meme semantique que Bleed() (AscensionBarbarianEvents.cpp) : le minuteur periodique
+    // repart de zero, sinon `amount`, calcule pour `ticks` ticks pleins, ne se verifie pas.
+    // L'ancien `& ~TRIGGERED_NO_PERIODIC_RESET` etait une expression morte : le bit
+    // 0x00100000 n'appartient pas a TRIGGERED_FULL_MASK 0x0007FFFF (SpellDefines.h:154-156).
+    caster->CastCustomSpell(id, SPELLVALUE_BASE_POINT0, amount, target, TRIGGERED_FULL_MASK);
 }
 
 class aura_ascension_guardian_event : public AuraScript

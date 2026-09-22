@@ -17,21 +17,14 @@
 //   704115 Clotting            gate Aortic Assault's closing cone on the talent, +25% on bleeders
 //   680732 Dark Essence        the periodic heal on Blood Rituals allies, and only on them
 //
-// NOT WIRED YET — READ THIS BEFORE APPLYING THE COMPANION SQL. AddSC_AscensionBloodmageEvents()
-// at the bottom of this file is DEFINED and nothing else: it is neither declared nor called in
-// src/MP_loader.cpp (checked 2026-09-20: `grep -rn AddSC_AscensionBloodmageEvents` over the module
-// returns this file only, and `grep -n BloodmageEvents src/MP_loader.cpp` returns nothing). Until
-// the two lines below are added there, not one of the thirteen script objects exists at runtime:
-// the fifteen rows of the companion SQL log "ScriptName ... does not exist" at startup, and the
-// four non-SQL hooks (two UnitScripts, one AllSpellScript, one GlobalScript) never register
-// either. That is P-051 applied to a whole file, and it costs one line of log.
-//     MP_loader.cpp, declaration block (beside AddSC_AscensionBloodmageVitality, l.155):
-//         void AddSC_AscensionBloodmageEvents();
-//     MP_loader.cpp, Addmod_ascension_compatScripts() (beside its call, l.315):
-//         AddSC_AscensionBloodmageEvents();
-// Order of operations: wire, build, read the names back out of the binary
-// (`strings libmod-ascension-compat.so | grep aura_ascension_bloodmage_`), install, THEN apply the
-// .sql. This file must not touch MP_loader.cpp itself, hence this note rather than the fix.
+// CABLE. AddSC_AscensionBloodmageEvents() est declare a src/MP_loader.cpp:173 et appele depuis
+// Addmod_ascension_compatScripts() a src/MP_loader.cpp:342 (relu le 2026-09-21). Les treize objets
+// de script de ce fichier existent donc a l'execution. NE PAS ajouter une seconde declaration ni
+// un second appel : chaque script serait enregistre deux fois, donc deux passages du crochet
+// UNITHOOK_ON_DAMAGE, et les accumulateurs Anguish et Infuse compteraient chaque degat en double.
+// Si un talent de ce fichier ne fait rien, le marqueur a lire n'est pas ici mais au demarrage :
+// "Script named '...' is not assigned in the database." (ScriptMgr.h, P-051) signale les lignes du
+// SQL compagnon non appliquees, ce qui est une panne de donnees, pas de cablage.
 //
 // ONE FIELD INDEX WORTH WRITING DOWN. Spell.dbc's EffectRadiusIndex is field 92+e, NOT 104+e
 // (104+e is EffectChainTarget). Witnesses read on 2026-09-20: Arcane Explosion 1449 has

@@ -7,6 +7,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir, require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -14,7 +18,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--before', help='Use older ability callbacks as a negative control')
     args = parser.parse_args()
-    spec = importlib.util.spec_from_file_location('witch_fixture', ROOT.parent / 'tools/Test-WitchHunterCompletion.py')
+    spec = importlib.util.spec_from_file_location('witch_fixture',
+                                                  require_helper(ROOT.parent / 'tools/Test-WitchHunterCompletion.py'))
     fixture = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixture)
     read = fixture.read
@@ -73,7 +78,7 @@ int main()
     with tempfile.TemporaryDirectory(prefix='coa-brand-') as directory:
         fixture.native.OUT = Path(directory)
         fixture.Tests().run_cpp('brand-creature-bonus', code, cases)
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20 + count * 936])
             if r[0] in {570757, 807682, *range(807705, 807711)}}

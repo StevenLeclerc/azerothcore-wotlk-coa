@@ -5,6 +5,10 @@ from pathlib import Path
 import struct
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir, require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 CASES = r'''
 int main()
@@ -57,10 +61,12 @@ int main()
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--workspace-tools', type=Path, default=ROOT.parent / 'tools')
-    parser.add_argument('--spell-dbc', type=Path, required=True)
+    parser.add_argument('--spell-dbc', type=Path, default=None)
     args = parser.parse_args()
+    if args.spell_dbc is None:
+        args.spell_dbc = dbc_dir() / 'Spell.dbc'
     spec = importlib.util.spec_from_file_location('xoroth_fixture',
-                                                args.workspace_tools / 'Test-KnightOfXorothCompletion.py')
+        require_helper(args.workspace_tools / 'Test-KnightOfXorothCompletion.py'))
     fixture = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixture)
     fixture.M = ROOT / 'modules/mod-ascension-compat/src'

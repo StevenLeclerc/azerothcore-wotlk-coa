@@ -8,6 +8,10 @@ import subprocess
 import tempfile
 import zipfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 
@@ -83,13 +87,11 @@ def main():
     for entry, cls, subclass, quality, required, level, _ in pool:
         code += f'manager.items[{entry}]={{{entry},{cls},{subclass},{quality},{required},{level}}};\n'
     code += '}\n' + (HERE / 'cases.cpp').read_text()
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-adventurer-cache-') as directory:
         out = Path(directory)
         cpp, exe = out / 'cache.cpp', out / 'cache.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print(f'PASS: three containers, {len(pool)} existing rewards; selection; use guards; SQL replay/preservation')
 

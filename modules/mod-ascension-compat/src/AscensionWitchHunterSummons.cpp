@@ -137,8 +137,17 @@ class HoundActions
             Player* owner = Owner(_me->GetOwner());
             if (!owner || !owner->IsAlive() || !owner->IsInMap(_me) || !owner->InSamePhase(_me))
             {
+                // ExecuteEvent() retire l'evenement de la file avant de le rendre : sortir d'ici sans
+                // le reprogrammer vide _events pour de bon. Rien ne depeuple le Chien d'ombre permanent
+                // (50124), qui cesserait donc definitivement de se mettre a l'echelle, d'entretenir
+                // Frenesie ravageuse (562027) et de se rabattre sur l'agresseur du maitre, des la
+                // premiere seconde ou le proprietaire est mort, hors phase ou sur une autre carte.
+                // EVENT_CHECK_LANDING n'est volontairement pas reprogramme : c'est la suite d'un saut
+                // qu'on abandonne, et sa propre branche l'abandonne deja de la meme facon plus bas.
                 if (_me->GetEntry() == 50224)
                     _me->DespawnOrUnsummon();
+                else if (event == EVENT_REFRESH_OWNER || event == EVENT_AUTO_LEAP)
+                    _events.ScheduleEvent(event, 1s);
                 continue;
             }
             if (event == EVENT_REFRESH_OWNER)
@@ -406,8 +415,14 @@ class spell_ascension_witch_hunter_summon : public SpellScript
             return;
         SpellEffectInfo const& effect = GetSpellInfo()->Effects[index];
         PreventHitDefaultEffect(index);
-        uint32 duration = uint32(std::max(1, GetSpellInfo()->GetDuration()));
-        player->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
+        // ApplySpellMod's SPELLMOD_DURATION branch ends on `(basevalue + totalflat) > 0`, so the base value
+        // must be signed: a uint32 would make a negative flat modifier wrap past 4e9 and pass that guard,
+        // turning a cancelled duration into a 49-day TEMPSUMMON_TIMED_DESPAWN. Same shape as the Tinker's
+        // SummonDevice (AscensionTinkerSummons.cpp:150-152), floor included: GetDuration() answers -1 for a
+        // permanent SpellDuration record, and 1 ms would despawn the summon on its first TempSummon::Update.
+        int32 modifiedDuration = GetSpellInfo()->GetDuration();
+        player->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, modifiedDuration);
+        uint32 duration = uint32(std::max(1000, modifiedDuration));
         if (effect.MiscValue == 50224)
         {
             SummonHounds(player, std::max(1, effect.CalcValue(player)), duration, GetSpellInfo()->Id,

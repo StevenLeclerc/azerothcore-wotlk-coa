@@ -7,6 +7,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 HERE = Path(__file__).resolve().parent
 
@@ -52,6 +56,16 @@ struct SpellScript
 #define PrepareSpellScript(name)
 #define SpellHitFn(...) 0
 #define BeforeSpellHitFn(...) 0
+// SharedDefines.h:326 `POWER_RAGE = 1` ; PlayerScript.h:147 nomme le crochet,
+// PlayerScript.h:549 en donne la signature exacte.
+using Powers=uint32;
+constexpr uint32 POWER_RAGE=1, POWER_MANA=0, PLAYERHOOK_ON_PLAYER_HAS_ACTIVE_POWER_TYPE=1;
+struct PlayerScript
+{
+    PlayerScript(char const*,std::initializer_list<uint32>) {}
+    virtual ~PlayerScript()=default;
+    virtual bool OnPlayerHasActivePowerType(Player const*,Powers) { return false; }
+};
 '''
     source = (ROOT / 'modules/mod-ascension-compat/src/AscensionPrimalistSecondary.cpp').read_text()
     source = re.sub(r'^#include.*\n', '', source, flags=re.M)
@@ -115,17 +129,22 @@ int main()
     info.Id=560146; metadata.OnLoadSpellCustomAttr(&info); assert(info.Effects[1].ApplyAuraName==277);
     info.Id=706200; metadata.OnLoadSpellCustomAttr(&info); assert(info.AuraInterruptFlags&2);
     info.Id=572908; metadata.OnLoadSpellCustomAttr(&info); assert(info.ProcCharges==1);
+    // Le Wildwalker est la seule classe dont la rage est une ressource active.
+    primalist_resources resources;
+    assert(resources.OnPlayerHasActivePowerType(&player,POWER_RAGE));
+    assert(!resources.OnPlayerHasActivePowerType(&player,POWER_MANA));
+    assert(!resources.OnPlayerHasActivePowerType(nullptr,POWER_RAGE));
+    Player warrior; warrior.cls=1;
+    assert(!resources.OnPlayerHasActivePowerType(&warrior,POWER_RAGE));
 }
 '''
     with tempfile.TemporaryDirectory(prefix='coa-primalist-secondary-') as directory:
         out = Path(directory)
         cpp, exe = out / 'primalist.cpp', out / 'primalist.exe'
         cpp.write_text(code, encoding='utf-8')
-        compiler = Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe'
-        subprocess.run([str(compiler), '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     ids = {560146, 804433, 560171, 681353, 680451, 681480, 572908, 706200}
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20+count*936]) if r[0] in ids}

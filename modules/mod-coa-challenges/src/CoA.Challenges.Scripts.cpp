@@ -13,6 +13,11 @@ namespace CoAChallenges
     void AllowBandageHeal(uint32 guid);
     bool ConsumeBandageAllow(uint32 guid);
 
+    // Defined in CoA.Challenges.Lifecycle.cpp (write-side cache of
+    // coa_character_condition); dropped at logout like the other per-character
+    // caches below.
+    void ClearConditionFlagCache(uint32 guid);
+
     // ---- Spellbind Roulette -------------------------------------------------
     // FAILABLE_SPELLBIND_ROULETTE (173/174/175/387/388/389; 30s) and
     // FAILABLE_MEGA_SPELLBIND_ROULETTE (429/430; 3s) periodically mark one of
@@ -1640,6 +1645,11 @@ namespace CoAChallenges
         // ---- Activation-condition tracking (persistent, once broken stays) ----
         void OnPlayerBeforeSendLoot(Player* player, ObjectGuid /*lootGuid*/, Loot* /*loot*/) override
         {
+            // The hooks are registered whatever the setting says, so without
+            // this an operator who turns the module off still pays for every
+            // loot window on the realm. Same guard PlayerHasRule carries.
+            if (!player || !sConfigMgr->GetOption<bool>("CoAChallenges.Enable", true))
+                return;
             SetConditionFlag(player->GetGUID().GetCounter(), "LOOTED");
         }
 
@@ -1862,6 +1872,19 @@ namespace CoAChallenges
                 std::lock_guard<std::mutex> lock(LastKillerMutex);
                 LastKiller.erase(player->GetGUID().GetCounter());
             }
+            // An unanswered group sync (SMSG 0x59B) must not outlive the
+            // session: the entry carries the offered (id, level) pairs, so a
+            // client reconnecting later could otherwise answer CMSG 0x59C and
+            // have HandleSyncResponse activate a set nobody asked for any
+            // more. PendingSync::expiresAt (Review.h) now also refuses a late
+            // answer within the same session; this erase is what keeps the map
+            // from growing over disconnects, and closes the window for a
+            // reconnect that happens before the entry expires.
+            {
+                std::lock_guard<std::mutex> lock(PendingSyncMutex);
+                PendingSyncByGuid.erase(player->GetGUID().GetCounter());
+            }
+            ClearConditionFlagCache(player->GetGUID().GetCounter());
         }
     };
 
@@ -2085,10 +2108,44 @@ namespace CoAChallenges
                     if (player)
                     {
                         uint32 guid = player->GetGUID().GetCounter();
-                        if (QueryResult r = CharacterDatabase.Query(
-                                "SELECT level FROM coa_character_challenge WHERE guid = {} AND challengeId = {}",
-                                guid, challengeID))
-                            level = r->Fetch()[0].Get<uint32>();
+
+                        // A stop for a challenge the character never started
+                        // must not reach FailChallenge. It used to: the SELECT
+                        // simply returned nothing, level stayed 0, and a
+                        // challenge with lives whose pristine test is already
+                        // false (any character past level 1) got a definitive
+                        // row in coa_challenge_failure - which, with
+                        // BlockAllAfterFailure on (the shipped value), blocks
+                        // EVERY future activation for that character. Any
+                        // client able to send 0x594 could do it with any of the
+                        // ids that carry lives. HandleDeactivateTrial already
+                        // guards its own loop with actives.count(cid); this is
+                        // the same check, read from the same in-memory cache.
+                        bool active = false;
+                        for (auto const& [cid, lvl] : CachedCharChallenges(guid))
+                        {
+                            if (cid != challengeID)
+                                continue;
+                            active = true;
+                            level = lvl;
+                            break;
+                        }
+                        if (!active)
+                        {
+                            LOG_INFO("module.coa_challenges",
+                                "CMSG_COA_STOP_CHALLENGE from {}: challenge {} is not active, ignored",
+                                who, challengeID);
+                            // The challenge really is stopped for this
+                            // character, so answer OK rather than a refusal
+                            // code whose client handling is unknown, and
+                            // re-push the authoritative lists so the UI stops
+                            // showing what the optimistic toggle put there.
+                            SendChallengeResponse(player, SMSG_COA_CHALLENGE_STOP_RESPONSE,
+                                challengeID, 0, 0, "CHALLENGE_STOP_OK");
+                            SendActiveList(player);
+                            SendCriteriaState(player);
+                            return false;
+                        }
 
                         // A challenge with lives (hardcore/Nightmare) is FAILED
                         // when abandoned — unless nothing has been done yet

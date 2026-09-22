@@ -17,6 +17,7 @@
 #include "SpellScript.h"
 #include "TemporarySummon.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace AscensionWitchDoctor
@@ -190,10 +191,35 @@ void Summon(Player* player, uint32 spell, Unit* target, Position const& location
 namespace
 {
 using namespace AscensionWitchDoctor;
+// witch_doctor_magnet::SpellMagnetTarget est traverse par CHAQUE sort hostile
+// que le coeur passe au crochet UNITHOOK_SPELL_MAGNET_TARGET, sur toutes les
+// cartes et pour toutes les unites (~700 bots en service). Il y faisait une
+// recherche de grille de 15 yd AVANT de savoir qu'un Golem existe. Ce compteur
+// repond non en une lecture atomique tant qu'aucun Golem n'est pose. Il est
+// tenu par le constructeur et le destructeur de l'IA, donc strictement
+// symetrique meme si UpdateEntry change l'entree entre les deux, et le drapeau
+// membre evite de dependre de IsSummonedBy, qui sort tot pour un invocateur
+// d'une autre classe. Lu et ecrit depuis plusieurs fils de MapUpdate, d'ou
+// std::atomic.
+std::atomic<uint32> g_livingGolems{0};
+
 class npc_ascension_witch_doctor : public ScriptedAI
 {
   public:
-    explicit npc_ascension_witch_doctor(Creature* creature) : ScriptedAI(creature) {}
+    explicit npc_ascension_witch_doctor(Creature* creature) : ScriptedAI(creature)
+    {
+        if (creature && creature->GetEntry() == NpcGolem)
+        {
+            _countedGolem = true;
+            g_livingGolems.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    ~npc_ascension_witch_doctor() override
+    {
+        if (_countedGolem)
+            g_livingGolems.fetch_sub(1, std::memory_order_relaxed);
+    }
+    bool _countedGolem = false;
     ObjectGuid _owner;
     ObjectGuid _target;
     uint32 _spell = 0;
@@ -632,7 +658,12 @@ class witch_doctor_magnet : public UnitScript
     witch_doctor_magnet() : UnitScript("witch_doctor_magnet", true, {UNITHOOK_SPELL_MAGNET_TARGET}) {}
     Unit* SpellMagnetTarget(Unit* attacker, Unit* victim, SpellInfo const* info) override
     {
-        if (!attacker || !victim || !info || info->IsPositive())
+        // Sortie bon marche avant la recherche de grille : sans Golem pose, ce
+        // crochet ne peut rien rendre, et il est appele des dizaines de fois
+        // par seconde. Meme intention que la garde HasAura de
+        // witch_doctor_summon_events::OnSpellCast plus haut dans ce fichier.
+        if (!attacker || !victim || !info || info->IsPositive() ||
+            g_livingGolems.load(std::memory_order_relaxed) == 0)
             return nullptr;
         for (Unit* unit : Nearby(victim, 15.0f))
             if (unit->GetEntry() == NpcGolem)

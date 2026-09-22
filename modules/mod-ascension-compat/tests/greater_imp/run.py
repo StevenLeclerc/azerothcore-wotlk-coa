@@ -10,6 +10,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, datamine_dir, dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
@@ -17,10 +21,15 @@ extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dbc-dir', type=Path, required=True)
-    parser.add_argument('--datamine-dir', type=Path, required=True)
+    parser.add_argument('--dbc-dir', type=Path, default=None)
+    parser.add_argument('--datamine-dir', type=Path, default=None)
     parser.add_argument('--source-ref')
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
+    if args.datamine_dir is None:
+        args.datamine_dir = datamine_dir(
+            required='raw/tables/SpellDescriptionVariables/000-999.jsonl')
 
     def source(name):
         path = 'modules/mod-ascension-compat/src/' + name
@@ -109,13 +118,11 @@ int main()
     assert(Scale(&pet,&slap,1,2000)==2000 && Scale(&pet,&bolt,0,58)==58);
 ''' + '\n'.join(f'    pet.level={level};assert(std::abs(Scale(&pet,&slap,0,155)-{value:.10f})<0.001);'
                 for level, value in zip((10, 40, 80), expected)) + '\n}\n'
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-greater-imp-') as directory:
         out = Path(directory)
         cpp, exe = out / 'imp.cpp', out / 'imp.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++17', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60, std='c++17')
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: pet spell migration, preserved autocast preferences, authored pacing/scaling and idempotent SQL')
 

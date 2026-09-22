@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -141,7 +142,10 @@ class aura_ascension_electrical_charge : public AuraScript
             return;
         owner->CastSpell(owner, SPELL_ELECTRICAL_CHARGE, true);
         if (Aura* charges = owner->GetAura(SPELL_ELECTRICAL_CHARGE))
-            if (charges->GetStackAmount() >= sSpellMgr->GetSpellInfo(SPELL_ELECTRICAL_CHARGE)->StackAmount)
+            // GetSpellInfo() rend nullptr si l'id sort du Spell.dbc (P-047) ; un repli a 0 ferait
+            // partir le conduit des la premiere charge. 20 est la valeur lue au Spell.dbc en
+            // service le 2026-09-21 (800299 "Electrical Charge", StackAmount=20).
+            if (charges->GetStackAmount() >= AscensionSpellSafe::StackAmount(SPELL_ELECTRICAL_CHARGE, 20))
                 owner->CastSpell(owner, SPELL_CHARGED_CONDUIT, true);
     }
 

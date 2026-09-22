@@ -256,9 +256,25 @@ namespace
                         return;
                     }
 
+                    // Le plafond est pose par la BASE, pas par le test ci-dessus.
+                    // Celui-ci lit un COUNT rendu par une requete asynchrone : deux
+                    // paquets 0x072E envoyes dans la meme trame pour deux personnages
+                    // differents partent en deux AsyncQuery avant que le premier INSERT
+                    // n'ait ete execute, et les deux rappels voient le meme compte.
+                    // L'INSERT ne pose donc la ligne que si le decompte, relu dans la
+                    // meme instruction et sous le meme verrou de ligne InnoDB, est
+                    // encore sous la limite. Le decompte reprend mot pour mot celui de
+                    // BuildCharacterStateQuery (ligne absente = actif) ; la table cible
+                    // n'est lisible ici que parce que la sous-requete est une table
+                    // derivee, MySQL refusant sinon de lire la table qu'il insere.
                     CharacterDatabase.Execute(
-                        "INSERT INTO `character_ascension_state` (`guid`, `active`) VALUES ({}, 1) "
-                        "ON DUPLICATE KEY UPDATE `active` = 1", charGuid);
+                        "INSERT INTO `character_ascension_state` (`guid`, `active`) "
+                        "SELECT {}, 1 FROM (SELECT COUNT(*) AS `active_count` FROM `characters` AS `c2` "
+                        "LEFT JOIN `character_ascension_state` AS `s2` ON `s2`.`guid` = `c2`.`guid` "
+                        "WHERE `c2`.`account` = {} AND (`s2`.`active` IS NULL OR `s2`.`active` <> 0)) AS `counted` "
+                        "WHERE `counted`.`active_count` < {} "
+                        "ON DUPLICATE KEY UPDATE `active` = 1",
+                        charGuid, accountId, CharacterSelectionMaxActive());
 
                     SendResult(session, SMSG_ASCENSION_CHARACTER_ACTIVATE_RESULT, ACTIVATE_CHARACTER_OK);
 
@@ -266,8 +282,12 @@ namespace
                     // realm list shows it), so it has to learn about the change.
                     sWorld->UpdateRealmCharCount(accountId);
 
+                    // « Requested » et pas « Activated » : le compte annonce est celui
+                    // lu par la requete qui precede, et l'INSERT conditionnel a pu le
+                    // dementir. La liste de personnages, re-demandee juste apres par le
+                    // client, dit l'etat reel.
                     LOG_INFO("module.ascension_compat",
-                        "Activated character {} for account {} ({}/{} active characters)",
+                        "Requested activation of character {} for account {} ({}/{} active characters at check time)",
                         charGuid, accountId, activeCount + 1, CharacterSelectionMaxActive());
                 }));
     }

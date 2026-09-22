@@ -121,14 +121,56 @@ public:
         if (!sConfigMgr->GetOption<bool>("CoAGameplayTest.Enable", false))
             return;
 
-        _enabled = true;
-        _started = Clock::now();
+        // Les gardes d'isolation passent AVANT _enabled, et dans leur propre try.
+        // Leur echec se lit de deux facons, et le catch les separe : si les trois
+        // bases sont les bases jetables du harnais, la campagne est reelle et son
+        // isolation est fautive — on arrete, le lanceur echoue en quelques
+        // secondes. Sinon, ce n'est pas une instance de test et la seule reponse
+        // correcte est de ne pas s'armer. Passer par Finish ici appellerait
+        // World::StopNow(ERROR_EXIT_CODE) et arreterait au demarrage un worldserver
+        // de production dont la configuration porterait CoAGameplayTest.Enable = 1
+        // — cas realiste, /opt/coa/server/bots/etc/modules/ garde des sauvegardes
+        // de conf nommees d'apres des campagnes de test. Une fois l'isolation
+        // prouvee, en revanche, arreter le serveur est le comportement voulu : la
+        // base est jetable et le lanceur attend le fichier de resultat.
         try
         {
             _runId = sConfigMgr->GetOption<std::string>("CoAGameplayTest.RunId", "");
             Require(_runId.size() == 12 && _runId.find_first_not_of("0123456789abcdef") == std::string::npos,
                 "RunId must be twelve lowercase hexadecimal characters");
             CheckIsolation();
+        }
+        catch (std::exception const& error)
+        {
+            // Les deux cas ne se confondent pas. Sur une instance jetable du
+            // harnais, le lanceur attend un processus qui sort : le laisser
+            // tourner lui coute son --startup-timeout entier (600 s par defaut,
+            // apps/coa-gameplay-test/run.py) avant qu'il ne conclue, et le seul
+            // diagnostic serait ce LOG_ERROR, que run.py ne lit pas. On s'arrete
+            // donc tout de suite, et run.py echoue en quelques secondes sur
+            // « Worldserver exited without a result » (run.py l. 632). Finish()
+            // ecrirait bien un rapport, mais _resultPath n'est pas encore lu a
+            // ce stade, et un rapport sans nom de scenario ferait echouer
+            // check_report sur un message moins parlant que celui-ci.
+            if (RunsOnDisposableTestDatabases())
+            {
+                LOG_ERROR("module.gameplay_test",
+                    "Gameplay harness refused to arm on its own test databases: {}. Stopping this worldserver.",
+                    error.what());
+                World::StopNow(ERROR_EXIT_CODE);
+                return;
+            }
+            LOG_ERROR("module.gameplay_test",
+                "Gameplay harness disabled, isolation refused: {}. The world keeps running; "
+                "set CoAGameplayTest.Enable = 0 in this configuration if that was not intended.",
+                error.what());
+            return;
+        }
+
+        _enabled = true;
+        _started = Clock::now();
+        try
+        {
             _resultPath = sConfigMgr->GetOption<std::string>("CoAGameplayTest.ResultFile", "");
             Require(!std::filesystem::exists(_resultPath), "Result file already exists");
             _startFile = sConfigMgr->GetOption<std::string>("CoAGameplayTest.StartFile", "");
@@ -229,6 +271,31 @@ public:
     }
 
 private:
+    // Le meme critere que CheckIsolation, mais sans lever et sans rien exiger
+    // d'autre : il ne repond pas « l'isolation est bonne », il repond « ces
+    // trois bases sont celles que le harnais se cree et detruit ». Les noms sont
+    // lus comme dans CheckIsolation, en dernier champ de la chaine de connexion.
+    // Le prefixe seul suffit ici : un RunId mal recopie doit rendre la main au
+    // lanceur, pas le faire patienter dix minutes.
+    static bool RunsOnDisposableTestDatabases()
+    {
+        for (auto const& [key, suffix] : std::map<std::string, std::string>{
+            { "LoginDatabaseInfo", "auth" }, { "CharacterDatabaseInfo", "characters" },
+            { "WorldDatabaseInfo", "world" } })
+        {
+            std::string const connection = sConfigMgr->GetOption<std::string>(key, "");
+            std::size_t const last = connection.rfind(';');
+            if (last == std::string::npos)
+                return false;
+            std::string const database = connection.substr(last + 1);
+            std::string const tail = "_" + suffix;
+            if (database.rfind("coa_test_", 0) != 0 || database.size() <= tail.size() + 9 ||
+                database.compare(database.size() - tail.size(), tail.size(), tail) != 0)
+                return false;
+        }
+        return true;
+    }
+
     void CheckIsolation()
     {
         std::string worldId = sConfigMgr->GetOption<std::string>("CoAGameplayTest.WorldDatabaseId", _runId);

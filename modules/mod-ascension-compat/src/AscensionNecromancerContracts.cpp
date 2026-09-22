@@ -4,6 +4,7 @@
 #include "AscensionNecromancer.h"
 #include "AscensionNecromancerData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -203,8 +204,15 @@ void ApplyContracts(SpellInfo* info)
     if (id == 500991)
         // Grave March is baked with the "Anywhere" range (50000 yd); every other player-cast
         // Command spell (Crypt Fiend, Banshee, Undead, Skeletal Warriors, ...) uses this same
-        // 30-yard range instead.
-        info->RangeEntry = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS);
+        // 30-yard range instead. SpellInfo::GetMaxRange reads a null RangeEntry as 0 yards
+        // (SpellInfo.cpp:2898-2901), so a missing row would silently make the order uncastable
+        // beyond melee: the client row is kept and the refusal journalled instead.
+        if (SpellRangeEntry const* range = sSpellRangeStore.LookupEntry(SPELL_RANGE_THIRTY_YARDS))
+            info->RangeEntry = range;
+        else
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Necromancer: SpellRange row {} is missing, spell {} keeps its client range.",
+                uint32(SPELL_RANGE_THIRTY_YARDS), id);
     if (id == 300580)
         for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
             if (info->Effects[i].IsEffect())
@@ -435,6 +443,10 @@ class necromancer_scaling : public UnitScript
                 value += std::max(0.0f, sp) * row.sp + player->GetStat(STAT_INTELLECT) * row.intellect +
                          player->GetTotalAttackPowerValue(BASE_ATTACK) * row.ap;
             }
+        // The nine other class scalings end on this line. The core converts `value` to int32
+        // (SpellInfo.cpp:502-520), and a float outside int32 range makes that conversion
+        // undefined; clamping here keeps the tenth class on the same contract as the others.
+        value = std::clamp(value, float(INT32_MIN / 2), float(INT32_MAX / 2));
     }
     void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* info) override
     {

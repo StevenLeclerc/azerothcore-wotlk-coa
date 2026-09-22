@@ -6,16 +6,24 @@
  * Worldforged pickups - the CoA world object that hands out a Worldforged base item,
  * which every character may loot once and then never again.
  *
- * The data (Database/Custom/worldforged-pickups.sql) restores the pickups themselves:
- * 1,555 objects - bags, buckets, bones, packets, caches - each one named after the base
- * item it holds, each holding exactly that item, spawned at the position the community
- * observed that object at. Two deliberate deviations from the captures support the rule:
+ * The data (data/sql/db-world/2026_09_16_00_worldforged_pickups.sql) restores the pickups
+ * themselves: 1,555 objects - bags, buckets, bones, packets, caches - each one named after
+ * the base item it holds, each holding exactly that item. 1,510 of them are also spawned,
+ * at the position the community observed that object at; the other 45 are templates with
+ * no spawn (the sql's own scope block: 39 with no observed position, 6 whose observation
+ * has no usable map). So a count of gameobject_template rows carrying the ScriptName
+ * (1,555) and a count of their spawns (1,510) are both right, and differ for that reason -
+ * both measured on the live acore_world, 2026-09-21.
+ * Three deliberate deviations from the captures support the rule:
  *
  *   * chest.consumable = 0, so a pickup stays spawned after it is emptied instead of
  *     despawning on a respawn timer (which would make it a realm-wide roll per respawn).
  *     The core already re-rolls a non-consumable chest's loot for the next opener:
  *     Player::SendLoot clears and fills while the object is GO_READY, and
  *     GameObject::Update returns it to GO_READY after a loot is released.
+ *   * chest.chestRestockTime = 0 (Data2, GameObjectData.h:86), so the object never enters
+ *     the restock path and GameObject::Update's GO_JUST_DEACTIVATED branch puts it straight
+ *     back to GO_READY, which is the re-roll the next character needs.
  *   * ScriptName 'worldforged_pickup', the marker this module keys on. The captures have
  *     an empty ScriptName.
  *
@@ -68,6 +76,7 @@
 #include "GameObjectAI.h"
 #include "GlobalScript.h"
 #include "Item.h"
+#include "Log.h"
 #include "LootMgr.h"
 #include "Map.h"
 #include "ObjectGuid.h"
@@ -77,6 +86,7 @@
 #include "SharedDefines.h"
 #include "World.h"
 
+#include <atomic>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -87,6 +97,12 @@ namespace
 // ScriptName on gameobject_template and gameobject rows of every pickup.
 constexpr char const* WorldforgedPickupScript = "worldforged_pickup";
 constexpr char const* WorldforgedLootTable = "character_worldforged_loot";
+constexpr char const* LogCategory = "module.worldforged";
+
+// Where the ledger table comes from. This repack runs with Updates.EnableDatabases = 0
+// (worldserver.conf), so the file is applied by hand and can simply not have been.
+constexpr char const* WorldforgedLootSql =
+    "modules/mod-worldforged-pickups/data/sql/db-characters/2026_09_16_00_worldforged_loot.sql";
 
 [[nodiscard]] bool IsWorldforgedPickup(GameObject const* go)
 {
@@ -109,9 +125,88 @@ public:
 
     [[nodiscard]] bool HasLooted(uint32 characterGuid, uint32 spawnId) const
     {
+        // Fail closed. With no ledger table there is no memory of what a character has
+        // already taken: every Query returns nullptr, which is indistinguishable from
+        // "this character has looted nothing", so every pickup in the world would
+        // sparkle for everyone, for ever, and the realm would fill with duplicates of
+        // every Worldforged base item with nothing in any log to say why. Refusing them
+        // all is the recoverable half of that choice - the table is applied, the realm
+        // is restarted, and nothing was lost meanwhile. VerifyLedger says so at startup.
+        if (!_ledgerReady.load(std::memory_order_relaxed))
+            return true;
+
         std::lock_guard<std::mutex> lock(_mutex);
         auto itr = _looted.find(characterGuid);
         return itr != _looted.end() && itr->second.count(spawnId) != 0;
+    }
+
+    [[nodiscard]] bool LedgerReady() const
+    {
+        return _ledgerReady.load(std::memory_order_relaxed);
+    }
+
+    // Asked once, at startup, on the world thread. Everything this module can silently
+    // get wrong starts the same way - the ledger table is not there - and no caller
+    // downstream can tell an empty result from a failed one, so the distinction is made
+    // here, once, and said out loud.
+    void VerifyLedger()
+    {
+        // The three columns this module reads and writes, not just the table name: a
+        // renamed column fails exactly the same way a missing table does - a nullptr
+        // QueryResult that reads as "this character has looted nothing".
+        QueryResult result = CharacterDatabase.Query(
+            "SELECT COUNT(*) FROM `information_schema`.`columns` "
+            "WHERE `table_schema` = DATABASE() AND `table_name` = '{}' "
+            "AND `column_name` IN ('guid', 'spawn_id', 'entry')", WorldforgedLootTable);
+
+        if (!result)
+        {
+            // The check itself failed, which says nothing about the table. Left open
+            // rather than locking every pickup on the strength of a broken query.
+            LOG_ERROR(LogCategory, "Could not ask the characters database whether `{}` exists; "
+                      "the per-character pickup ledger is left enabled and may be reading nothing.",
+                      WorldforgedLootTable);
+            return;
+        }
+
+        if ((*result)[0].Get<uint64>() != 3)
+        {
+            _ledgerReady.store(false, std::memory_order_relaxed);
+            LOG_ERROR(LogCategory, "`{}` is missing from the characters database, or no longer carries "
+                      "`guid`, `spawn_id` and `entry`: every Worldforged pickup is refused to every "
+                      "character until it does. Apply {} by hand.",
+                      WorldforgedLootTable, WorldforgedLootSql);
+            return;
+        }
+
+        // The spawn count is the other half of the picture: the rule is enforced per
+        // (character, spawn id), so a data import that carried the pickups away shows up
+        // in this one line and nowhere else. Measured on the realm in service on
+        // 2026-09-21: 1,510 spawns carry the script (the file header above still says
+        // 1,555 - that figure is the restoration's, not the world database's).
+        uint32 spawns = 0;
+        if (uint32 const wantedScript = sObjectMgr->GetScriptId(WorldforgedPickupScript))
+        {
+            for (auto const& entry : sObjectMgr->GetAllGOData())
+            {
+                // Same resolution order as GameObject::GetScriptId: the spawn row first,
+                // the template only when the spawn does not name a script.
+                uint32 scriptId = entry.second.ScriptId;
+                if (!scriptId)
+                    if (GameObjectTemplate const* proto = sObjectMgr->GetGameObjectTemplate(entry.second.id))
+                        scriptId = proto->ScriptId;
+
+                if (scriptId == wantedScript)
+                    ++spawns;
+            }
+        }
+
+        LOG_INFO(LogCategory, "Worldforged pickups ready: `{}` present, {} spawn(s) carry the '{}' script.",
+                 WorldforgedLootTable, spawns, WorldforgedPickupScript);
+
+        if (!spawns)
+            LOG_ERROR(LogCategory, "No gameobject spawn carries the '{}' script: the module is loaded but "
+                      "there is nothing for it to guard. Apply the pickup data.", WorldforgedPickupScript);
     }
 
     // Called from Player::LoadFromDB, before the player can be sent a single gameobject.
@@ -119,6 +214,11 @@ public:
     // read once, not per pickup.
     void Load(uint32 characterGuid)
     {
+        // Nothing to read, and asking would put one failing query per login into the
+        // database error log. HasLooted already refuses every pickup in this state.
+        if (!LedgerReady())
+            return;
+
         std::unordered_set<uint32> looted;
         if (QueryResult result = CharacterDatabase.Query(
                 "SELECT `spawn_id` FROM `{}` WHERE `guid` = {}", WorldforgedLootTable, characterGuid))
@@ -143,16 +243,38 @@ public:
     // together: item_instance, character_inventory and the ledger row commit as one. The
     // item is still ITEM_NEW here - nothing has written it yet, because it is only flushed
     // with the next character save - so these are exactly the writes Player::_SaveInventory
-    // would make, moved to the moment of the award. If the transaction fails, the pickup
-    // stays unclaimed and the character can loot it again, which is the survivable outcome;
-    // a ledger row on its own would mark the pickup spent and lose the item instead.
+    // would make, moved to the moment of the award.
+    //
+    // Order matters here, though not as much as the move looks. The in-memory mark used to
+    // be set before the transaction was even opened, so a transaction that never landed
+    // left the pickup spent for the whole session anyway - inert in BuildClientFlags,
+    // refused by OnAllowedForPlayerLootCheck - while SaveToDB had already taken the item
+    // out of the player's update queue, so the item was gone at the next login too. The
+    // mark is now set after the commit, and that on its own changes nothing as long as the
+    // outcome of the commit is not read: CommitTransaction only queues the transaction and
+    // returns void (DatabaseWorkerPool.h), and no path between the pre-check above and the
+    // insert below can leave this function. What the move buys is an order that matches the
+    // facts, and a place for an outcome test to go if one is ever added - not a guard. The
+    // duplicate it theoretically opens - the pre-check and the insert are no longer one
+    // locked test-and-set - cannot happen from one character, whose hooks all run on their
+    // own map thread in order, and is closed database-side by INSERT IGNORE.
+    //
+    // What is still not reported is a transaction that fails: CommitTransaction is
+    // asynchronous and returns void, and the only ways to learn the outcome
+    // (DirectCommitTransaction, which would block a map thread on disk, or
+    // AsyncCommitTransaction, which needs a callback queue this module does not have)
+    // both cost more than the defect is worth. Said here rather than left to be guessed.
     void Claim(Player* player, Item* item, uint32 spawnId, uint32 entry)
     {
+        if (!LedgerReady())
+            return;                                         // no table to write the claim into
+
         uint32 const characterGuid = player->GetGUID().GetCounter();
 
         {
             std::lock_guard<std::mutex> lock(_mutex);
-            if (!_looted[characterGuid].insert(spawnId).second)
+            auto itr = _looted.find(characterGuid);
+            if (itr != _looted.end() && itr->second.count(spawnId) != 0)
                 return;                                     // already known, nothing to write
         }
 
@@ -179,6 +301,9 @@ public:
                       WorldforgedLootTable, characterGuid, spawnId, entry);
 
         CharacterDatabase.CommitTransaction(trans);
+
+        std::lock_guard<std::mutex> lock(_mutex);
+        _looted[characterGuid].insert(spawnId);
     }
 
 private:
@@ -186,6 +311,11 @@ private:
 
     mutable std::mutex _mutex;
     std::unordered_map<uint32, std::unordered_set<uint32>> _looted;
+
+    // Read from every map thread, written once on the world thread at startup. True until
+    // VerifyLedger proves the table is not there, so a realm that never reaches OnStartup
+    // behaves exactly as it did before rather than locking itself out.
+    std::atomic<bool> _ledgerReady{true};
 };
 
 class WorldforgedPickupAI : public GameObjectAI
@@ -345,6 +475,22 @@ public:
         go->ForceValuesUpdateAtIndex(GAMEOBJECT_DYNAMIC);
     }
 };
+
+// The one line of startup this module needed: it is entirely data-driven - a ledger table
+// applied by hand and a block of spawns carrying a script name - and until now it said nothing
+// at all when either was missing, so a realm brought up on an unmigrated database handed
+// every Worldforged item out again, to everyone, silently.
+class worldforged_pickup_world : public WorldScript
+{
+public:
+    worldforged_pickup_world() : WorldScript("worldforged_pickup_world", {WORLDHOOK_ON_STARTUP}) { }
+
+    // Runs from Main.cpp after the world is initialised, so gameobject spawn data is in.
+    void OnStartup() override
+    {
+        WorldforgedLootStore::Instance().VerifyLedger();
+    }
+};
 }
 
 void AddWorldforgedPickupsScripts()
@@ -352,4 +498,5 @@ void AddWorldforgedPickupsScripts()
     new worldforged_pickup_script();
     new worldforged_pickup_loot_veto();
     new worldforged_pickup_lifecycle();
+    new worldforged_pickup_world();
 }

@@ -129,15 +129,32 @@ namespace CoAChallenges
                 return storedId;
 
             ClassAchievementMaps const& maps = GetClassAchievementMaps();
-            // Skip non-class labels (e.g. "[Mastery]").
+            // Skip non-class labels (e.g. "[Mastery]"): nominal case, stays mute.
             if (maps.labelToClass.find(label) == maps.labelToClass.end())
                 return storedId;
+
+            // From here the label IS a class label, so returning storedId means
+            // handing the player another class's variant. Say so: the caller's
+            // LOG_INFO prints achId == stored, which is indistinguishable from
+            // the perfectly normal class-agnostic case above.
             auto fit = maps.familyToClassAch.find(FamilyKey(prefix, family));
             if (fit == maps.familyToClassAch.end())
+            {
+                LOG_WARN("module.coa_challenges",
+                    "Class achievement {} ('{}'): no variant table for family '{}' (prefix '{}'); "
+                    "granting the stored '{}' variant to class {} as-is",
+                    storedId, stored->name[0], family, prefix, label, uint32(playerClass));
                 return storedId;
+            }
             auto cit = fit->second.find(playerClass);
             if (cit == fit->second.end())
+            {
+                LOG_WARN("module.coa_challenges",
+                    "Class achievement {} ('{}'): family '{}' carries no variant for class {}; "
+                    "granting the stored '{}' variant as-is",
+                    storedId, stored->name[0], family, uint32(playerClass), label);
                 return storedId;
+            }
             return cit->second;
         }
     } // namespace
@@ -178,7 +195,22 @@ namespace CoAChallenges
 
         std::vector<RewardDef> rewards = GetChallengeRewards(challengeID, level);
         if (rewards.empty())
+        {
+            // A challenge with no reward may well be intentional, but the
+            // completion line in the log otherwise reads exactly like a
+            // successful grant. Read once, and it is settled. noRewards = 1 in
+            // the definition says it IS intentional: informative, not a warning.
+            if (NoRewards(challengeID))
+                LOG_INFO("module.coa_challenges",
+                    "Challenge {} level {} completed by {}: no reward, as declared (noRewards)",
+                    challengeID, level, player->GetName());
+            else
+                LOG_WARN("module.coa_challenges",
+                    "Challenge {} level {} completed by {} but coa_challenge_reward has no row for it: "
+                    "nothing granted",
+                    challengeID, level, player->GetName());
             return;
+        }
 
         std::string const subject = sConfigMgr->GetOption<std::string>(
             "CoAChallenges.Reward.MailSubject", "Challenge Reward");

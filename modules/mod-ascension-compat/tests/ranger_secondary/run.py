@@ -8,11 +8,15 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir, require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
 def target_counts():
-    path = ROOT.parent / 'tools/Test-AdditionalTargetContracts.py'
+    path = require_helper(ROOT.parent / 'tools/Test-AdditionalTargetContracts.py')
     spec = importlib.util.spec_from_file_location('ranger_native_targets', path)
     fixture = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixture)
@@ -71,17 +75,14 @@ def main():
         out = Path(directory)
         cpp, exe = out / 'ranger.cpp', out / 'ranger.exe'
         cpp.write_text(code, encoding='utf-8')
-        compiler = Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe'
-        subprocess.run([str(compiler), '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
         persistent = Path(__file__).with_name('persistent.cpp').read_text()
         effects = (ROOT / 'src/server/game/Spells/SpellEffects.cpp').read_text()
         cpp.write_text(persistent.replace('// NATIVE', method(effects, 'void Spell::EffectPersistentAA(')), encoding='utf-8')
-        subprocess.run([str(compiler), '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     ids = {804329, 704337, 801429, 801700, 500616, 570167, 803104, 803105, 803106}
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20 + count * 936]) if r[0] in ids}

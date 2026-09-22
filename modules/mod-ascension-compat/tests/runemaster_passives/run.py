@@ -6,6 +6,10 @@ import re
 import struct
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 HERE = Path(__file__).resolve().parent
 CASES = r'''
@@ -104,7 +108,7 @@ def main():
     parser.add_argument("--spell-dbc", type=Path)
     args = parser.parse_args()
     spec = importlib.util.spec_from_file_location("native_compile",
-                                                 args.workspace_tools / "Test-LocalLoginCollections.py")
+                                                 require_helper(args.workspace_tools / "Test-LocalLoginCollections.py"))
     native = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(native)
     enums = []

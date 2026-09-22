@@ -6,6 +6,10 @@ import re
 import struct
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import require_helper  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 HARNESS = r'''
 #include <cassert>
@@ -218,7 +222,8 @@ def main():
     parser.add_argument("--workspace-tools", type=Path, default=ROOT.parent / "tools")
     parser.add_argument("--spell-dbc", type=Path)
     args = parser.parse_args()
-    spec = importlib.util.spec_from_file_location("storm_compile", args.workspace_tools / "Test-LocalLoginCollections.py")
+    spec = importlib.util.spec_from_file_location("storm_compile",
+        require_helper(args.workspace_tools / "Test-LocalLoginCollections.py"))
     native = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(native)
     classes = native.extractor.extract((ROOT / "src/server/shared/SharedDefines.h").read_text(), r"enum Classes\b")

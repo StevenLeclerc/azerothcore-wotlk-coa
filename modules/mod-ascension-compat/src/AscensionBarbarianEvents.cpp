@@ -52,8 +52,13 @@ void Bleed(Unit* owner, Unit* target, uint32 id, uint32 damage, uint32 percent)
         total += uint64(std::max(0, old->GetAmount())) *
             std::max(0, old->GetTotalTicks() - int32(old->GetTickNumber()));
     int32 value = int32(std::min<uint64>(total / std::max(1u, ticks), std::numeric_limits<int32>::max()));
-    owner->CastCustomSpell(id, SPELLVALUE_BASE_POINT0, value, target,
-        TriggerCastFlags(TRIGGERED_FULL_MASK & ~TRIGGERED_NO_PERIODIC_RESET));
+    // Le minuteur periodique DOIT repartir de zero : `value` est calcule pour `ticks` ticks
+    // pleins, donc le total n'est exact que si le cycle recommence. C'est le comportement par
+    // defaut de CastCustomSpell, d'ou TRIGGERED_FULL_MASK seul. L'ancien
+    // `TRIGGERED_FULL_MASK & ~TRIGGERED_NO_PERIODIC_RESET` ecrivait une intention qu'il
+    // n'executait pas : TRIGGERED_NO_PERIODIC_RESET vaut 0x00100000 (SpellDefines.h:156) et
+    // TRIGGERED_FULL_MASK 0x0007FFFF (:154), le bit n'y est pas, le `& ~` ne retirait rien.
+    owner->CastCustomSpell(id, SPELLVALUE_BASE_POINT0, value, target, TRIGGERED_FULL_MASK);
 }
 
 class aura_ascension_barbarian_event : public AuraScript
@@ -331,11 +336,15 @@ class aura_ascension_barbarian_event : public AuraScript
                     // The active promise names owner AP; the pet's own SP is irrelevant.
                     uint32 child = GetSpellInfo()->Effects[EFFECT_0].TriggerSpell;
                     SpellInfo const* helper = sSpellMgr->GetSpellInfo(child);
-                    int32 base = id == 573077 ? GetEffect(EFFECT_0)->GetAmount() :
+                    // GetEffect() rend nullptr des que l'effet a change de forme au Spell.dbc
+                    // (P-047 a fait passer un APPLY_AURA en TRIGGER_SPELL sur 572752) : un
+                    // deref nu tuait le fil de carte. triggeredByAura accepte nullptr.
+                    AuraEffect* own = GetEffect(EFFECT_0);
+                    int32 base = id == 573077 ? (own ? own->GetAmount() : 0) :
                         helper ? helper->Effects[EFFECT_0].CalcValue(caster) : 0;
                     int32 value = base + int32(caster->GetTotalAttackPowerValue(BASE_ATTACK) * 0.2f);
                     owner->CastCustomSpell(805785, SPELLVALUE_BASE_POINT0, value, other,
-                        TRIGGERED_FULL_MASK, nullptr, GetEffect(EFFECT_0), caster->GetGUID());
+                        TRIGGERED_FULL_MASK, nullptr, own, caster->GetGUID());
                 }
                 break;
             default: break;

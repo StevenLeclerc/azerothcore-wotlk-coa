@@ -7,6 +7,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
@@ -14,9 +18,11 @@ extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dbc-dir', type=Path, required=True)
+    parser.add_argument('--dbc-dir', type=Path, default=None)
     parser.add_argument('--before', action='store_true')
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
 
     def source(path):
         return (ROOT / path).read_text()
@@ -143,13 +149,12 @@ int main()
     assert(spells[804821].Effects[0].ApplyAuraName==200); // Unrelated profession aura is unchanged.
 }
 '''
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-quest-xp-') as directory:
         out = Path(directory)
         cpp, exe = out / 'xp.cpp', out / 'xp.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++17', '/EHsc', '/W4', '/WX', '/wd4244', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60, std='c++17',
+                    msvc_extra=('/wd4244',), posix_extra=('-Wno-conversion',))
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: scaled Pelt Collection XP; potions/heirlooms/party aura; separate kill/quest bonuses; RaF exclusion')
 

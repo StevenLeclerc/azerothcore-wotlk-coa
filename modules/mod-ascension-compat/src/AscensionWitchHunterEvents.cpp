@@ -80,6 +80,14 @@ void CarryDamage(Unit* caster, Unit* target, uint32 id, uint64 amount)
     if (AuraEffect* previous = target->GetAuraEffect(id, EFFECT_0, caster->GetGUID()))
         amount += uint64(std::max(0, previous->GetAmount())) *
                   std::max(0, int32(previous->GetTotalTicks()) - int32(previous->GetTickNumber()));
+    // TRIGGERED_NO_PERIODIC_RESET (0x00100000, SpellDefines.h:156) n'est PAS dans
+    // TRIGGERED_FULL_MASK (0x0007FFFF, SpellDefines.h:154) : ce `|` est vivant et le tick en
+    // cours n'est pas remis a zero a la reapplication. Divergence VOLONTAIRE avec Bleed()
+    // (Barbare) et CarryBleed() (Gardien), ou le meme bit etait ecrit `& ~...`, expression morte
+    // depuis toujours : la les corriger ne change rien, ici l'enlever serait un nerf silencieux
+    // (perte, a chaque reapplication, du surplus du tick en cours, et 680544 reproce vite).
+    // Le seul autre porteur vivant du bit dans le module est AscensionSunClericAuras.cpp:174.
+    // Un changement de cadence ici se decide et se consigne au changelog, pas en nettoyant.
     caster->CastCustomSpell(id, SPELLVALUE_BASE_POINT0,
                             int32(std::min<uint64>(amount / ticks, std::numeric_limits<int32>::max())), target,
                             TriggerCastFlags(TRIGGERED_FULL_MASK | TRIGGERED_NO_PERIODIC_RESET));
@@ -115,7 +123,8 @@ class aura_ascension_witch_hunter_event : public AuraScript
             // and incoming-critical states this passive also carries belong to every Witch Hunter.
             case 681181:
                 return (!outgoing && avoid) ||
-                       (critical && ((!outgoing && Direct(event) && (event.GetSchoolMask() & 126)) ||
+                       (critical && ((!outgoing && Direct(event) &&
+                                      (event.GetSchoolMask() & SPELL_SCHOOL_MASK_MAGIC)) ||
                                      (outgoing && Direct(event) && info && !autoMelee && !autoRanged &&
                                       player->HasSpell(804193))));
             case 92091:
@@ -156,7 +165,7 @@ class aura_ascension_witch_hunter_event : public AuraScript
             case 806188:
                 return outgoing && Direct(event) && Dawn(info);
             case 680599:
-                return outgoing && Direct(event) && critical && (event.GetSchoolMask() & 1);
+                return outgoing && Direct(event) && critical && (event.GetSchoolMask() & SPELL_SCHOOL_MASK_NORMAL);
             case 680544:
                 return outgoing && Direct(event) && autoMelee;
             case 680538:
@@ -164,7 +173,7 @@ class aura_ascension_witch_hunter_event : public AuraScript
             case 520277:
                 return outgoing && Direct(event) && Family(info, 2, 33554432);
             case 681092:
-                return !outgoing && Direct(event) && (event.GetSchoolMask() & 126);
+                return !outgoing && Direct(event) && (event.GetSchoolMask() & SPELL_SCHOOL_MASK_MAGIC);
             case 680497:
                 return (!outgoing && avoid) || (outgoing && Direct(event) && autoMelee);
             case 524970:
@@ -187,7 +196,8 @@ class aura_ascension_witch_hunter_event : public AuraScript
             case 804024:
                 return outgoing && Direct(event) && info && !autoMelee && !autoRanged;
             case 681152:
-                return !outgoing && Direct(event) && critical && (event.GetSchoolMask() & (32 | 64));
+                return !outgoing && Direct(event) && critical &&
+                       (event.GetSchoolMask() & (SPELL_SCHOOL_MASK_SHADOW | SPELL_SCHOOL_MASK_ARCANE));
             case 705534:
                 return !outgoing && (Direct(event) || avoid);
             case 139778:
@@ -319,8 +329,10 @@ class aura_ascension_witch_hunter_event : public AuraScript
                 uint32 ticks = amplitude > 0
                     ? uint32(std::max(1, AscensionSpellSafe::Duration(680532, 3000) / amplitude))
                     : 3u;
+                AuraEffect const* share = GetEffect(EFFECT_1);
                 CarryDamage(owner, other, 680532,
-                            uint64(damage) * std::max(0, GetEffect(EFFECT_1)->GetAmount()) / 100 * ticks);
+                            uint64(damage) * uint64(share ? std::max(0, share->GetAmount()) : 0) / 100 *
+                                ticks);
                 break;
             }
             case 680504:
@@ -418,12 +430,16 @@ class aura_ascension_witch_hunter_event : public AuraScript
             case 804192:
             {
                 Player* caster = Owner(GetCaster());
-                if (caster)
+                // GetEffect() rend nullptr des que l'effet 2 n'est plus une aure au Spell.dbc
+                // (P-047) : le deref nu tuait le fil de carte, et le meme pointeur sert ensuite
+                // de triggeredByAura.
+                AuraEffect* share = GetEffect(EFFECT_2);
+                if (caster && share)
                 {
-                    int32 value = GetEffect(EFFECT_2)->GetAmount() +
+                    int32 value = share->GetAmount() +
                                   int32(caster->GetTotalAttackPowerValue(RANGED_ATTACK) * 0.15f);
                     owner->CastCustomSpell(567570, SPELLVALUE_BASE_POINT0, value, other, TRIGGERED_FULL_MASK, nullptr,
-                                           GetEffect(EFFECT_2), caster->GetGUID());
+                                           share, caster->GetGUID());
                 }
                 break;
             }
@@ -440,11 +456,16 @@ class aura_ascension_witch_hunter_event : public AuraScript
                         }
                 break;
             case 578336:
-                if (Unit* pet = Hound(player))
-                    owner->CastCustomSpell(574335, SPELLVALUE_BASE_POINT0,
-                                           int32(event.GetHealInfo()->GetEffectiveHeal() *
-                                                 uint64(std::max(0, GetEffect(EFFECT_0)->GetAmount())) / 100),
-                                           pet, TRIGGERED_FULL_MASK);
+                // GetEffect() rend nullptr si l'effet 0 n'est plus une aure au Spell.dbc (P-047).
+                // GetHealInfo() est nul des que ce proc part sur autre chose qu'un soin : le
+                // Check de 578336 l'exige aujourd'hui, le garde ne coute rien et ne le suppose pas.
+                if (AuraEffect const* share = GetEffect(EFFECT_0))
+                    if (HealInfo* heal = event.GetHealInfo())
+                        if (Unit* pet = Hound(player))
+                            owner->CastCustomSpell(574335, SPELLVALUE_BASE_POINT0,
+                                                   int32(uint64(heal->GetEffectiveHeal()) *
+                                                         uint64(std::max(0, share->GetAmount())) / 100),
+                                                   pet, TRIGGERED_FULL_MASK);
                 break;
         }
         _executing = false;

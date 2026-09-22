@@ -13,6 +13,10 @@ import sqlite3
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
@@ -55,22 +59,12 @@ def main():
     ):
         harness = harness.replace("// ACTUAL_" + marker, code)
 
-    vc_tools = os.environ.get("VCToolsInstallDir")
-    compiler = (str(Path(vc_tools) / "bin/Hostx64/x64/cl.exe") if vc_tools else
-                shutil.which(os.environ.get("CXX", "cl.exe" if os.name == "nt" else "c++")))
-    if not compiler:
-        raise RuntimeError("Enable a C++20 compiler (VS Developer PowerShell on Windows).")
     with tempfile.TemporaryDirectory(prefix="tinker-sentry-") as directory:
         out = Path(directory)
         cpp = out / "harness.cpp"
         cpp.write_text(harness, encoding="utf-8")
         executable = out / ("sentry.exe" if os.name == "nt" else "sentry")
-        if Path(compiler).stem.lower() == "cl":
-            flags = ["/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/utf-8",
-                     str(cpp), "/Fe" + str(executable)]
-        else:
-            flags = ["-std=c++20", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(executable)]
-        subprocess.run([compiler, *flags], cwd=out, check=True)
+        compile_cxx(cpp, executable, cwd=out)
         subprocess.run([str(executable)], cwd=out, check=True)
 
     sql = (ROOT / "data/sql/updates/pending_db_world/rev_20260913_00_tinker_sentry.sql").read_text()

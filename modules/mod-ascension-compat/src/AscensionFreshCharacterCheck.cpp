@@ -9,6 +9,7 @@
 #include "AscensionCustomClassData.h"
 #include "AscensionLiveBaselineData.h"
 #include "Chat.h"
+#include "Config.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
 #include "GameTime.h"
@@ -46,7 +47,13 @@ namespace
 constexpr uint32 ReservedAccount = 4000000000;
 constexpr uint32 FirstReservedGuid = 4000000000;
 constexpr uint32 LastReservedGuid = FirstReservedGuid + 20;
-constexpr char OutputDirectory[] = "C:/Ascension/Runtime/validation/live-class-baseline-20260903";
+// Ou la sonde depose son rapport. L'ancienne valeur etait un chemin Windows en
+// dur ("C:/Ascension/Runtime/validation/live-class-baseline-20260903") : sur
+// Linux, weakly_canonical le resout sous le repertoire courant, is_directory
+// repond non, et la commande rendait false sans un mot. Le poste Windows du
+// projet n'existe plus ; le defaut est donc un chemin du serveur, et l'option
+// AscensionCompat.FreshCheckOutputDir permet d'en choisir un autre.
+constexpr char DefaultOutputDirectory[] = "/opt/coa/coa-project/archives/fresh-check";
 
 std::string JsonString(std::string const& value)
 {
@@ -640,8 +647,16 @@ bool WritePlayer(std::ostream& output, Player& player, AscensionFreshCharacterEx
 
 bool HandleAscensionFreshCharacterCheck(ChatHandler* handler) try
 {
-    if (!handler || handler->GetSession())
+    if (!handler)
         return false;
+    // Console et RA seulement : la sonde cree 21 personnages en memoire et exige
+    // un serveur vide. Le dire, plutot que de laisser la generique « commande
+    // incorrecte » a un administrateur connecte en jeu.
+    if (handler->GetSession())
+    {
+        handler->SendSysMessage("Fresh Create check refused: console/RA only, not from an in-game session.");
+        return false;
+    }
     if (sWorldSessionMgr->GetActiveAndQueuedSessionCount() || sWorldSessionMgr->GetPlayerCount() ||
         sWorld->getIntConfig(CONFIG_START_PLAYER_LEVEL) != 1 || sWorld->getBoolConfig(CONFIG_ALWAYS_MAXSKILL) ||
         !ReservedIdsAreAbsent())
@@ -651,19 +666,51 @@ bool HandleAscensionFreshCharacterCheck(ChatHandler* handler) try
         return false;
     }
 
-    std::filesystem::path root = std::filesystem::weakly_canonical("C:/Ascension/Runtime/validation");
-    std::filesystem::path base = std::filesystem::weakly_canonical(OutputDirectory);
-    if (!std::filesystem::is_directory(base) || base.parent_path() != root)
+    // Chaque refus se nomme. Rendre false sans rien dire laisse la console
+    // afficher l'erreur de syntaxe generique du gestionnaire de commandes, et
+    // l'administrateur ne peut plus distinguer « la sonde a refuse de tourner »
+    // de « la commande n'existe pas ».
+    std::string const configuredOutput =
+        sConfigMgr->GetOption<std::string>("AscensionCompat.FreshCheckOutputDir", DefaultOutputDirectory);
+    if (configuredOutput.empty())
+    {
+        handler->SendSysMessage("Fresh Create check refused: AscensionCompat.FreshCheckOutputDir is empty.");
         return false;
+    }
+    // Le chemin doit etre absolu, et cela se teste sur l'ENTREE BRUTE : pour un
+    // chemin relatif dont la premiere composante existe, weakly_canonical rend
+    // un chemin absolu resolu contre le repertoire courant du worldserver
+    // (mesure : "archives/fresh-check" -> "<cwd>/archives/fresh-check",
+    // is_absolute() == true). Teste apres canonisation, le garde ne rattrapait
+    // donc que les relatifs dont la tete n'existe pas — que le is_directory
+    // suivant rejette de toute facon.
+    if (!std::filesystem::path(configuredOutput).is_absolute())
+    {
+        handler->PSendSysMessage("Fresh Create check refused: AscensionCompat.FreshCheckOutputDir must be an absolute path (got '{}').",
+            configuredOutput);
+        return false;
+    }
+    std::filesystem::path base = std::filesystem::weakly_canonical(configuredOutput);
+    if (!std::filesystem::is_directory(base))
+    {
+        handler->PSendSysMessage("Fresh Create check refused: '{}' is not an existing directory. Create it, or set AscensionCompat.FreshCheckOutputDir.",
+            base.string());
+        return false;
+    }
     std::filesystem::path directory = base / ("fresh-create-" + std::to_string(GameTime::GetGameTime().count()));
     if (!std::filesystem::create_directory(directory))
     {
-        handler->SendSysMessage("Fresh Create check refused: output directory already exists; never overwrite a previous result.");
+        handler->PSendSysMessage("Fresh Create check refused: output directory '{}' already exists; never overwrite a previous result.",
+            directory.string());
         return false;
     }
     std::ofstream output(directory / "actual.json", std::ios::out);
     if (!output)
+    {
+        handler->PSendSysMessage("Fresh Create check refused: could not open '{}' for writing.",
+            (directory / "actual.json").string());
         return false;
+    }
     output.imbue(std::locale::classic());
     output << std::boolalpha << std::setprecision(10);
     output << "{\"schema\":\"ascension-fresh-create-v1\",\"expected_source_sha256\":"

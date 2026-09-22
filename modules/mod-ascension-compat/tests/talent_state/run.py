@@ -18,6 +18,10 @@ ROOT = HERE.parents[3]
 sys.path.insert(0, str(HERE.parent))
 from coa_talent_catalog import STUBS  # noqa: E402
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import dbc_dir  # noqa: E402
+
 MAIN = r"""
 #include "AscensionCoATalentData.h"
 #include "AscensionCoATalentState.h"
@@ -140,8 +144,10 @@ int main(int, char** argv)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dbc-dir", type=Path, required=True)
+    parser.add_argument("--dbc-dir", type=Path, default=None)
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
 
     compiler = shutil.which(os.environ.get("CXX", "cl.exe" if os.name == "nt" else "c++"))
     assert compiler, "Enable a C++20 compiler (VS Developer PowerShell on Windows)."

@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionReaperTalents.h"
+#include "AscensionSpellSafe.h"
 #include "CellImpl.h"
 #include "GridNotifiersImpl.h"
 #include "ObjectAccessor.h"
@@ -115,8 +116,16 @@ class aura_ascension_harvester : public AuraScript
     {
         PreventDefaultAction();
         Unit* owner = GetTarget();
-        int32 percent = sSpellMgr->GetSpellInfo(SPELL_HARVESTER_AMOUNT)->Effects[EFFECT_0].CalcValue(owner);
-        uint64 amount = uint64(event.GetDamageInfo()->GetDamage()) * std::clamp(percent, 0, 100) / 100;
+        // Meme famille de defaut que les quinze deref nus deja repris ailleurs dans le module :
+        // sSpellMgr->GetSpellInfo() rend nullptr des que l'id sort du Spell.dbc (P-047), et ce
+        // chemin est un proc, donc un fil de MapUpdate. Le repli 15 est la valeur lue au
+        // Spell.dbc en service le 2026-09-21 (500283 "Harvester", effet 0 BasePoints 14 /
+        // DieSides 1, soit val=15) : degrader la passive de spec vaut mieux que l'eteindre.
+        int32 percent = AscensionSpellSafe::EffectValue(SPELL_HARVESTER_AMOUNT, EFFECT_0, owner, 15);
+        DamageInfo* damageInfo = event.GetDamageInfo();
+        if (!damageInfo)
+            return;
+        uint64 amount = uint64(damageInfo->GetDamage()) * std::clamp(percent, 0, 100) / 100;
         if (amount)
             owner->CastCustomSpell(SPELL_BLOOD_HARVEST, SPELLVALUE_BASE_POINT0,
                 int32(std::min<uint64>(amount, std::numeric_limits<int32>::max())), owner, TRIGGERED_FULL_MASK);

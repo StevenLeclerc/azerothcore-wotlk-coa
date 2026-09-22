@@ -6,6 +6,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 
 
@@ -20,11 +24,9 @@ def main():
         out = Path(directory)
         cpp, exe = out / "bloodmage.cpp", out / "bloodmage.exe"
         cpp.write_text(code, encoding="utf-8")
-        compiler = Path(os.environ["VCToolsInstallDir"]) / "bin/Hostx64/x64/cl.exe"
-        subprocess.run([str(compiler), "/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/utf-8",
-                        str(cpp), "/Fe" + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
-    raw = (ROOT.parent / "runtime/server/data/dbc/Spell.dbc").read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from("<I", raw, 4)[0]
     ids = {562720,562572,572856,707706,681395,572280,704659,707447,706605,706607,706606,706608}
     rows = {r[0]:r for r in struct.iter_unpack("<234I",raw[20:20+count*936]) if r[0] in ids}

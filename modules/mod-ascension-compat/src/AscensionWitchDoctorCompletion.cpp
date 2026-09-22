@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionWitchDoctorCompletion.h"
+#include "AscensionContract.h"
 #include "AscensionWitchDoctorCoefficients.h"
 #include "CellImpl.h"
 #include "DBCStores.h"
@@ -139,23 +140,43 @@ void GainSpirit(Player* player, uint8 count)
     }
     SyncSpirits(player);
 }
+// Les deux balayages ci-dessous repetent, mot pour mot, ceux d'AscensionCultist.cpp:119-152,
+// et ils portaient le meme ecart que AscensionWitchHunterEvents.cpp:313 : le seul `State`
+// etait teste, pas la specialisation. Player::HasSpell (Player.cpp:4133-4137) exige les DEUX,
+// `State != PLAYERSPELL_REMOVED` ET `IsInSpec(m_activeSpec)`. La consequence n'etait pas
+// cosmetique pour KnownRank : son resultat part directement en Cast()
+// (AscensionWitchDoctorAbilities.cpp:275-276), donc un rang detenu par la seule specialisation
+// INACTIVE pouvait etre lance. Le filtre ne retranche rien hors des rangs de talent : un sort
+// qui ne descend pas d'un talent est appris en SPEC_MASK_ALL
+// (Player::GetLearnSpellSpecMask, Player.cpp:3505-3513).
+// Deux lectures par entree sont aussi supprimees, a semantique identique : GetFirstSpellInChain
+// (root) et GetSpellRank(result) ne changent pas d'un tour a l'autre.
 uint32 KnownRank(Player* player, uint32 root)
 {
     uint32 result = root;
+    if (!player)
+        return result;
+    uint32 const chain = sSpellMgr->GetFirstSpellInChain(root);
+    uint8 const spec = player->GetActiveSpec();
+    uint8 best = sSpellMgr->GetSpellRank(root);
     for (auto const& [id, state] : player->GetSpellMap())
-        if (state->State != PLAYERSPELL_REMOVED && state->Active &&
-            sSpellMgr->GetFirstSpellInChain(id) == sSpellMgr->GetFirstSpellInChain(root) &&
-            sSpellMgr->GetSpellRank(id) > sSpellMgr->GetSpellRank(result))
+        if (state && state->State != PLAYERSPELL_REMOVED && state->Active && state->IsInSpec(spec) &&
+            sSpellMgr->GetFirstSpellInChain(id) == chain && sSpellMgr->GetSpellRank(id) > best)
+        {
             result = id;
+            best = sSpellMgr->GetSpellRank(id);
+        }
     return result;
 }
 void Reduce(Player* player, uint32 root, int32 milliseconds)
 {
     if (!player)
         return;
+    uint32 const chain = sSpellMgr->GetFirstSpellInChain(root);
+    uint8 const spec = player->GetActiveSpec();
     for (auto const& [id, state] : player->GetSpellMap())
-        if (state->State != PLAYERSPELL_REMOVED &&
-            sSpellMgr->GetFirstSpellInChain(id) == sSpellMgr->GetFirstSpellInChain(root))
+        if (state && state->State != PLAYERSPELL_REMOVED && state->IsInSpec(spec) &&
+            sSpellMgr->GetFirstSpellInChain(id) == chain)
         {
             if (milliseconds == INT32_MAX)
                 player->RemoveSpellCooldown(id, true);
@@ -294,7 +315,9 @@ void ApplyContracts(SpellInfo* info)
     if (Family(info, 0, 536870912) && id != EclipseHit && id != EclipseSplash)
     {
         periodic(EFFECT_0, 250);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        // A missing SpellDuration row used to be written as a null pointer, which GetDuration()
+        // reads as a duration of 0 (SpellInfo.cpp:2916): the aura lands already expired, silently.
+        AscensionContract::SetDuration(info, 1, "WitchDoctor");
         info->Effects[EFFECT_1].Effect = 0;
         info->Speed = 0.0f; // snapshot the spend into the immediate aura before consuming Spirits
     }
@@ -312,7 +335,7 @@ void ApplyContracts(SpellInfo* info)
     if (id == Frenzy)
     {
         dummy(EFFECT_2);
-        info->DurationEntry = sSpellDurationStore.LookupEntry(1);
+        AscensionContract::SetDuration(info, 1, "WitchDoctor");
     }
     if (IsBeam(info))
     {
@@ -354,7 +377,7 @@ void ApplyContracts(SpellInfo* info)
     if (IsIngredient(id))
     {
         info->StackAmount = 1;
-        info->DurationEntry = sSpellDurationStore.LookupEntry(21);
+        AscensionContract::SetDuration(info, 21, "WitchDoctor"); // infinite
     }
     if (id == Crystal)
         dummy(EFFECT_0);

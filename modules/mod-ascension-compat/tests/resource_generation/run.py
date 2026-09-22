@@ -7,6 +7,10 @@ import subprocess
 import struct
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 MODULE = ROOT / 'modules/mod-ascension-compat/src'
 
@@ -31,20 +35,18 @@ def main():
     code = header + Path(__file__).with_name('harness.cpp').read_text()
     code = code.replace('// NATIVE_STACK', extract(
         (ROOT / 'src/server/game/Spells/Auras/SpellAuras.cpp').read_text(), 'bool Aura::ModStackAmount('))
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     resources = {r[0]: r[49] for r in struct.iter_unpack('<234I', raw[20:20 + count * 936])
                  if r[0] in {800058, 803102, 500906}}
     assert resources == {800058: 6, 803102: 100, 500906: 6}, resources
     code += '\nstruct ResourceService {\n' + '\n'.join(methods) + '\n};\n'
     code += Path(__file__).with_name('cases.cpp').read_text()
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-resource-generation-') as directory:
         out = Path(directory)
         cpp, exe = out / 'resources.cpp', out / 'resources.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: resource-gain event loops, ranks, hostile/miss/trigger gates, per-cast/per-target grants,\n      ward/caps and mitigated-to-zero damaging hits')
 

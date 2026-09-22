@@ -37,6 +37,17 @@ class aura_ascension_felsworn_event : public AuraScript
             return outgoing && damage && info && info->Id == 800598;
         if (id == 560542)
             return outgoing && damage && melee && Inner(player) && !Derived(info);
+        // Garde de reentrance. Sa position EST la specification : 707902, 520244 et 560542
+        // doivent pouvoir partir pendant un autre proc Felsworn, et sont donc au-dessus.
+        // 520244 en depend pour exister : son unique declencheur est 800598, emis nulle part
+        // ailleurs que depuis le case 92087 du handler Proc ci-dessous (Cast(player, enemy, 800598),
+        // l.~143), qui tourne avec State(player).event deja a true. 707902 est un compteur
+        // alimente par les degats critiques derives des autres procs de la classe.
+        // Ces sorts declenches procent bien : acore_world.spell_proc porte AttributesMask = 2
+        // (PROC_ATTR_TRIGGERED_CAN_PROC, SpellMgr.h:277) pour 92087, 520244, 560542 et 707902,
+        // ce qui desactive le blocage des procs issus de sorts declenches de
+        // SpellAuras.cpp (Aura::GetProcEffectMask, SpellAuras.cpp:2165-2172).
+        // NE PAS remonter ce garde au-dessus des branches par id : cela tue 520244 et ralentit 707902.
         if (State(player).event)
             return false;
         if (id == 804822 || id == 805249 || id == 300476 || id == 805245)

@@ -7,6 +7,10 @@ import shutil
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 method = runpy.run_path(str(HERE.parent / "client_compat/run.py"))["method"]
@@ -78,17 +82,11 @@ def main():
     harness = (HERE.parent / "tinker_sentry/harness.cpp").read_text(encoding="utf-8")
     harness = harness[:harness.index("// ACTUAL_TIMER")].replace("// ACTUAL_ADMISSION", attack)
     harness += CASES.replace("// ACTUAL_IMP", imp)
-    compiler = shutil.which(os.environ.get("CXX", "g++"))
-    assert compiler, "Set CXX to a C++20 compiler."
     with tempfile.TemporaryDirectory(prefix="coa-hellfire-imp-") as directory:
         out = Path(directory)
         cpp, exe = out / "imp.cpp", out / "imp.exe"
         cpp.write_text(harness, encoding="utf-8")
-        if Path(compiler).stem.lower() == "cl":
-            flags = ["/nologo", "/std:c++20", "/EHsc", "/W4", "/WX", "/utf-8", str(cpp), "/Fe" + str(exe)]
-        else:
-            flags = ["-std=c++20", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(exe)]
-        subprocess.run([compiler, *flags], cwd=out, check=True)
+        compile_cxx(cpp, exe, cwd=out)
         subprocess.run([str(exe)], cwd=out, check=True)
     print("PASS: Imp control flags, neutral-target admission, PC/NPC immunities, PvP state and other summons")
 

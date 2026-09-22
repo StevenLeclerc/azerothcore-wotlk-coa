@@ -9,14 +9,24 @@ namespace CoAChallenges
     std::unordered_map<uint32, HungerClock> HungerAccum;
     std::unordered_set<uint32> HungerGuids;
 
+    // Lock-free mirror of HungerGuids.size(), so HungerUpdate (called for every
+    // player AND every bot on every map tick) can bail out without taking the
+    // global mutex when nobody on the realm has a hunger/thirst challenge.
+    // Every mutation of HungerGuids publishes it while holding HungerMutex.
+    static std::atomic<size_t> HungerTrackedCount{ 0 };
+    static void PublishHungerTrackedLocked()
+    {
+        HungerTrackedCount.store(HungerGuids.size(), std::memory_order_relaxed);
+    }
+
     bool IsHungerChallenge(uint32 challengeID)
     {
         if (challengeID == SURVIVALIST_HUNGER_ID)
             return true;
-        // Empty fallback key: DefField is DB-only, so building a
-        // "CoAChallenges.Survivalist.<id>" string here would just allocate on a
-        // per-tick, per-challenge hot path.
-        return DefField<bool>(challengeID, &ChallengeDef::survivalist, "", false);
+        // DB-only, and the 3-argument form: building a
+        // "CoAChallenges.Survivalist.<id>" key here would just allocate on a
+        // per-tick, per-challenge hot path for a value nothing reads.
+        return DefField<bool>(challengeID, &ChallengeDef::survivalist, false);
     }
 
     // Mark the player's counters clean and copy them out. HungerMutex held.
@@ -57,6 +67,7 @@ namespace CoAChallenges
         uint32 guid = player->GetGUID().GetCounter();
         std::lock_guard<std::mutex> lock(HungerMutex);
         HungerGuids.insert(guid);
+        PublishHungerTrackedLocked();
         HungerAccum[guid].state[challengeID] = HungerState{ 0, 0 };
     }
 
@@ -76,6 +87,7 @@ namespace CoAChallenges
         }
         std::lock_guard<std::mutex> lock(HungerMutex);
         HungerGuids.insert(guid);
+        PublishHungerTrackedLocked();
         HungerAccum[guid].state[SURVIVALIST_HUNGER_ID] = HungerState{ hunger, thirst };
     }
 
@@ -87,6 +99,7 @@ namespace CoAChallenges
             std::lock_guard<std::mutex> lock(HungerMutex);
             TakeHungerFlushLocked(guid, rows);
             HungerGuids.erase(guid);
+            PublishHungerTrackedLocked();
             HungerAccum.erase(guid);
         }
         CommitHungerFlush(guid, rows);
@@ -98,6 +111,7 @@ namespace CoAChallenges
     {
         std::lock_guard<std::mutex> lock(HungerMutex);
         HungerGuids.erase(guid);
+        PublishHungerTrackedLocked();
         HungerAccum.erase(guid);
     }
 
@@ -105,9 +119,11 @@ namespace CoAChallenges
     {
         if (WorldSession* session = player->GetSession())
         {
-            char msg[128];
-            snprintf(msg, sizeof(msg), "Challenge: your %s is critical (%d)! Eat or drink soon.", kind, value);
-            ChatHandler(session).PSendSysMessage(msg);
+            // PSendSysMessage forwards its first argument to fmt as a FORMAT
+            // string: a pre-formatted buffer would make any '{' coming from a
+            // name or a DB label throw inside fmt. Let fmt do the formatting.
+            ChatHandler(session).PSendSysMessage(
+                "Challenge: your {} is critical ({})! Eat or drink soon.", kind, value);
         }
     }
 
@@ -119,11 +135,31 @@ namespace CoAChallenges
     // Tracked set is maintained on activate/stop/fail/login/logout.
     void HungerUpdate(Player* player, uint32 diff)
     {
+        // Nobody tracked: one relaxed atomic load and out. Everything below
+        // (five config lookups, two aura-list scans, the global mutex) used to
+        // run for every player and every bot on every tick.
+        if (HungerTrackedCount.load(std::memory_order_relaxed) == 0)
+            return;
+
         uint32 guid = player->GetGUID().GetCounter();
+
+        {
+            // Cheap membership pre-check, before the config reads and the aura
+            // scans. The authoritative check stays in the main locked block
+            // below: the set can change between the two.
+            std::lock_guard<std::mutex> lock(HungerMutex);
+            if (HungerGuids.find(guid) == HungerGuids.end())
+                return;
+        }
 
         uint32 foodSpell = HungerFoodSpell();
         uint32 drinkSpell = HungerDrinkSpell();
-        uint32 maxV = sConfigMgr->GetOption<uint32>("CoAChallenges.HungerMax", 100);
+        // Bounded like FatigueMax (Fatigue.cpp): 0 would clamp every counter to
+        // 0 and make `hunger >= max` true on the first tick (death loop), and a
+        // value above INT32_MAX would make (int32)maxV negative, i.e. std::clamp
+        // called with hi < lo -> undefined behaviour.
+        uint32 maxV = std::clamp<uint32>(
+            sConfigMgr->GetOption<uint32>("CoAChallenges.HungerMax", 100), 1u, 100000u);
         uint32 foodRestore = sConfigMgr->GetOption<uint32>("CoAChallenges.FoodRestore", 1);
         uint32 drinkRestore = sConfigMgr->GetOption<uint32>("CoAChallenges.DrinkRestore", 1);
         bool eating = player->HasAuraType(SPELL_AURA_MOD_REGEN);
@@ -291,6 +327,7 @@ namespace CoAChallenges
             HungerAccum[guid] = std::move(fresh);
             HungerGuids.insert(guid);
         }
+        PublishHungerTrackedLocked();
     }
 
     // Drop ONE challenge from the cache (stop/fail). Must not re-read the DB:
@@ -309,8 +346,18 @@ namespace CoAChallenges
         if (it->second.state.empty())
         {
             HungerGuids.erase(guid);
+            PublishHungerTrackedLocked();
             HungerAccum.erase(guid);
         }
+    }
+
+    // Whether the character still has ANY hunger counter tracked. The meter
+    // auras are shared by every hunger challenge, so a caller that dropped one
+    // of them must ask before taking the icons away.
+    bool HasTrackedHunger(uint32 guid)
+    {
+        std::lock_guard<std::mutex> lock(HungerMutex);
+        return HungerGuids.find(guid) != HungerGuids.end();
     }
 
     // Apply the meter aura stacks from the cached values. Needed right after

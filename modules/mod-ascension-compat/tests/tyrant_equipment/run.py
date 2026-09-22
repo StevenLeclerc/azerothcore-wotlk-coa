@@ -7,6 +7,10 @@ import runpy
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
@@ -56,13 +60,11 @@ def main():
     contracts = read('modules/mod-ascension-compat/src/AscensionFelswornContracts.cpp', False)
     commander = extract(contracts, 'if (id == BurningCommander)')
     assert 'periodic(1, 3000);' in commander and 'info->Effects[EFFECT_2].Effect = 0;' in commander
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-tyrant-equipment-') as directory:
         out = Path(directory)
         cpp, exe = out / 'equipment.cpp', out / 'equipment.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: native slot/equip/retention checks; owned passive; unlearn/reset; warrior and Guardian boundaries')
 

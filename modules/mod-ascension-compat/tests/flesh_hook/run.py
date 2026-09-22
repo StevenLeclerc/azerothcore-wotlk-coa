@@ -7,6 +7,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
@@ -14,9 +18,11 @@ extract = runpy.run_path(str(HERE.parent / 'client_compat/run.py'))['method']
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dbc-dir', type=Path, required=True)
+    parser.add_argument('--dbc-dir', type=Path, default=None)
     parser.add_argument('--source-ref')
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
     path = 'modules/mod-ascension-compat/src/AscensionXorothContracts.cpp'
     contracts = (subprocess.check_output(['git', 'show', args.source_ref + ':' + path], cwd=ROOT).decode()
                  if args.source_ref else (ROOT / path).read_text())
@@ -45,7 +51,14 @@ def main():
 #include <cmath>
 #include <cstdint>
 using uint8=std::uint8_t;using uint32=std::uint32_t;using int32=std::int32_t;
-constexpr float M_PI=3.14159265f,MIN_MELEE_REACH=2.0f;
+// <cmath>, inclus juste au-dessus, definit M_PI comme MACRO : sans garde, la ligne
+// entiere disparait et MIN_MELEE_REACH avec elle.
+#ifndef M_PI
+constexpr float M_PI=3.14159265f;
+#endif
+constexpr float MIN_MELEE_REACH=2.0f; // ObjectDefines.h:46
+template<class... Args> void LogErrorStub(Args const&...) {}
+#define LOG_ERROR(...) LogErrorStub(__VA_ARGS__)
 enum SpellMissInfo {SPELL_MISS_NONE,SPELL_MISS_MISS,SPELL_MISS_DODGE,SPELL_MISS_IMMUNE,
     SPELL_MISS_EVADE,SPELL_MISS_REFLECT};
 enum SpellCastResult {SPELL_CAST_OK,SPELL_FAILED_OUT_OF_RANGE,SPELL_FAILED_TOO_CLOSE,
@@ -58,6 +71,7 @@ enum {SPELL_DAMAGE_CLASS_NONE=0,SPELL_DAMAGE_CLASS_MAGIC=1,SPELL_DAMAGE_CLASS_ME
     SPELL_ATTR1_AURA_STAYS_AFTER_COMBAT=3,SPELL_FLESH_HOOK_PULL=800605,SPELL_RANGE_THIRTY_YARDS=4};
 bool roll_chance_i(int32) {return true;}
 struct Range {uint32 ID;float minimum,maximum;uint32 Flags=0;};
+using SpellRangeEntry=Range; // le nom que porte la ligne DBC dans le moteur
 struct Store
 {
     Range row{4,0,30};
@@ -166,13 +180,11 @@ int main()
     }
 }
 '''
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-flesh-hook-') as directory:
         out = Path(directory)
         cpp, exe = out / 'hook.cpp', out / 'hook.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: native helper hit/range checks, grip immunity, evade and unchanged parent ranks')
 

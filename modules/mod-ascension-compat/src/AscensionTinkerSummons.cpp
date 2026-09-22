@@ -241,6 +241,7 @@ struct npc_ascension_tinker_device : ScriptedAI
     bool dropped = false;
     float travelled = 0;
     bool exploded = false;
+    bool deregistered = false;
     bool Mobile() const
     {
         return me->GetEntry() == 226312 || me->GetEntry() == 226012 || me->GetEntry() == 840028 ||
@@ -256,6 +257,10 @@ struct npc_ascension_tinker_device : ScriptedAI
         // Native summon-area auras enumerate m_Controlled, not our GUID index.
         // Keep the stationary TempSummon AI while participating in that lifecycle.
         player->m_Controlled.insert(me);
+        // Symetrique de l'effacement de Cleanup() : tant que cette insertion peut etre
+        // rejouee sur une IA deja nettoyee, le drapeau doit repartir de zero avec elle,
+        // sans quoi le prochain Cleanup() sauterait un effacement devenu necessaire.
+        deregistered = false;
         me->SetFaction(player->GetFaction());
         if (Turret(me->GetEntry()))
         {
@@ -362,12 +367,32 @@ struct npc_ascension_tinker_device : ScriptedAI
             Explode();
         Cleanup();
     }
+    // Cleanup() est appele deux fois par appareil (OnDespawn puis le destructeur
+    // de l'IA) : le drapeau evite la seconde mutation de m_Controlled, qui est un
+    // std::set du coeur appartenant au joueur et pouvant etre lu depuis le fil de
+    // SA carte pendant que nous tournons sur celui de la notre.
+    //
+    // La revue proposait de remplacer FindPlayer par ObjectAccessor::GetPlayer(*me,
+    // owner), filtre par carte. Refuse apres lecture du coeur : Unit::RemoveFromWorld
+    // (Unit.cpp:13168-13177) se contente de JOURNALISER quand une invocation figure
+    // encore dans le m_Controlled de son proprietaire, et n'appelle SetMinion(false)
+    // que pour UNIT_MASK_MINION | UNIT_MASK_GUARDIAN - masques qu'un TempSummon nu
+    // n'a pas. Renoncer a l'effacement quand le joueur a change de carte laisserait
+    // donc un Unit* libere dans m_Controlled, que le prochain RemoveAllControlled()
+    // (logout, mort, changement de spec) dereferencerait : un usage apres liberation,
+    // strictement pire que la course qu'on cherchait a fermer. Le vrai correctif
+    // (faire de l'appareil un vrai Guardian, ou le rendre actif pour que la garde
+    // !player->IsInMap(me) d'UpdateAI le depeuple a temps) change le comportement de
+    // jeu et depasse la gravite « mineur » de ce defaut : il reste ouvert.
     void Cleanup()
     {
+        if (deregistered)
+            return;
         if (Player* player = ObjectAccessor::FindPlayer(owner))
         {
             player->m_Controlled.erase(me);
             State(player).summons.erase(me->GetGUID());
+            deregistered = true;
         }
     }
     void OnDespawn() override { Cleanup(); }

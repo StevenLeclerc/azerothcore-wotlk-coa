@@ -307,7 +307,11 @@ class aura_ascension_venomancer_event : public AuraScript
                         CalculatePct(healing,Amount(808082)))));
                 break;
             case 808083:
-                Copy(player,GetTarget(),808084,uint32(std::max(0,GetAura()->GetEffect(EFFECT_0)->GetAmount())));
+                // Meme garde que 808082 juste au-dessus : GetEffect() rend nullptr si l'effet 0
+                // n'est plus une aure au Spell.dbc (P-047). La consommation de charge en dessous
+                // doit avoir lieu dans tous les cas, d'ou le if sur le seul Copy.
+                if (AuraEffect const* stored=GetAura()->GetEffect(EFFECT_0))
+                    Copy(player,GetTarget(),808084,uint32(std::max(0,stored->GetAmount())));
                 if (GetAura()->GetCharges() > 1)
                     GetAura()->SetCharges(GetAura()->GetCharges()-1);
                 else

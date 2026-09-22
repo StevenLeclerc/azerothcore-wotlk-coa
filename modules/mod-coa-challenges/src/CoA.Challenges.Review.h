@@ -191,6 +191,11 @@ namespace CoAChallenges
         bool rollbackOnDecline = false;                  // party-required -> decline reverts
         std::vector<std::pair<uint32, uint32>> pairs;    // offered set (wire / applied on accept)
         std::vector<std::pair<uint32, uint32>> rollback; // set to revert on the requester on decline
+        // Unix seconds past which the request is dead. The client is told a
+        // timeout (60 s) but nothing forced the server to honour it: an entry
+        // could outlive the logout and be answered on the next session, which
+        // would activate challenges the player never saw offered.
+        uint32 expiresAt = 0;
     };
 
     // One entry of a challenge's reward list (per level). Empty itemId means
@@ -247,7 +252,7 @@ namespace CoAChallenges
     // definitions (there is no generated-conf fallback). Misses return the
     // caller's default.
     template <typename T>
-    T DefField(uint32 challengeID, T ChallengeDef::*member, std::string const& /*confKey*/, T def)
+    T DefField(uint32 challengeID, T ChallengeDef::*member, T def)
     {
         std::lock_guard<std::mutex> lock(DefMutex);
         auto it = DefCache.find(challengeID);
@@ -256,16 +261,25 @@ namespace CoAChallenges
         return def;
     }
 
+    // Legacy 4-argument form. The config key has been ignored since the world DB
+    // became the single source of truth, but building it still costs one
+    // std::string per call, on paths as hot as ChallengeRules and LivesTotal.
+    // Kept so the callers that still pass one keep compiling; prefer the
+    // 3-argument form above in new code.
+    template <typename T>
+    T DefField(uint32 challengeID, T ChallengeDef::*member, std::string const& /*confKey*/, T def)
+    {
+        return DefField<T>(challengeID, member, def);
+    }
+
     inline std::string ChallengeRules(uint32 challengeID)
     {
-        return DefField<std::string>(challengeID, &ChallengeDef::rules,
-            "CoAChallenges.Rules." + std::to_string(challengeID), "");
+        return DefField<std::string>(challengeID, &ChallengeDef::rules, "");
     }
 
     inline std::string ChallengeConditions(uint32 challengeID)
     {
-        return DefField<std::string>(challengeID, &ChallengeDef::conditions,
-            "CoAChallenges.Conditions." + std::to_string(challengeID), "");
+        return DefField<std::string>(challengeID, &ChallengeDef::conditions, "");
     }
 
 // Namespace-scope state (defined once in the domain file noted).
@@ -365,6 +379,7 @@ void WarnHunger(Player* player, char const* kind, int32 value);
 void HungerUpdate(Player* player, uint32 diff);
 void RefreshHungerTracking(Player* player);
 void RemoveHungerChallenge(Player* player, uint32 challengeID);
+bool HasTrackedHunger(uint32 guid);
 void SyncMeterAuras(Player* player);
 bool IsFatigueChallenge(uint32 challengeID);
 uint32 FatigueMax();

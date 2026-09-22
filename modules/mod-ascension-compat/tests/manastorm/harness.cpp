@@ -26,6 +26,23 @@ using namespace Ascension::Manastorm;
 using namespace std::chrono_literals;
 constexpr uint32 EventCacheDelivery = 2;
 constexpr uint32 SPELL_AURA_MOD_XP_PCT = 200;
+// Les deux entrees d'objet sont declarees dans AscensionManastorm.cpp, hors des
+// methodes recopiees ici : run.py va chercher les lignes elles-memes.
+// ACTUAL_ENTRIES
+// Journal : on retient le texte de format, pour prouver qu'une branche a parle.
+inline std::vector<std::string> loggedErrors;
+template<class... Args> void LogErrorStub(char const*, char const* format, Args const&...)
+{
+    loggedErrors.push_back(format);
+}
+#define LOG_ERROR(category, ...) LogErrorStub(category, __VA_ARGS__)
+// SpellAuraEffects.h : AuraEffect::GetId() rend l'id du sort porteur.
+struct AuraEffect
+{
+    uint32 id = 0;
+    std::int32_t amount = 0;
+    uint32 GetId() const { return id; }
+};
 struct WorldPacket
 {
     uint16 opcode = 0;
@@ -77,6 +94,11 @@ struct ObjectGuid
     uint32 GetCounter() const
     {
         return value;
+    }
+    // ObjectGuid.h:216 : std::string ToString() const;
+    std::string ToString() const
+    {
+        return "Player-0-" + std::to_string(value);
     }
     auto operator<=>(ObjectGuid const&) const = default;
 };
@@ -203,6 +225,31 @@ struct Player
     {
         assert(aura == SPELL_AURA_MOD_XP_PCT);
         return xpMultiplier;
+    }
+    // Unit.h:1529 : meme aura, filtree par predicat. Les effets anonymes du fixture
+    // sont deja agreges dans xpMultiplier ; seuls les effets nommes passent le filtre.
+    std::vector<AuraEffect> xpAuras;
+    float GetTotalAuraMultiplier(uint32 aura, std::function<bool(AuraEffect const*)> const& predicate) const
+    {
+        assert(aura == SPELL_AURA_MOD_XP_PCT);
+        float multiplier = xpMultiplier;
+        for (AuraEffect const& effect : xpAuras)
+            if (predicate(&effect))
+                multiplier *= (100.0f + float(effect.amount)) / 100.0f;
+        return multiplier;
+    }
+    // Player.h:2202 : bool GetsRecruitAFriendBonus(bool forXP);
+    bool recruitAFriend = false;
+    bool GetsRecruitAFriendBonus(bool forXP)
+    {
+        assert(forXP);
+        return recruitAFriend;
+    }
+    std::string name = "Fixture";
+    // Object.h:529 : std::string const& GetName() const;
+    std::string const& GetName() const
+    {
+        return name;
     }
     bool HasSpell(uint32 id) const
     {
@@ -518,6 +565,32 @@ int main(int argc, char** argv)
         s.Complete(&boosted, rewardRun);
         assert(CharacterDatabase.Commit(s.transactions.back()));
         assert(CharacterDatabase.xp[boosted.guid.value] == firstXP + repeatXP);
+    }
+    // Recrutement d'un ami : l'effet 818059 est ecarte du multiplicateur quand le
+    // bonus s'applique deja, et compte quand il ne s'applique pas.
+    for (bool recruit : {false, true})
+    {
+        Player recruited;
+        recruited.guid.value = guid++;
+        recruited.xpAuras.push_back({818059, 100});
+        recruited.recruitAFriend = recruit;
+        Run& recruitRun = s.runs[recruited.guid];
+        s.Complete(&recruited, recruitRun);
+        assert(CharacterDatabase.Commit(s.transactions.back()));
+        assert(CharacterDatabase.xp[recruited.guid.value] == (recruit ? 75u : 150u));
+    }
+    // Invariant rompu : un compte nul ferait echouer Item::CreateItem. La branche doit
+    // parler et faire echouer la remise, au lieu de la perdre en silence.
+    {
+        Player unlucky;
+        unlucky.guid.value = guid++;
+        Run& unluckyRun = s.runs[unlucky.guid];
+        std::size_t const before = loggedErrors.size();
+        Item::failEntry = BoltEntry;
+        s.Complete(&unlucky, unluckyRun);
+        Item::failEntry = 0;
+        assert(loggedErrors.size() == before + 1);
+        assert(unluckyRun.commitReady && !unluckyRun.commitSucceeded);
     }
     return 0;
 }

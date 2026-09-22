@@ -64,30 +64,51 @@ int main()
     assert(!script.OnBeforeLootEqualChanced(&player, {}, loot, LootTemplates_Item));
     assert(loot.awarded.size() == count);
     item_ascension_adventurer_cache use;
+    // Le coffre ne passe plus par une fenetre de butin : il verse la recompense dans
+    // les sacs, puis se consomme. SendLoot n'est plus appele.
+    fixtureLootRoll = {{117, 0, 2}, {118, 5, 1}};
     assert(use.OnUse(&player, &player.item, {}));
-    assert(player.opened == 1 && player.acknowledgements == 1);
+    assert(player.opened == 0 && player.acknowledgements == 1);
+    assert(player.destroyed.size() == 1 && player.destroyed.front().first == AdventurerCache
+        && player.destroyed.front().second == 1);
+    assert((player.given == std::vector<std::pair<uint32, uint32>>{{117, 2}, {118, 1}}));
+    assert(player.equipErrors.empty());
+    // Sacs pleins : rien n'est detruit, rien n'est donne, et le joueur est prevenu.
+    {
+        Player full;
+        full.item.entry = AdventurerCache;
+        full.freeSlots = 1;
+        assert(use.OnUse(&full, &full.item, {}));
+        assert(full.destroyed.empty() && full.given.empty());
+        assert(full.equipErrors.size() == 1 && full.equipErrors.front().first == EQUIP_ERR_INVENTORY_FULL
+            && full.equipErrors.front().second == 118);
+    }
     player.alive = false;
-    assert(use.OnUse(&player, &player.item, {}) && player.opened == 1);
+    assert(use.OnUse(&player, &player.item, {}) && player.destroyed.size() == 1);
     player.alive = true;
     player.combat = true;
-    assert(use.OnUse(&player, &player.item, {}) && player.opened == 1);
+    assert(use.OnUse(&player, &player.item, {}) && player.destroyed.size() == 1);
+    player.combat = false;
     player.item.entry = 123;
     assert(!use.OnUse(&player, &player.item, {}));
     for (CacheItems entry : {AdventurerSatchel, AdventurerRareCache})
     {
         Player recipient;
         recipient.item.entry = entry;
+        fixtureLootRoll = {{117, 0, 1}};
         assert(use.OnUse(&recipient, &recipient.item, {}));
-        assert(recipient.opened == 1 && recipient.acknowledgements == 1);
+        assert(recipient.acknowledgements == 1 && recipient.destroyed.size() == 1
+            && recipient.destroyed.front().first == uint32(entry));
+        assert((recipient.given == std::vector<std::pair<uint32, uint32>>{{117, 1}}));
         Loot reward;
         assert(!script.OnBeforeLootEqualChanced(&recipient, entries, reward, LootTemplates_Item));
         assert(reward.awarded.size() == 1);
         auto item = manager.GetItemTemplate(reward.awarded.front());
         assert(item->RequiredLevel <= recipient.level);
         recipient.combat = true;
-        assert(use.OnUse(&recipient, &recipient.item, {}) && recipient.opened == 1);
+        assert(use.OnUse(&recipient, &recipient.item, {}) && recipient.destroyed.size() == 1);
         recipient.combat = false;
         recipient.alive = false;
-        assert(use.OnUse(&recipient, &recipient.item, {}) && recipient.opened == 1);
+        assert(use.OnUse(&recipient, &recipient.item, {}) && recipient.destroyed.size() == 1);
     }
 }

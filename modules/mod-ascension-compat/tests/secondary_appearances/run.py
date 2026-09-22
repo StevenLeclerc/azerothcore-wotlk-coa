@@ -6,6 +6,10 @@ import runpy
 import struct
 import sys
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import datamine_dir, dbc_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 sys.path.insert(0, str(ROOT / 'apps/coa-spells'))
 tool = runpy.run_path(str(ROOT / 'apps/coa-spells/secondary_appearances.py'))
@@ -17,14 +21,16 @@ def main():
         width = len(expected[0])
         ids = {row[0] for row in expected}
         captured = {}
-        for path in (ROOT.parent / 'client-reference/coa-datamine/raw/tables' / table).glob('*.jsonl.gz'):
+        tables = datamine_dir(required='raw/tables',
+                              default=ROOT.parent / 'client-reference/coa-datamine') / 'raw/tables'
+        for path in (tables / table).glob('*.jsonl.gz'):
             with gzip.open(path, 'rt', encoding='utf-8') as source:
                 for line in source:
                     row = json.loads(line)
                     if row['f0'] in ids:
                         captured[row['f0']] = [row[f'f{i}'] for i in range(width)]
         assert captured == {row[0]: row for row in expected}
-        raw = (ROOT.parent / 'runtime/server/data/dbc' / f'{table}.dbc').read_bytes()
+        raw = (dbc_dir() / f'{table}.dbc').read_bytes()
         result = tool['transform'](raw, table)
         before, strings = reader(raw, width)
         after, new_strings = reader(result, width)

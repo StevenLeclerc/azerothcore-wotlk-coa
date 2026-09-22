@@ -7,6 +7,10 @@ import struct
 import subprocess
 import tempfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[4]
 HERE = Path(__file__).resolve().parent
 
@@ -60,6 +64,13 @@ struct Unit
         for (auto& [key,aura] : auras) { appStore[index]={&aura}; applications[index]=&appStore[index]; ++index; }
         return applications;
     }
+    bool HasAura(uint32 id) const
+    {
+        // Unit.h:1501 : HasAura(spellId, casterGUID = ObjectGuid::Empty, ...) — sans lanceur
+        // impose, n'importe quel porteur de ce sort compte.
+        for (auto const& [key,aura] : auras) if (key.first==id) return true;
+        return false;
+    }
     uint32 guid=1;''')
     code = code.replace('struct Cast { uint32 id; Unit* target; int32 amount; };',
                         'struct Cast { uint32 id; Unit* target; int32 amount; int32 hand=0; };')
@@ -87,6 +98,8 @@ struct Unit
     struct Application { uint32 mode=AURA_REMOVE_BY_EXPIRE; uint32 GetRemoveMode() const { return mode; } } fixtureApplication;
     Application const* GetTargetApplication() const { return &fixtureApplication; }
     uint8 GetStackAmount() const { return fixtureAura.stacks; }
+    SpellInfo fixtureSpellInfo;
+    SpellInfo const* GetSpellInfo() const { return &fixtureSpellInfo; }
     bool prevented=false;''')
     code = code.replace('virtual void OnAuraApply(Unit*,Aura*) {}', '''
     virtual void ModifySpellEffectBaseValue(Unit const*,SpellInfo const*,uint8,float&) {}
@@ -103,9 +116,7 @@ def compile_case(code, source_name, cases):
         out = Path(directory)
         cpp, exe = out / 'runemaster.cpp', out / 'runemaster.exe'
         cpp.write_text(code + source + cases, encoding='utf-8')
-        compiler = Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe'
-        subprocess.run([str(compiler), '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
 
 
@@ -184,7 +195,7 @@ int main()
     metadata.OnLoadSpellCustomAttr(&info); assert(info.AscensionInheritsResolvedAmount);
 }
 ''')
-    raw = (ROOT.parent / 'runtime/server/data/dbc/Spell.dbc').read_bytes()
+    raw = (dbc_dir() / 'Spell.dbc').read_bytes()
     count = struct.unpack_from('<I', raw, 4)[0]
     ids = {500462, 500466, 500468, 802645, 802661, 801511, 807377, 807378, 807819, 808020, 653210, 653211, 653212}
     rows = {r[0]: r for r in struct.iter_unpack('<234I', raw[20:20+count*936]) if r[0] in ids}

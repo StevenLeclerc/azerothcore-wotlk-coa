@@ -10,6 +10,10 @@ import subprocess
 import tempfile
 import zipfile
 
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
+
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 SQL = ROOT / 'data/sql/updates/pending_db_world/rev_1789370063248101100.sql'
@@ -62,8 +66,10 @@ def check_summons(rows):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dbc-dir', type=Path, required=True)
+    parser.add_argument('--dbc-dir', type=Path, default=None)
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
 
     def rows(name):
         blob = (args.dbc_dir / (name + '.dbc')).read_bytes()
@@ -108,13 +114,11 @@ def main():
     code += 'struct Target{uint32 maximum;uint32 GetMaxPower(int)const{return maximum;}} unit{maximum};'
     code += 'auto target=&unit;int PowerType=0;' + calculation + 'return amount;}\n'
     code += '\n'.join(init) + (HERE / 'cases.cpp').read_text()
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-chrono-time-') as directory:
         out = Path(directory)
         cpp, exe = out / 'time.cpp', out / 'time.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: Epoch/Aeons, copied amounts, stacks, rank-aware Recovery extensions, echoes and periodic cooldowns')
 

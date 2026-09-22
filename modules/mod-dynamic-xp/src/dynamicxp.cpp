@@ -15,8 +15,10 @@ Local additions:
 #include "Chat.h"
 #include "CommandScript.h"
 #include "Configuration/Config.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "WorldSession.h"
 
 #include <atomic>
 #include <cmath>
@@ -174,6 +176,21 @@ namespace
             amount =  static_cast<uint32>(round(amount * sConfigMgr->GetOption<float>("Dynamic.XP.Rate.70-79", 8)));
     }
 
+    /// True when the key that starts a line really ends at \p after, instead of running
+    /// on into a longer key. Without it, a prefix compare on "Dynamic.XP.Preset" also
+    /// matches the line "Dynamic.XP.Preset.PlayerChoice = 1", and `.xp realm 5` rewrites
+    /// that line as "Dynamic.XP.Preset = 5" - deleting an option the command never
+    /// mentioned, and leaving the real "Dynamic.XP.Preset" line further down to win at
+    /// the next restart. The file in service only escapes that by the order of its lines.
+    bool KeyEndsHere(std::string const &line, size_t after)
+    {
+        if (after >= line.size())
+            return true;
+
+        char const next = line[after];
+        return next == ' ' || next == '\t' || next == '=';
+    }
+
     /// Writes the realm value into this module's config so a restart keeps it. Only the
     /// "Dynamic.XP.Preset" line is rewritten: the comments and the band rates stay as
     /// the operator wrote them. The line is appended when the file does not have it.
@@ -192,7 +209,8 @@ namespace
             {
                 size_t const first = line.find_first_not_of(" \t");
                 if (!replaced && first != std::string::npos &&
-                    line.compare(first, sizeof(PRESET_CONFIG_KEY) - 1, PRESET_CONFIG_KEY) == 0)
+                    line.compare(first, sizeof(PRESET_CONFIG_KEY) - 1, PRESET_CONFIG_KEY) == 0 &&
+                    KeyEndsHere(line, first + sizeof(PRESET_CONFIG_KEY) - 1))
                 {
                     lines.push_back(std::string(PRESET_CONFIG_KEY) + " = " +
                                     std::to_string(preset));
@@ -414,11 +432,27 @@ private:
         if (!handler)
             return false;
 
+        uint32 const previous = RealmPreset();
+
         std::string path;
         bool const persisted = PersistRealmPreset(preset, path);
         // Apply it for this session even when the file could not be written, so the
         // switch always does what the operator asked for.
         g_realmPresetCache.store(int32(preset), std::memory_order_relaxed);
+
+        // This one command changes the experience rate of every character on the realm
+        // and rewrites a configuration file, so it leaves a server-side trace. It cannot
+        // rely on the core's GM log: Logger.commands.gm is not declared in the
+        // worldserver.conf this realm runs, so no GM command is journalled at all.
+        WorldSession const *session = handler->GetSession();
+        LOG_INFO("module.dynamic_xp", "Realm XP preset changed from {} to {} by {}.",
+                 previous, preset, session ? session->GetPlayerName() : std::string("console"));
+
+        // Said separately and at ERROR level because the chat line below is the only other
+        // report, and an order given from the RA console writes it to a buffer nobody reads.
+        if (!persisted)
+            LOG_ERROR("module.dynamic_xp", "Could not write {}: the realm XP preset {} is lost "
+                      "at the next restart.", path, preset);
 
         if (preset == 1)
             handler->PSendSysMessage(

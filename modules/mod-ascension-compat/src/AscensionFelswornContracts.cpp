@@ -3,6 +3,7 @@
 #include "AscensionFelsworn.h"
 #include "AscensionFelswornData.h"
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -223,7 +224,22 @@ void ApplyContracts(SpellInfo* info)
     if (id == 800355)
     {
         info->SchoolMask = SPELL_SCHOOL_MASK_FIRE | SPELL_SCHOOL_MASK_SHADOW;
-        info->Effects[1].Amplitude = uint32(std::max(1, info->GetDuration()));
+        // Effect 1 is a periodic damage aura meant to land as a single tick at expiry, so
+        // the amplitude is set equal to the duration. SpellInfo::GetDuration (SpellInfo.cpp:2916)
+        // returns -1 for a row flagged infinite -- the very index this module writes 15 times
+        // to mean "infinite" -- and the former std::max(1, -1) turned that into a 1 ms tick on
+        // an aura that never expires: a 1000 Hz damage loop, without a word in the journal.
+        // A non-positive duration means the assumption behind this rewrite is false, so the
+        // client amplitude is kept and the refusal is journalled, the way AscensionContract
+        // leaves a record alone when one of its assumptions is refused.
+        int32 duration = info->GetDuration();
+        if (duration > 0)
+            info->Effects[1].Amplitude = uint32(duration);
+        else
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Felsworn: spell {} has a non-positive duration ({}); its periodic "
+                "effect keeps the client amplitude {} instead of a single tick at expiry.",
+                id, duration, info->Effects[1].Amplitude);
         info->AttributesEx5 &= ~SPELL_ATTR5_EXTRA_INITIAL_PERIOD;
     }
     if (id == 807727)

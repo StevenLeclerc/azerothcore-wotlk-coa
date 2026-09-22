@@ -115,12 +115,18 @@ class pyromancer_spells : public AllSpellScript
             if (Chance(player, 704816))
             {
                 ObjectGuid guid = spell->m_targets.GetUnitTargetGUID();
+                ObjectGuid owner = player->GetGUID();
+                // Patron du module : on retient un ObjectGuid, jamais un Player*, et on relit
+                // par ObjectAccessor au moment ou la tache s'execute.
                 State(player).scheduler.Schedule(300ms,
-                                                 [player, guid, id](TaskContext)
+                                                 [owner, guid, id](TaskContext)
                                                  {
-                                                     if (Unit* target = ObjectAccessor::GetUnit(*player, guid);
-                                                         target && player->IsValidAttackTarget(target))
-                                                         Cast(player, target, id);
+                                                     Player* scheduled = ObjectAccessor::FindPlayer(owner);
+                                                     if (!scheduled || !scheduled->IsInWorld() || !scheduled->IsAlive())
+                                                         return;
+                                                     if (Unit* target = ObjectAccessor::GetUnit(*scheduled, guid);
+                                                         target && scheduled->IsValidAttackTarget(target))
+                                                         Cast(scheduled, target, id);
                                                  });
             }
         }

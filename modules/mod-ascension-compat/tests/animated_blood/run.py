@@ -2,11 +2,16 @@
 import argparse
 import os
 from pathlib import Path
+import re
 import runpy
 import sqlite3
 import struct
 import subprocess
 import tempfile
+
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from coa_test_env import compile_cxx, dbc_dir  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
@@ -16,8 +21,10 @@ SQL = ROOT / 'data/sql/updates/pending_db_world/rev_1789365018824773600.sql'
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dbc-dir', type=Path, required=True)
+    parser.add_argument('--dbc-dir', type=Path, default=None)
     args = parser.parse_args()
+    if args.dbc_dir is None:
+        args.dbc_dir = dbc_dir()
     db = sqlite3.connect(':memory:')
     db.executescript('''
         CREATE TABLE creature_template (entry INT PRIMARY KEY, name TEXT, minlevel INT, maxlevel INT,
@@ -76,6 +83,8 @@ def main():
 #include <array>
 #include <cstdint>
 #include <initializer_list>
+#include <algorithm>
+#include <vector>
 using uint8=std::uint8_t;using uint32=std::uint32_t;
 using SpellEffIndex=uint8;
 constexpr uint32 EFFECT_1=1,SPELL_EFFECT_TRIGGER_SPELL=64,SPELLVALUE_BASE_POINT0=0;
@@ -94,6 +103,9 @@ struct Unit
     {assert(id==712383 && owner==1);return aura.count && !aura.removed?&aura:nullptr;}
     void CastCustomSpell(uint32 id,uint32 slot,uint32 count,Unit* target,bool triggered)
     {assert(id==712417 && slot==0 && target==this && triggered);spawned+=count;}
+    // Unit.h:1926 : void RemoveAllMinionsByEntry(uint32 entry);
+    std::vector<uint32> removedMinions;
+    void RemoveAllMinionsByEntry(uint32 entry){removedMinions.push_back(entry);}
 };
 struct SpellScript
 {
@@ -102,11 +114,16 @@ struct SpellScript
     bool ValidateSpellInfo(std::initializer_list<uint32> ids){return ids.size()==2;}
     Unit* GetCaster(){return &owner;}SpellInfo const* GetSpellInfo(){return &info;}
     void PreventHitDefaultEffect(SpellEffIndex index){assert(index==1);prevented=true;}
-    struct Hook {void operator+=(int){}} OnEffectLaunch;
+    struct Hook {void operator+=(int){}} OnEffectLaunch, BeforeCast;
 };
 #define PrepareSpellScript(name) public:
 #define SpellEffectFn(...) 0
+#define SpellCastFn(...) 0
 '''
+    # La liste des entrees se lit dans le module, jamais recopiee ici : c'est elle
+    # que ReplacePreviousBrood parcourt.
+    code += re.search(r'^constexpr uint32 AnimatedBloodSummons\[\] = \{[^}]*\};$',
+                      source, re.M).group(0) + '\n'
     code += extract(source, 'enum BloodmageTalentSpells') + ';\n'
     code += extract(source, 'class spell_ascension_animated_blood') + ';\n'
     code += '\nuint32 NativeCount(uint32 damage) {struct Props {uint32 Id=61;} p; auto properties=&p;'
@@ -128,18 +145,22 @@ int main()
             script.HandleExtraWorms(EFFECT_1);
             assert(script.owner.spawned==stacks); // Consumed stacks cannot be used twice.
         }
+    // Une relance retire la couvee precedente : les trois entrees, et rien d'autre.
+    spell_ascension_animated_blood brood;
+    brood.ReplacePreviousBrood();
+    std::vector<uint32> removed = brood.owner.removedMinions;
+    std::sort(removed.begin(), removed.end());
+    assert((removed == std::vector<uint32>{315301, 325301, 335301}));
     spell_ascension_animated_blood other;
     other.info.Effects[1].TriggerSpell=1;
     other.HandleExtraWorms(EFFECT_1);assert(!other.prevented && !other.owner.spawned);
 }
 '''
-    compiler = str(Path(os.environ['VCToolsInstallDir']) / 'bin/Hostx64/x64/cl.exe')
     with tempfile.TemporaryDirectory(prefix='coa-animated-blood-') as directory:
         out = Path(directory)
         cpp, exe = out / 'blood.cpp', out / 'blood.exe'
         cpp.write_text(code, encoding='utf-8')
-        subprocess.run([compiler, '/nologo', '/std:c++20', '/EHsc', '/W4', '/WX', '/utf-8',
-                        str(cpp), '/Fe' + str(exe)], cwd=out, check=True, timeout=60)
+        compile_cxx(cpp, exe, cwd=out, timeout=60)
         subprocess.run([str(exe)], cwd=out, check=True, timeout=15)
     print('PASS: rank summon dependencies, idempotent SQL, native counts and consumed Darkcasting extras')
 
