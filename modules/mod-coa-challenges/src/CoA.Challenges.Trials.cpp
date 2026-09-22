@@ -782,10 +782,18 @@ namespace CoAChallenges
             return;
         }
 
-        g_suppressSyncBroadcast = true;
+        // Sauvegarde-restaure, et non `true` puis `false` : g_suppressSyncBroadcast
+        // est UN atomique a l'echelle du processus (Core.cpp) et ce chemin tourne
+        // sur chaque fil de carte. Ecrire `false` en dur relacherait la
+        // suppression d'un autre fil encore dans sa propre section, qui
+        // rediffuserait alors SMSG 0x59B sur le defi qu'il est en train de
+        // defaire. Avec la restauration, le drapeau ne peut etre remis a zero
+        // que par le fil qui l'a pose. Meme forme que Lifecycle.cpp et
+        // History.cpp, qui l'appliquaient deja.
+        bool const prevSuppress = g_suppressSyncBroadcast.exchange(true);
         for (auto const& [cid, lvl] : entries)
             DoActivateChallenge(player, cid, lvl);
-        g_suppressSyncBroadcast = false;
+        g_suppressSyncBroadcast.store(prevSuppress);
 
         // One group sync for the whole trial (not one per bundled challenge).
         // A trial bundling a party-required challenge (Duo/Trio/GroupSize>=2)
@@ -825,7 +833,11 @@ namespace CoAChallenges
 
         uint32 ownerGuid = TrialOwnerGuid(trialID);
         std::vector<std::pair<uint32, uint32>> removed;
-        g_suppressSyncBroadcast = true;
+        // Meme raison qu'a l'activation : sauvegarde-restaure, jamais `false`
+        // en dur. Cette section-ci est la plus longue du module — elle fait des
+        // requetes et peut echouer un defi — donc celle ou le recouvrement
+        // entre deux fils est le plus probable.
+        bool const prevSuppressStop = g_suppressSyncBroadcast.exchange(true);
         if (ownerGuid)
         {
             // Mirror the single-challenge STOP path: a challenge with lives is
@@ -863,7 +875,7 @@ namespace CoAChallenges
                 } while (r->NextRow());
             }
         }
-        g_suppressSyncBroadcast = false;
+        g_suppressSyncBroadcast.store(prevSuppressStop);
 
         // One removal sync for the whole trial.
         if (!removed.empty() && player->GetGroup()
