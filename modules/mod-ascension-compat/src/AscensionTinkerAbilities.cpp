@@ -447,8 +447,12 @@ class spell_ascension_tinker_ability : public SpellScript
         if (Any(GetSpellInfo(),{805372}) && type == SPELL_EFFECT_SCRIPT_EFFECT)
         {
             PreventHitDefaultEffect(index);
-            if (GetHitUnit())
-                PetCast(player,GetHitUnit(),805459);
+            // Effect est branche sur OnEffectHit AUSSI, qui n'est pas un
+            // crochet a cible (SpellScript::IsInTargetHook) : GetHitUnit() y
+            // journalise une erreur et rend nullptr, que le `if` ecarte deja.
+            // Une seule lecture, aussi, au lieu de deux appels successifs.
+            if (Unit* cible = IsInTargetHook() ? GetHitUnit() : nullptr)
+                PetCast(player,cible,805459);
         }
         if (id == 524835 || id == 800349 || id == 801798)
         {

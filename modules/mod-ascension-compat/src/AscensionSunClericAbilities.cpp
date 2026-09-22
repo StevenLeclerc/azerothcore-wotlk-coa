@@ -410,7 +410,11 @@ class spell_ascension_sun_cleric_ability : public SpellScript
         if (Any(GetSpellInfo(), {804249,804253,804254,804250}))
         {
             PreventHitDefaultEffect(index);
-            Unit* ally = GetHitUnit();
+            // Effect est branche sur OnEffectHit AUSSI, qui n'est pas un
+            // crochet a cible (SpellScript::IsInTargetHook) : GetHitUnit() y
+            // journalise une erreur et rend nullptr. Le `!ally` juste en
+            // dessous attend deja ce nullptr.
+            Unit* ally = IsInTargetHook() ? GetHitUnit() : nullptr;
             if (!ally || !ally->HasAura(Bless, player->GetGUID()))
                 return;
             if (Named(GetSpellInfo(), 804249))

@@ -376,11 +376,18 @@ class spell_ascension_pyromancer_ability : public SpellScript
         if (!player)
             return;
         uint32 id = GetSpellInfo()->Id;
-        if (id == 520868 && index == EFFECT_0 && GetHitUnit())
+        // Effect est branche sur OnEffectHitTarget ET sur OnEffectHit (voir
+        // Register). Le second n'est PAS un crochet a cible : SpellScript::
+        // IsInTargetHook n'y rend true que pour EFFECT_LAUNCH_TARGET,
+        // EFFECT_HIT_TARGET, BEFORE_HIT, HIT et AFTER_HIT. GetHitUnit() y
+        // journalisait une erreur puis rendait nullptr. Une seule lecture
+        // gardee, que les tests `&& cible` en aval ecartent comme avant.
+        Unit* const cible = IsInTargetHook() ? GetHitUnit() : nullptr;
+        if (id == 520868 && index == EFFECT_0 && cible)
         {
             PreventHitDefaultEffect(index);
-            Cast(player, GetHitUnit(), 1604);
-            if (Aura* slow = GetHitUnit()->GetAura(1604, player->GetGUID()))
+            Cast(player, cible, 1604);
+            if (Aura* slow = cible->GetAura(1604, player->GetGUID()))
             {
                 int32 duration = std::max(0, Amount(520868));
                 slow->SetMaxDuration(duration);
@@ -399,10 +406,10 @@ class spell_ascension_pyromancer_ability : public SpellScript
                        std::max(0, GetSpellInfo()->GetDuration()));
             }
         }
-        if (id == 520019 && GetHitUnit())
+        if (id == 520019 && cible)
         {
             PreventHitDefaultEffect(index);
-            Unit* target = GetHitUnit();
+            Unit* target = cible;
             uint64 total = 0;
             std::vector<uint32> consumed;
             for (auto const& pair : target->GetAppliedAuras())

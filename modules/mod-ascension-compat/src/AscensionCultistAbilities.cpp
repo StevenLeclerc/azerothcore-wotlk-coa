@@ -352,7 +352,11 @@ class spell_ascension_cultist_ability : public SpellScript
             return;
         uint32 id = GetSpellInfo()->Id;
         auto const& effect = GetSpellInfo()->Effects[index];
-        Unit* target = GetHitUnit();
+        // Effect est branche sur OnEffectHit AUSSI, qui n'est pas un crochet a
+        // cible (SpellScript::IsInTargetHook) : GetHitUnit() y journalise une
+        // erreur et rend nullptr. Les tests `&& target` en aval attendent deja
+        // ce nullptr ; le garde le produit sans la ligne d'erreur.
+        Unit* target = IsInTargetHook() ? GetHitUnit() : nullptr;
         if (Any(GetSpellInfo(), {808036, 808037, 808038}) && !index && target)
         {
             uint32 offset = id - 808036;

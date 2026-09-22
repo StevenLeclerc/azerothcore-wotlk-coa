@@ -316,7 +316,14 @@ class spell_ascension_venomancer_ability : public SpellScript
         if (!player)
             return;
         uint32 id = GetSpellInfo()->Id;
-        Unit* target = GetHitUnit();
+        // Effect est branche sur OnEffectHitTarget ET sur OnEffectHit (voir
+        // Register). Le second n'est PAS un crochet a cible : SpellScript::
+        // IsInTargetHook n'y rend true que pour EFFECT_LAUNCH_TARGET,
+        // EFFECT_HIT_TARGET, BEFORE_HIT, HIT et AFTER_HIT. GetHitUnit() y
+        // journalisait une erreur puis rendait nullptr — 1 044 lignes en 8 h de
+        // service. Le code s'appuie DEJA sur ce nullptr trois lignes plus bas
+        // (les trois ids sans cible) : on le produit sans le cri.
+        Unit* target = IsInTargetHook() ? GetHitUnit() : nullptr;
         if (GetSpellInfo()->Effects[index].Effect != SPELL_EFFECT_DUMMY)
             return;
         PreventHitDefaultEffect(index);

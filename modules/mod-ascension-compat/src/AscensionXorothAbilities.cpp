@@ -556,7 +556,10 @@ class spell_ascension_xoroth_ability : public SpellScript
         if (id == 801042)
         {
             PreventHitDefaultEffect(index);
-            if (Unit* unit = GetHitUnit())
+            // Effect est branche sur OnEffectHit AUSSI, qui n'est pas un
+            // crochet a cible (SpellScript::IsInTargetHook) : GetHitUnit() y
+            // journalise une erreur et rend nullptr, que le `if` ecarte deja.
+            if (Unit* unit = IsInTargetHook() ? GetHitUnit() : nullptr)
                 if (Creature* corpse = unit->ToCreature(); corpse && corpse->getDeathState() == DeathState::Corpse)
                 {
                     corpse->RemoveCorpse();
