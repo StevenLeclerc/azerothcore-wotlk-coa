@@ -116,9 +116,16 @@ public:
 // OnPlayerUpdateArea hook fires *before* that recomputation. Crossing an area
 // boundary therefore drops the flag for one tick.
 //
-// Sanctuaries and friendly capital cities are spared without a line of code:
-// UpdateFFAPvPState refuses the flag wherever pvpInfo.IsInNoPvPArea is set, and
-// the core sets it for those areas.
+// THIS PARAGRAPH WAS HALF WRONG -- corrected 2026-09-24. It claimed sanctuaries
+// and capital cities were "spared without a line of code". TRUE FOR SANCTUARIES:
+// Player::UpdateArea sets pvpInfo.IsInNoPvPArea from the AREA flag
+// (PlayerUpdates.cpp:1277) and UpdateFFAPvPState then refuses the flag. FALSE FOR
+// CAPITALS: AREA_FLAG_CAPITAL is read only by UpdateZone (:1370-1375), which does
+// not run when only the area changes (:296-307). The field falls back to false
+// (:1276) and stays false until the next zone change -- not "for one tick" as the
+// note above says. 31 capital sub-areas are in that case, 14 in Stormwind alone.
+// Hence EstLieuSansPvp below, which re-reads the DBC instead of trusting the
+// field. See P-126 in the project incident register.
 // The price of High Risk: dying in the open world costs you something.
 //
 // The selection spell promises it in as many words: "Any death while in the open
@@ -705,6 +712,30 @@ public:
     }
 };
 
+namespace
+{
+// True when PvP cannot take place here. Sanctuary is tested on the AREA, capital
+// on the ZONE: two distinct core paths (PlayerUpdates.cpp:1277 and :1370-1375).
+// Deliberately NOT reading pvpInfo.IsInNoPvPArea, which is wrong inside a capital
+// sub-area -- see the note above and P-126.
+//
+// This duplicates PlayerbotAIConfig::CoaLieuSansPvp on purpose: mod-ascension-compat
+// must not depend on mod-playerbots, and the playerbots version additionally
+// consults its own config lists, which have no meaning for a human player.
+bool EstLieuSansPvp(Player const* player)
+{
+    if (AreaTableEntry const* area = sAreaTableStore.LookupEntry(player->GetAreaId()))
+        if (area->IsSanctuary())
+            return true;
+
+    if (AreaTableEntry const* zone = sAreaTableStore.LookupEntry(player->GetZoneId()))
+        if (zone->IsSanctuary() || (zone->flags & AREA_FLAG_CAPITAL))
+            return true;
+
+    return false;
+}
+}  // namespace
+
 class ruleset_high_risk_ffa : public PlayerScript
 {
 public:
@@ -723,7 +754,13 @@ public:
         if (!player || !player->IsInWorld() || player->IsGameMaster())
             return;
 
-        bool highRisk = player->HasAura(SPELL_HIGH_RISK);
+        // Le lieu passe AVANT l'aura : dans un sanctuaire ou une capitale, un
+        // joueur High Risk ne doit pas porter le drapeau, quelle que soit son
+        // aura. Le test est place ici, apres les filtres gratuits et avant la
+        // relecture de configuration, pour ne rien couter aux joueurs deja
+        // ecartes ; et il fait tomber le drapeau a l'entree comme il l'empeche
+        // d'etre pose -- c'est la meme branche.
+        bool highRisk = player->HasAura(SPELL_HIGH_RISK) && !EstLieuSansPvp(player);
         if (highRisk == player->pvpInfo.IsInFFAPvPArea)
             return;
 
