@@ -736,7 +736,15 @@ namespace CoAChallenges
                 "{} requires you to be in High Risk.", ChallengeName(challengeID));
             return 12; // RULE_BROKEN
         }
-        if (ChallengeLevelCount(challengeID) > 1 && level > 1
+        // Tiers in order, or free pick. `RequirePreviousLevel` defaults to
+        // true, which is the shipped behaviour: tier N needs tier N-1
+        // completed. Turned off, any tier of a multi-tier challenge can be
+        // declared directly -- what a realm wants when the tiers are a
+        // difficulty dial the player sets, not a ladder to climb. Nothing else
+        // changes: the tier's own spells still apply, and CompleteAtLevelCap
+        // still gates what it pays.
+        if (sConfigMgr->GetOption<bool>("CoAChallenges.RequirePreviousLevel", true)
+            && ChallengeLevelCount(challengeID) > 1 && level > 1
             && !HasCompletionLevel(guid, challengeID, level - 1))
         {                                                        // 9 PREVIOUS_LEVEL_NOT_COMPLETED
             ChatHandler(player->GetSession()).PSendSysMessage(
@@ -828,10 +836,14 @@ namespace CoAChallenges
         uint32 guid = player->GetGUID().GetCounter();
         // Direct (synchronous): the active-list/criteria re-push below reads the
         // row right after, and activation is rare enough that blocking is fine.
+        // startLevel: the level the character had when the challenge was
+        // declared. CompleteAtLevelCap needs it to tell "reached the cap WHILE
+        // under this challenge" from "declared it once already at the cap",
+        // which has nothing left to prove. See P-129.
         CharacterDatabase.DirectExecute(
-            "REPLACE INTO coa_character_challenge (guid, challengeId, level, deaths, hunger, thirst, startTime) "
-            "VALUES ({}, {}, {}, 0, 0, 0, UNIX_TIMESTAMP())",
-            guid, challengeID, level);
+            "REPLACE INTO coa_character_challenge (guid, challengeId, level, deaths, hunger, thirst, startTime, startLevel) "
+            "VALUES ({}, {}, {}, 0, 0, 0, UNIX_TIMESTAMP(), {})",
+            guid, challengeID, level, uint32(player->GetLevel()));
         ClearCharChallengeCache(guid);
         ApplyChallengeSpell(player, challengeID, level);
         TrackHunger(player, challengeID);
@@ -1361,6 +1373,26 @@ namespace CoAChallenges
         return any;
     }
 
+    // Level the character had when this challenge was declared, into `out`.
+    // Returns false when it could not be read at all.
+    //
+    // FAILS CLOSED, and the distinction matters: CharacterDatabase.Query()
+    // returns the same null QueryResult for "no such row", "no such column"
+    // and "the query errored" (MySQLConnection.cpp, _Query() returns false for
+    // all three). A payout guard that cannot tell those apart must not guess,
+    // so the caller refuses instead of paying. Same doctrine as the unknown
+    // condition type in ValidateChallenge.
+    bool ChallengeStartLevel(uint32 guid, uint32 challengeID, uint32& out)
+    {
+        QueryResult r = CharacterDatabase.Query(
+            "SELECT startLevel FROM coa_character_challenge WHERE guid = {} AND challengeId = {}",
+            guid, challengeID);
+        if (!r)
+            return false;
+        out = r->Fetch()[0].Get<uint32>();
+        return true;
+    }
+
     // All tracked objectives done, treating "no tracked objectives" as met
     // (challenges whose only requirement is "N Lives" reach this at the cap).
     bool RequirementsMet(uint32 guid, uint32 challengeID)
@@ -1384,6 +1416,32 @@ namespace CoAChallenges
         uint32 guid = player->GetGUID().GetCounter();
         for (uint32 cid : ActiveChallenges(guid))
         {
+            // The completion granted HERE pays for the CLIMB: these challenges
+            // have no tracked objective, and their only proof of work is having
+            // been carried from the start to the cap. It is owed to a challenge
+            // declared before the character had gained anything -- still level
+            // 1. This used to be unreachable rather than stated, because the
+            // entry conditions stopped a played character from declaring at
+            // all; relying on an ENTRY gate to hold a PAYOUT invariant is what
+            // P-129 cost. "Declared at the cap" would not be enough either:
+            // cap-1 then one ding pays just the same.
+            //
+            // TIERS ARE EXEMPT, and they must be. A multi-tier challenge
+            // advances ONLY through here (see IsEntryOnlyCondition's comment),
+            // and tier N>1 is by construction declared after tier N-1 was
+            // completed -- necessarily above level 1. Gating tiers on
+            // startLevel would make every tier >= 2 of the 19 multi-tier
+            // challenges permanently uncompletable. Tier N>1 is gated by
+            // HasCompletionLevel(N-1) in ValidateChallenge instead, which is
+            // the real proof of work for a tier.
+            uint32 const activeLevel = ActiveChallengeLevel(guid, cid);
+            bool const higherTier = (activeLevel > 1 && ChallengeLevelCount(cid) > 1);
+            if (!higherTier)
+            {
+                uint32 startLevel = 0;
+                if (!ChallengeStartLevel(guid, cid, startLevel) || startLevel != 1)
+                    continue;
+            }
             if (RequirementsMet(guid, cid))
                 CompleteChallenge(player, cid);
         }

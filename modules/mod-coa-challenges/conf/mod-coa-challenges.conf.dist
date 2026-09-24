@@ -118,6 +118,18 @@ CoAChallenges.FreeCancelIfPristine = 1
 # Default: 1
 CoAChallenges.BlockCompletedReactivate = 1
 
+#
+#    CoAChallenges.RequirePreviousLevel
+#        Description: Un palier N d'un defi multi-paliers exige-t-il que le
+#                     palier N-1 soit complete ? A 1, c'est l'echelle d'origine.
+#                     A 0, n'importe quel palier se declare directement : les
+#                     paliers deviennent un curseur de difficulte que le joueur
+#                     regle, et non une progression a gravir. Le sort propre au
+#                     palier s'applique dans les deux cas.
+#        Default:     1
+#
+CoAChallenges.RequirePreviousLevel = 1
+
 
 ############################################################################
 # Rewards (delivered on completion, always by mail)
