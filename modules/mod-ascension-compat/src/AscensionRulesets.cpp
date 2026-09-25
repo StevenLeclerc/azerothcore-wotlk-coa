@@ -761,7 +761,48 @@ public:
         // ecartes ; et il fait tomber le drapeau a l'entree comme il l'empeche
         // d'etre pose -- c'est la meme branche.
         bool highRisk = player->HasAura(SPELL_HIGH_RISK) && !EstLieuSansPvp(player);
+
+        // CETTE REGLE NE RETIRE QUE LE DRAPEAU QU'ELLE A POSE -- P-134.
+        //
+        // IsInFFAPvPArea n'est pas a elle seule. Deux autres ecrivains le posent :
+        // le coeur, dans une aire AREA_FLAG_ARENA (Player::UpdateArea,
+        // PlayerUpdates.cpp:1271), et mod-playerbots, sur tout bot mercenaire ou
+        // sans maitre (PlayerbotAI::UpdateAI, a chaque tick). Aucun bot ne porte
+        // l'aura High Risk. Avant cette garde, la regle remettait donc a faux,
+        // A CHAQUE TICK, le drapeau de 500 bots et de tout joueur entre dans une
+        // arene FFA ; et sans minuteur PvP, UpdateFFAPvPState le retire aussitot
+        // (PlayerUpdates.cpp:1525) puis fait AttackStop sur la victime et sur les
+        // assaillants devenus illegaux (1539-1554). Le mercenaire perdait sa cible
+        // avant son premier coup, et playerbots reposait le drapeau un peu plus
+        // loin dans le meme Player::Update.
+        //
+        // La propriete est notee sur le joueur lui-meme (CustomData) : ce crochet
+        // tourne dans le fil de carte qui possede le joueur, aucun verrou n'est
+        // necessaire, et la marque disparait avec l'objet a la deconnexion.
+        //
+        // Cout : DataMap::Get rend nullptr sans rien chercher sur un conteneur
+        // vide, ce qui est le cas de presque tous les joueurs et bots.
+        bool const posee = player->CustomData.Get<HighRiskFfaMarque>(HIGH_RISK_FFA_CLE) != nullptr;
+
+        if (!highRisk && !player->pvpInfo.IsInFFAPvPArea)
+        {
+            // Rien a retirer. Si la marque traine -- l'aura est tombee alors
+            // que le coeur avait deja remis le champ a faux sur un changement
+            // d'aire --, on l'efface ICI : laissee en place, elle ferait
+            // retirer plus tard un drapeau d'arene FFA que la regle n'a pas
+            // pose. Ce test passe avant l'egalite ci-dessous, qui l'aurait
+            // court-circuite.
+            if (posee)
+                player->CustomData.Erase(HIGH_RISK_FFA_CLE);
+            return;
+        }
+
         if (highRisk == player->pvpInfo.IsInFFAPvPArea)
+            return;
+
+        // Reste un seul cas a ecarter : le drapeau est pose, la regle ne le
+        // veut plus, et ce n'est pas elle qui l'a pose.
+        if (!highRisk && !posee)
             return;
 
         if (!sConfigMgr->GetOption<bool>("AscensionCompat.HighRiskIsFFA", true))
@@ -772,8 +813,20 @@ public:
         // SetFFAPvPTimer. Holding it true also keeps the 30 second unflag timer
         // from starting, which is what a standing ruleset needs.
         player->pvpInfo.IsInFFAPvPArea = highRisk;
+        if (highRisk)
+            player->CustomData.GetDefault<HighRiskFfaMarque>(HIGH_RISK_FFA_CLE);
+        else
+            player->CustomData.Erase(HIGH_RISK_FFA_CLE);
         player->UpdateFFAPvPState(false);
     }
+
+private:
+    // Une instance vide suffit : seule la presence de la cle compte.
+    struct HighRiskFfaMarque : DataMap::Base { };
+
+    // std::string statique et non litteral : DataMap::Get prend une
+    // std::string const&, et ce crochet tourne a chaque tick pour chaque bot.
+    static inline std::string const HIGH_RISK_FFA_CLE = "coa.hr.ffa";
 };
 
 class ruleset_player_spells : public PlayerScript
