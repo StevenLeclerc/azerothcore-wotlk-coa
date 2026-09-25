@@ -800,6 +800,23 @@ public:
         if (highRisk == player->pvpInfo.IsInFFAPvPArea)
             return;
 
+        // P-134, cas rare (correctif C4 de la revue D1). La regle a pose le
+        // drapeau, puis l'aura tombe alors que le joueur est DANS une aire
+        // d'arene FFA : le drapeau appartient desormais au coeur, qui le tient
+        // pour cette aire (Player::UpdateArea, PlayerUpdates.cpp:1271). On ne
+        // retire que NOTRE marque, jamais le champ : sinon le joueur perdrait
+        // le FFA de l'arene jusqu'au prochain changement d'aire.
+        if (!highRisk && posee)
+        {
+            AreaTableEntry const* aire = sAreaTableStore.LookupEntry(player->GetAreaId());
+            if (aire && (aire->flags & AREA_FLAG_ARENA))
+            {
+                player->CustomData.Erase(HIGH_RISK_FFA_CLE);
+                LOG_DEBUG("module.ascension_compat", "high risk : drapeau d'arene laisse au coeur ({})", player->GetName());
+                return;
+            }
+        }
+
         // Reste un seul cas a ecarter : le drapeau est pose, la regle ne le
         // veut plus, et ce n'est pas elle qui l'a pose.
         if (!highRisk && !posee)
