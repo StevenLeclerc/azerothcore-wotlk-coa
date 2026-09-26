@@ -855,9 +855,12 @@ public:
         {
             // Preserve permanent/other-spec ownership and pending deletions, as
             // with ordinary taught abilities. Child IDs cannot re-enter this hook.
+            // Unannounced: the client sees the target only in the original's slot, which
+            // SetTemporarySpellReplacement rewrites below. Announcing it as well gave the
+            // client two spellbook entries for it (Shieldgore reported twice, 2026-09-25).
             if (player->GetSpellMap().find(id) == player->GetSpellMap().end())
             {
-                player->learnSpell(id, true);
+                player->LearnTemporarySpellReplacementTarget(id);
                 if (player->HasSpell(id))
                     ++learned;
             }

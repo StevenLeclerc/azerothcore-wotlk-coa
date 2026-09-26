@@ -37,15 +37,15 @@ struct TalentReplacement
 // highest one.
 inline constexpr std::array<TalentReplacement, 16> TalentReplacements =
 {{
-    // Warbringer stays at rank 1 ON PURPOSE. Spell.dbc does carry 802582@18 .. 802586@52,
-    // but none of these replacement chains is declared in acore_world.spell_ranks or in
-    // Talent.dbc, so GetFirstSpellInChain(802582) == 802582 and AscensionXoroth.cpp's
-    // Named(info, 802581) is false for every rank above the first. Granting ranks 2-6
-    // would therefore silently drop, from level 18 on, the Mortal-Wound cast (803240,
-    // the spell's whole tooltip), the +18%-per-Demonfire damage factor
-    // (AscensionXorothAbilities.cpp:235) and Spender() status (AscensionXoroth.cpp:76).
-    // Prerequisite for the ranks: declare the chain in acore_world.spell_ranks.
-    { 17, 18, 570727, 801059, {{ { 802581, 0 } }} }, // Flames of Xoroth -> Warbringer
+    // Warbringer: every rank of Spell.dbc, at its SpellLevel (802581@8, 802582@18 .. 802586@52;
+    // rank 1 keeps gate 0 as before). These ranks are in no acore_world.spell_ranks chain and not in
+    // Talent.dbc (P-046), so GetFirstSpellInChain(802582) == 802582: the class code recognises them
+    // through ReplacementChainRoot below, which AscensionXoroth.cpp's Named() applies. Until
+    // 2026-09-25 the row stopped at rank 1 for that reason, and the client's spellbook - which
+    // reads the chain from SpellRank.dbc - showed "New Rank Available" from level 18 on.
+    { 17, 18, 570727, 801059, {{
+        { 802581, 0 }, { 802582, 18 }, { 802583, 28 }, { 802584, 36 }, { 802585, 44 }, { 802586, 52 }
+    }} }, // Flames of Xoroth -> Warbringer
     // Tempest Calling: Conjure Storm -> Updraft; Call Lightning -> Aeroblast.
     { 16, 13, 707615, 800227, {{
         { 802354, 0 }, { 570161, 18 }, { 570162, 26 }, { 570163, 34 },
@@ -87,16 +87,37 @@ inline constexpr std::array<TalentReplacement, 16> TalentReplacements =
     // Spec 17 is DEFIANCE and spec 18 is WAR (ChrSpecs.dbc records 17 and 18,
     // class token FLESHWARDEN). 801016, 801059 and 500904 are rank-1 roots in
     // acore_world.spell_ranks.
-    // Shieldgore: rank 1 only, same measured reason as Warbringer above. Spell.dbc has
-    // 806869@18 .. 806874@58, but they are in no rank chain, so Infernal() and the
-    // id == 804353 tests of AscensionXorothAbilities.cpp (Torn Flesh 800341, the 704997
-    // burst, the 706563 crit effect, the 680729 curse shield) would all stop matching.
-    { 17, 17, 301302, 801016, {{ { 804353, 0 } }} }, // Infernal Strike -> Shieldgore
+    // Shieldgore: every rank of Spell.dbc, at its SpellLevel (804353@12 kept at gate 0, 806869@18,
+    // 806870@26, 806871@34, 806872@42, 806873@50, 806874@58). Same reason and same recognition as
+    // Warbringer above: AscensionXoroth.cpp's Named() maps them back to 804353 through
+    // ReplacementChainRoot, so Infernal() and the Shieldgore tests of AscensionXorothAbilities.cpp
+    // (Torn Flesh 800341, the 706563 crit effect, the 680729 curse shield) and of
+    // AscensionXorothContracts.cpp (block value) keep matching from rank 2 on.
+    { 17, 17, 301302, 801016, {{
+        { 804353, 0 }, { 806869, 18 }, { 806870, 26 }, { 806871, 34 },
+        { 806872, 42 }, { 806873, 50 }, { 806874, 58 }
+    }} }, // Infernal Strike -> Shieldgore
     // Hellfire Bellows and Brimstone Bludgeon have a single castable spell each in
     // Spell.dbc (no "Rank N" siblings): one rank, no invented level gate.
     { 17, 17, 807587, 801059, {{ { 520292, 0 } }} }, // Flames of Xoroth -> Hellfire Bellows
     { 17, 18, 800710, 500904, {{ { 520005, 0 } }} }  // Sever -> Brimstone Bludgeon
 }};
+
+// Rank 1 of the replacement chain a spell belongs to, or the spell itself.
+//
+// None of the rank chains above is declared in acore_world.spell_ranks or Talent.dbc (P-046):
+// SpellMgr::GetFirstSpellInChain(806869) is 806869, not 804353. Class code that recognises a
+// replacement by its root - AscensionXoroth.cpp's Named() - applies this on top of
+// GetFirstSpellInChain so that ranks 2+ are the same spell for it. The rows are the only
+// source: a rank listed in a row belongs to that row's first rank.
+constexpr std::uint32_t ReplacementChainRoot(std::uint32_t spellId)
+{
+    for (TalentReplacement const& entry : TalentReplacements)
+        for (ReplacementRank const& rank : entry.Ranks)
+            if (rank.SpellId && rank.SpellId == spellId)
+                return entry.Ranks[0].SpellId;
+    return spellId;
+}
 }
 
 #endif

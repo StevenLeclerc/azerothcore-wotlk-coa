@@ -143,8 +143,9 @@ bool StartTravel(Player* player, uint32 spell)
     uint32 child = ReturnSpell(spell);
     // Native temporary learning is not saved and must not resurrect a pending
     // deletion or replace independently owned permanent/other-spec spell records.
+    // Unannounced: the client sees the return spell only in the rewritten slot (P-144).
     if (player->GetSpellMap().find(child) == player->GetSpellMap().end())
-        player->learnSpell(child, true);
+        player->LearnTemporarySpellReplacementTarget(child);
     player->SetTemporarySpellReplacement(spell, child);
     if (player->GetTemporarySpellReplacement(spell) != child)
     {

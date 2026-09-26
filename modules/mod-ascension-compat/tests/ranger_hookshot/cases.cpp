@@ -28,6 +28,7 @@ int main()
         assert(latch.prevented && !player.HasAura(803857, player.guid));
         enemy.bleeding = true; latch.Latch(1);
         assert(HookTarget(&player) == &enemy && player.spells.at(803852));
+        assert(player.unannounced.contains(803852)); // No spellbook entry of its own (P-144).
         assert(player.GetTemporarySpellReplacement(rank) == 803852);
         assert(player.session.packets.back() == std::vector<uint32>({rank, 803852}));
         enemy.bleeding = false; // The wound only has to be present when the hook lands.
@@ -46,6 +47,7 @@ int main()
         SpellCastResult result = 0; events.OnSpellCheckCast(&followup, true, result); assert(!result);
         events.OnSpellBeforeEffects(&followup, &player, &followup.info);
         assert(!player.spells.contains(803852) && player.GetTemporarySpellReplacement(rank) == rank);
+        assert(!player.unannounced.contains(803852));
         assert(!events.CanPrepare(&followup, nullptr, nullptr));
         events.OnSpellCheckCast(&followup, false, result); assert(result == SPELL_FAILED_BAD_TARGETS);
     }

@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionXoroth.h"
+#include "AscensionTalentReplacementData.h"
 #include "CellImpl.h"
 #include "Creature.h"
 #include "GridNotifiers.h"
@@ -38,7 +39,14 @@ XorothState& State(Player* player)
 }
 bool Named(SpellInfo const* info, uint32 root)
 {
-    return info && sSpellMgr->GetFirstSpellInChain(info->Id) == sSpellMgr->GetFirstSpellInChain(root);
+    // Shieldgore 806869-806874 and Warbringer 802582-802586 are in no spell_ranks chain (P-046):
+    // GetFirstSpellInChain leaves them alone, and the replacement table is what says which rank 1
+    // they belong to. Without it, every test written against 804353 or 802581 stops matching at 18.
+    auto root_of = [](uint32 id)
+    {
+        return AscensionCompatData::ReplacementChainRoot(sSpellMgr->GetFirstSpellInChain(id));
+    };
+    return info && root_of(info->Id) == root_of(root);
 }
 std::list<Unit*> Nearby(Unit* center, float range)
 {
@@ -74,8 +82,9 @@ void Replace(Player* player, uint32 root, uint32 replacement)
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             if (uint32 current = player->GetTemporarySpellReplacement(pair.first); current != pair.first)
                 previous = current;
+    // Unannounced: the client sees the target only in the rewritten slot (one entry, not two).
     if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
-        player->learnSpell(replacement, true);
+        player->LearnTemporarySpellReplacementTarget(replacement);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             player->SetTemporarySpellReplacement(pair.first, replacement);

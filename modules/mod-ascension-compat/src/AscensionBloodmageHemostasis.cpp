@@ -49,8 +49,9 @@ class aura_ascension_hemostasis : public AuraScript
         {
             window->SetScriptValue(SPELL_HEMOSTASIS, GetTarget()->GetGUID().GetRawValue());
             // Preserve any independent permanent or other-spec ownership of the helper.
+            // Unannounced: the client sees Blood Burst only in the rewritten Hemostasis slot (P-144).
             if (player->GetSpellMap().find(SPELL_BLOOD_BURST) == player->GetSpellMap().end())
-                player->learnSpell(SPELL_BLOOD_BURST, true);
+                player->LearnTemporarySpellReplacementTarget(SPELL_BLOOD_BURST);
             player->SetTemporarySpellReplacement(SPELL_HEMOSTASIS, SPELL_BLOOD_BURST);
             if (player->GetTemporarySpellReplacement(SPELL_HEMOSTASIS) != SPELL_BLOOD_BURST)
                 player->RemoveAurasDueToSpell(SPELL_HEMOSTASIS_READY, player->GetGUID());

@@ -93,8 +93,9 @@ void Synchronize(Player* player)
         }
     for (auto const& [id, replacement] : replacements)
     {
-        if (replacement && !player->HasSpell(replacement) && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
-            player->learnSpell(replacement, true);
+        // Unannounced: the client sees the target only in the rewritten slot (one entry, not two, P-144).
+        if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(replacement);
         player->SetTemporarySpellReplacement(id, replacement);
     }
     updating.erase(player->GetGUID());

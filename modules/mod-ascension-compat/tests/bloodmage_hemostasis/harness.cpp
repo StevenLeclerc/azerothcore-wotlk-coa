@@ -72,9 +72,16 @@ struct Player : Unit
     uint32 getClass() const { return cls; }
     bool HasActiveSpell(uint32 id) const { return spells.contains(id) && !inactive.contains(id); }
     auto const& GetSpellMap() const { return spells; }
+    // Targets learned unannounced (Player::LearnTemporarySpellReplacementTarget, P-144).
+    std::set<uint32> unannounced;
     void learnSpell(uint32 id, bool temporary) { spells[id] = temporary; }
+    void LearnTemporarySpellReplacementTarget(uint32 id)
+    { if (!spells.contains(id)) { spells[id] = true; unannounced.insert(id); } }
     void removeSpell(uint32 id, uint32 mask, bool onlyTemporary)
-    { assert(mask == SPEC_MASK_ALL && onlyTemporary); if (spells.contains(id) && spells[id]) spells.erase(id); }
+    {
+        assert(mask == SPEC_MASK_ALL && onlyTemporary);
+        if (spells.contains(id) && spells[id]) { spells.erase(id); unannounced.erase(id); }
+    }
     Session* GetSession() { return &session; }
     void SetTemporarySpellReplacement(uint32 original, uint32 replacement);
     uint32 GetTemporarySpellReplacement(uint32 original) const;
@@ -171,6 +178,7 @@ int main()
     root.fixtureCaster = &player; root.fixtureTarget = &enemy;
     player.AddAura(681304, &enemy); root.Apply(nullptr, 1);
     assert(player.spells.at(803326) && player.GetTemporarySpellReplacement(681304) == 803326);
+    assert(player.unannounced.contains(803326)); // No spellbook entry of its own (P-144).
     assert(player.session.packets.back() == std::vector<uint32>({681304, 803326}));
     assert(HemostasisTarget(&player) == &enemy);
     Spell spell; spell.caster = &player;

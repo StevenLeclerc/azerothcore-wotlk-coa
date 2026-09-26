@@ -78,8 +78,10 @@ void SyncReplacements(Player* player)
         }
         if (!selected)
             continue;
-        if (child && !player->HasSpell(child))
-            player->learnSpell(child, true);
+        // Unannounced: the client sees the child only in the rewritten slot (one entry, not two, P-144).
+        // Children are never unlearned here, so an announced one also stayed in the spellbook after its proc.
+        if (child && player->GetSpellMap().find(child) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(child);
         player->SetTemporarySpellReplacement(id, child);
     }
 }

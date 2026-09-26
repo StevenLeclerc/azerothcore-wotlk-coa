@@ -62,19 +62,50 @@ void Reset(Player* player, uint32 id)
     }
 }
 
+// Every child the callers hand to Replacement (Sixfold Shot, Purified Bola Throw, and the four Surging
+// Blade spells of Secret of Raven Hill). The Surging Blade children carry the Dawn Blade family bit
+// (word 0, 1024) themselves, and none of them is ever unlearned between procs: without this list a child
+// taught by an earlier proc was taken for an original, keyed to the next child, and its SMSG_SUPERCEDED_SPELL
+// packets could rewrite the Dawn Blade slot, which is the only place the client shows an unannounced child.
+static bool IsReplacementChild(uint32 id)
+{
+    for (uint32 child : {807364u, 803333u, 681788u, 684330u, 685020u, 686020u})
+        if (id == child)
+            return true;
+    return false;
+}
+
 void Replacement(Player* player, uint32 word, uint32 mask, uint32 child)
 {
-    if (!player->HasSpell(child))
-        player->learnSpell(child, true);
+    if (player->GetSpellMap().find(child) == player->GetSpellMap().end())
+    {
+        // Unannounced only when an active original will show it in its rewritten slot (one entry, not two,
+        // P-144). Sixfold Shot's talent (free, level 50) and Quickdraw (paid) are separate nodes, and without
+        // an original an unannounced child would be invisible, so unusable: announce it then, as before.
+        bool shown = false;
+        for (auto const& [id, state] : player->GetSpellMap())
+            if (player->HasActiveSpell(id) && Family(sSpellMgr->GetSpellInfo(id), word, mask) && id != child &&
+                !IsReplacementChild(id))
+            {
+                shown = true;
+                break;
+            }
+        if (shown)
+            player->LearnTemporarySpellReplacementTarget(child);
+        else
+            player->learnSpell(child, true);
+    }
     for (auto const& [id, state] : player->GetSpellMap())
-        if (state->State != PLAYERSPELL_REMOVED && Family(sSpellMgr->GetSpellInfo(id), word, mask) && id != child)
+        if (state->State != PLAYERSPELL_REMOVED && Family(sSpellMgr->GetSpellInfo(id), word, mask) && id != child &&
+            !IsReplacementChild(id))
             player->SetTemporarySpellReplacement(id, child);
 }
 
 void ClearReplacement(Player* player, uint32 word, uint32 mask)
 {
     for (auto const& [id, state] : player->GetSpellMap())
-        if (state->State != PLAYERSPELL_REMOVED && Family(sSpellMgr->GetSpellInfo(id), word, mask))
+        if (state->State != PLAYERSPELL_REMOVED && Family(sSpellMgr->GetSpellInfo(id), word, mask) &&
+            !IsReplacementChild(id))
             player->SetTemporarySpellReplacement(id, 0);
 }
 

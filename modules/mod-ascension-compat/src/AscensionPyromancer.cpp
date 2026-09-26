@@ -39,9 +39,34 @@ PyromancerState& State(Player* player)
     // rehashing the map cannot leave that caller writing into freed memory.
     return *states.try_emplace(player->GetGUID(), std::make_unique<PyromancerState>()).first->second;
 }
+namespace
+{
+// Echo of Nozdormu's ten ranks are in no spell_ranks chain (P-046): GetFirstSpellInChain(803407)
+// is 803407. Rank 1 is 802174 (SpellRank.dbc, Spell.dbc "Rank 1" at SpellLevel 11); every other
+// entry of PyromancerEchoRanks is the same spell for the class code.
+uint32 Root(uint32 id)
+{
+    for (uint32 rank : PyromancerEchoRanks)
+        if (rank == id)
+            return 802174;
+    return sSpellMgr->GetFirstSpellInChain(id);
+}
+// The Echo rank a player of this level is owed: the one with the highest SpellLevel not above it
+// (802174@11, 803407@18, 803408@24, 803409@30, 803410@34, 578307@40, 578308@44, 578309@50,
+// 567589@56, 567590@60). 0 below level 11.
+uint32 EchoRankFor(uint32 level)
+{
+    uint32 best = 0, bestLevel = 0;
+    for (uint32 rank : PyromancerEchoRanks)
+        if (SpellInfo const* info = sSpellMgr->GetSpellInfo(rank))
+            if (info->SpellLevel <= level && (!best || info->SpellLevel > bestLevel))
+                best = rank, bestLevel = info->SpellLevel;
+    return best;
+}
+} // namespace
 bool Named(SpellInfo const* info, uint32 root)
 {
-    return info && sSpellMgr->GetFirstSpellInChain(info->Id) == sSpellMgr->GetFirstSpellInChain(root);
+    return info && Root(info->Id) == Root(root);
 }
 bool Any(SpellInfo const* info, std::initializer_list<uint32> roots)
 {
@@ -363,15 +388,21 @@ void Refresh(Player* player)
         player->learnSpell(802117, true);
     if (!player->HasAura(92128))
         player->removeSpell(802117, SPEC_MASK_ALL, true);
-    if (player->HasAura(520937))
-        for (uint32 id : PyromancerEchoRanks)
-            if (sSpellMgr->GetSpellInfo(id)->SpellLevel <= player->GetLevel() && !player->HasSpell(id))
-                player->learnSpell(id, true);
+    // One Echo rank at a time, the one the level reaches, learned unannounced: the client sees it
+    // only in the slot SetTemporarySpellReplacement rewrites. Until 2026-09-25 every reached rank
+    // was learned and announced (one spellbook entry each, plus the rewritten slot), and Named()
+    // could not tell them apart, so Highest() always rendered rank 1 (P-046).
+    uint32 const echo = player->HasAura(520937) ? EchoRankFor(player->GetLevel()) : 0;
+    if (echo && !player->HasSpell(echo))
+        player->LearnTemporarySpellReplacementTarget(echo);
+    // Straight from the old rank to the new one: SetTemporarySpellReplacement sends old -> new,
+    // which rewrites the slot in place. The old rank is dropped only afterwards.
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), 800792))
-            player->SetTemporarySpellReplacement(pair.first, player->HasAura(520937) ? Highest(player, 802174) : 0);
-    if (!player->HasAura(520937))
-        for (uint32 id : PyromancerEchoRanks)
+            player->SetTemporarySpellReplacement(pair.first, echo && player->HasActiveSpell(echo) ? echo : 0);
+    // onlyTemporary: an independently owned permanent copy is left alone.
+    for (uint32 id : PyromancerEchoRanks)
+        if (id != echo)
             player->removeSpell(id, SPEC_MASK_ALL, true);
     if (player->HasAura(300751) && Count(player, EmberAura))
     {

@@ -273,8 +273,9 @@ void Replace(Player* player, uint32 root, uint32 replacement)
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             if (uint32 current = player->GetTemporarySpellReplacement(pair.first); current != pair.first)
                 previous = current;
+    // Unannounced: the client sees the target only in the rewritten slot (one entry, not two).
     if (replacement && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
-        player->learnSpell(replacement, true);
+        player->LearnTemporarySpellReplacementTarget(replacement);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), root))
             player->SetTemporarySpellReplacement(pair.first, replacement);

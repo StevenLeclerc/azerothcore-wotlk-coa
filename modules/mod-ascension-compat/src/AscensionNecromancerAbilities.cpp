@@ -99,8 +99,9 @@ void Virulency(Player* player, Unit* target)
     if (!state.diseases.empty())
     {
         Cast(player, player, 803782);
-        if (!player->HasSpell(803781))
-            player->learnSpell(803781, true);
+        // Unannounced: the client sees Infest only in the rewritten Virulency slot (one entry, not two, P-144).
+        if (player->GetSpellMap().find(803781) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(803781);
         player->SetTemporarySpellReplacement(801938, 803781);
     }
 }

@@ -182,8 +182,9 @@ class spell_ascension_outmaneuver : public SpellScript
         }
         window->SetScriptValue(NPC_OUTMANEUVER_DECOY, decoy->GetGUID().GetRawValue());
         window->SetScriptValue(SPELL_OUTMANEUVER, target->GetGUID().GetRawValue());
+        // Unannounced: the client sees Decoy Strike only in the rewritten Outmaneuver slot (P-144).
         if (player->GetSpellMap().find(SPELL_DECOY_STRIKE) == player->GetSpellMap().end())
-            player->learnSpell(SPELL_DECOY_STRIKE, true);
+            player->LearnTemporarySpellReplacementTarget(SPELL_DECOY_STRIKE);
         player->SetTemporarySpellReplacement(SPELL_OUTMANEUVER, SPELL_DECOY_STRIKE);
         if (player->GetTemporarySpellReplacement(SPELL_OUTMANEUVER) != SPELL_DECOY_STRIKE)
         {

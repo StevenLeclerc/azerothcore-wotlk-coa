@@ -46,7 +46,7 @@ int main()
     hit(800000); assert(player.GetAura(684329, player.guid)->GetStackAmount() == 1);
     hit(503105); assert(!player.HasAura(684329) && player.HasAura(681787));
     for (uint32 id : ranks) assert(player.GetTemporarySpellReplacement(id) == 681235);
-    assert(player.spells.at(681235));
+    assert(player.spells.at(681235) && player.unannounced.contains(681235)); // Unannounced (P-144).
     Spell punch; punch.caster = &player; punch.info.Id = 681235; punch.info.SpellFamilyName = 27;
     assert(events.CanPrepare(&punch, nullptr, nullptr));
     SpellCastResult result = 0; events.OnSpellCheckCast(&punch, true, result); assert(!result);
@@ -75,6 +75,14 @@ int main()
     player.CastSpell(&player, 681787, true); player.alive = false;
     assert(!events.CanPrepare(&punch, nullptr, nullptr)); player.alive = true; player.inWorld = false;
     assert(!events.CanPrepare(&punch, nullptr, nullptr)); player.inWorld = true;
+    // Assault is a separate paid node and Playing Dirty also comes from Skullpiercer. Without an active
+    // Assault no slot can show Sucker Punch, so it keeps an announced entry of its own (P-144 review).
+    player.RemoveAurasDueToSpell(681787, player.guid); player.RemoveAurasDueToSpell(684329, player.guid);
+    for (uint32 id : ranks) player.spells.erase(id);
+    player.spells.erase(681235);
+    hit(802036); hit(800000);
+    assert(player.HasAura(681787, player.guid) && player.spells.at(681235) && !player.unannounced.contains(681235));
+    player.RemoveAurasDueToSpell(681787, player.guid); assert(!player.spells.contains(681235));
     ranger_dirty_fighter_contracts metadata; SpellInfo info; info.Id = 681787; info.SpellFamilyName = 27;
     metadata.OnLoadSpellCustomAttr(&info); assert(info.AttributesCu == SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED);
 }

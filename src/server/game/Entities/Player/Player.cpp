@@ -2876,7 +2876,20 @@ void Player::SendInitialSpells()
         if (!itr->second->Active || !itr->second->IsInSpec(GetActiveSpec()))
             continue;
 
-        data << uint32(itr->first);
+        // A replacement target learned by LearnTemporarySpellReplacementTarget has no entry of its own:
+        // the client sees it in the slot of the spell it replaces, and that slot carries it below. This
+        // snapshot is also resent to a player who is still in the world (HandlePlayerLoginToCharInWorld),
+        // where replacements are live, so it has to describe the same spellbook the packets built.
+        if (m_unannouncedSpells.count(itr->first))
+            continue;
+
+        // Every other spell is written as its slot shows it, WITHOUT merging equal ids. A target still
+        // learned with an announcement (callers not converted to LearnTemporarySpellReplacementTarget), a
+        // target the player also owns on its own, or one shown by several originals at once (Barbarian
+        // 807482) has as many client entries live as it gets here; each later SMSG_SUPERCEDED_SPELL
+        // target -> original rewrites one of them. Merging them would leave that packet nothing to
+        // rewrite and drop the original from the spellbook until the next full login.
+        data << uint32(GetTemporarySpellReplacement(itr->first));
         data << uint16(0);                                  // it's not slot id
 
         ++spellCount;
@@ -3200,6 +3213,8 @@ void Player::SendLearnPacket(uint32 spellId, bool learn)
 {
     if (learn)
     {
+        // Once announced, the spell has an entry of its own and must be removed like any other.
+        m_unannouncedSpells.erase(spellId);
         WorldPacket data(SMSG_LEARNED_SPELL, 6);
         data << uint32(spellId);
         data << uint16(0);
@@ -3235,17 +3250,41 @@ bool Player::addSpell(uint32 spellId, uint8 addSpecMask, bool updateActive, bool
             {
                 if (nextSpellInfo->GetRank() < spellInfo->GetRank())
                 {
+                    // Read before the lower rank goes inactive: GetTemporarySpellReplacement requires it active.
+                    // When a temporary replacement shows another spell in this rank's slot, the client has no
+                    // entry for the lower rank any more, so a lone lower -> new packet would name a spell its
+                    // spellbook does not hold. Hand the replacement over to the new rank and walk the slot
+                    // through three in-place rewrites instead - shown -> lower -> new -> shown - each naming a
+                    // spell the slot does hold, so action buttons follow as they do for an ordinary rank-up.
+                    uint32 const lowerId = nextSpellInfo->Id;
+                    uint32 const shown = GetTemporarySpellReplacement(lowerId);
                     itr->second->Active = false;
+
+                    // The key follows the active rank even when no slot shows its target right now.
+                    if (auto const held = m_temporarySpellReplacements.find(lowerId); held != m_temporarySpellReplacements.end())
+                    {
+                        uint32 const target = held->second;
+                        m_temporarySpellReplacements.erase(held);
+                        m_temporarySpellReplacements[spellInfo->Id] = target;
+                    }
 
                     if (!isBeingLoaded() && IsUnlearnNeededForSpell(spellId))
                         SendUnlearnSpells();
 
                     if (IsInWorld())
                     {
-                        WorldPacket data(SMSG_SUPERCEDED_SPELL, 4 + 4);
-                        data << uint32(nextSpellInfo->Id);
-                        data << uint32(spellInfo->Id);
-                        SendDirectMessage(&data);
+                        auto supersede = [this](uint32 from, uint32 to)
+                        {
+                            WorldPacket data(SMSG_SUPERCEDED_SPELL, 4 + 4);
+                            data << uint32(from);
+                            data << uint32(to);
+                            SendDirectMessage(&data);
+                        };
+                        if (shown != lowerId)
+                            supersede(shown, lowerId);
+                        supersede(lowerId, spellInfo->Id);
+                        if (shown != lowerId)
+                            supersede(spellInfo->Id, shown);
                     }
                     return false;
                 }
@@ -3290,7 +3329,8 @@ bool Player::_addSpell(uint32 spellId, uint8 addSpecMask, bool temporary, bool l
     // This site owns the announcement for a temporary learn that did not come from a skill line, and its
     // condition mirrors the one Player::removeSpell uses for onlyTemporary. Player::learnSpell must not
     // announce the same grant again, or the client ends up with more copies than the server ever removes.
-    if (IsInWorld() && !isBeingLoaded() && temporary && !learnFromSkill && (!spellInfo->HasAttribute(SpellAttr0(SPELL_ATTR0_PASSIVE | SPELL_ATTR0_DO_NOT_DISPLAY)) || !spellInfo->HasAnyAura()) && !spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL))
+    // LearnTemporarySpellReplacementTarget's spell is the exception: the client must not get an entry for it.
+    if (IsInWorld() && !isBeingLoaded() && temporary && !learnFromSkill && spellId != m_unannouncedLearnSpellId && (!spellInfo->HasAttribute(SpellAttr0(SPELL_ATTR0_PASSIVE | SPELL_ATTR0_DO_NOT_DISPLAY)) || !spellInfo->HasAnyAura()) && !spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL))
         SendLearnPacket(spellInfo->Id, true);
 
     // xinef: DO NOT allow to learn spell with effect learn spell!
@@ -3571,6 +3611,14 @@ void Player::removeSpell(uint32 spell_id, uint8 removeSpecMask, bool onlyTempora
     if (onlyTemporary && itr->second->State != PLAYERSPELL_TEMPORARY)
         return;
 
+    // The temporary replacements this spell takes part in whose target the client slot shows right now,
+    // read while the spell is still owned: GetTemporarySpellReplacement needs both ends active. Only these
+    // are turned back on the client below; a stale entry is merely dropped, since no slot shows it.
+    std::vector<uint32> shownReplacementKeys;
+    for (auto const& [original, target] : m_temporarySpellReplacements)
+        if ((original == spell_id || target == spell_id) && GetTemporarySpellReplacement(original) == target)
+            shownReplacementKeys.push_back(original);
+
     // pussywizard: remove non-talent higher ranks (recursive)
     // pussywizard: do this at the beginning, not in the middle of removing!
     if (uint32 nextSpell = sSpellMgr->GetNextSpellInChain(spell_id))
@@ -3705,11 +3753,40 @@ void Player::removeSpell(uint32 spell_id, uint8 removeSpecMask, bool onlyTempora
     if (spell_id == SPELL_BURNING_COMMANDER)
         AutoUnequipOffhandIfNeed();
 
+    // A temporary replacement this spell takes part in - as the original or as the target - ends with it.
+    // The client slot shows the target: turn it back into the original before anything is removed from
+    // the spellbook, so that an SMSG_REMOVED_SPELL below names an entry the client really holds, and so
+    // that a target removed before its caller reverted the replacement does not leave the slot showing a
+    // spell the server no longer lets the player cast.
+    bool const stillActive = HasActiveSpell(spell_id);
+    for (auto replacement = m_temporarySpellReplacements.begin(); replacement != m_temporarySpellReplacements.end();)
+    {
+        if (stillActive || (replacement->first != spell_id && replacement->second != spell_id))
+        {
+            ++replacement;
+            continue;
+        }
+        if (IsInWorld() && replacement->first != replacement->second &&
+            std::find(shownReplacementKeys.begin(), shownReplacementKeys.end(), replacement->first) != shownReplacementKeys.end())
+        {
+            WorldPacket packet(SMSG_SUPERCEDED_SPELL, 8);
+            packet << uint32(replacement->second) << uint32(replacement->first);
+            SendDirectMessage(&packet);
+        }
+        replacement = m_temporarySpellReplacements.erase(replacement);
+    }
+
+    // The client never had an entry of its own for a spell learned by LearnTemporarySpellReplacementTarget.
+    bool const announced = !m_unannouncedSpells.count(spell_id);
+    if (!HasSpell(spell_id))
+        m_unannouncedSpells.erase(spell_id);
+
     // pussywizard: remove from spell book (can't be replaced by previous rank, because such spells can't be unlearnt)
     if (!onlyTemporary || ((!spellInfo->HasAttribute(SpellAttr0(SPELL_ATTR0_PASSIVE | SPELL_ATTR0_DO_NOT_DISPLAY)) || !spellInfo->HasAnyAura()) && !spellInfo->HasEffect(SPELL_EFFECT_LEARN_SPELL)))
     {
         sScriptMgr->OnPlayerForgotSpell(this, spell_id);
-        SendLearnPacket(spell_id, false);
+        if (announced)
+            SendLearnPacket(spell_id, false);
     }
 }
 
@@ -5802,7 +5879,17 @@ void Player::SendActionButtons(uint32 state) const
         {
             ActionButtonList::const_iterator itr = m_actionButtons.find(button);
             if (itr != m_actionButtons.end() && itr->second.uState != ACTIONBUTTON_DELETED)
-                data << uint32(itr->second.packedData);
+            {
+                // A button saved on a spell that a temporary replacement currently shows as another one is
+                // sent as the spell its spellbook slot shows, as SMSG_SUPERCEDED_SPELL left it on the client.
+                // The saved button itself is not touched. The module reloads the bars after login, once the
+                // replacements exist, which is when this matters.
+                uint32 packed = itr->second.packedData;
+                if (itr->second.GetType() == ACTION_BUTTON_SPELL)
+                    if (uint32 const shown = GetTemporarySpellReplacement(itr->second.GetAction()); shown != itr->second.GetAction())
+                        packed = shown | (uint32(ACTION_BUTTON_SPELL) << 24);
+                data << uint32(packed);
+            }
             else
                 data << uint32(0);
         }
@@ -13756,8 +13843,9 @@ bool Player::CanTitanGrip(ItemTemplate const* weapon) const
 
 void Player::SetTemporarySpellReplacement(uint32 original, uint32 replacement)
 {
-    auto itr = m_temporarySpellReplacements.find(original);
-    uint32 previous = itr == m_temporarySpellReplacements.end() ? original : itr->second;
+    // What the client slot shows now, not the raw entry: an entry whose target is not active (other spec,
+    // or carried over by a rank-up of the original) shows the original, so the next change must start there.
+    uint32 previous = GetTemporarySpellReplacement(original);
     if (!replacement)
     {
         m_temporarySpellReplacements.erase(original);
@@ -13775,6 +13863,26 @@ void Player::SetTemporarySpellReplacement(uint32 original, uint32 replacement)
         packet << previous << replacement;
         GetSession()->SendPacket(&packet);
     }
+}
+
+void Player::LearnTemporarySpellReplacementTarget(uint32 spellId)
+{
+    if (m_spells.find(spellId) != m_spells.end())
+        return;
+
+    // _addSpell announces a temporary learn before any hook runs, so the id only has to be held for the
+    // duration of this call; restoring the outer value keeps a nested call from a learn hook harmless.
+    // Marked before learnSpell: its OnPlayerLearnSpell hooks run inside the call, and one that removed
+    // the spell again must not answer it with an SMSG_REMOVED_SPELL the client has no entry for.
+    uint32 const outer = m_unannouncedLearnSpellId;
+    m_unannouncedLearnSpellId = spellId;
+    m_unannouncedSpells.insert(spellId);
+    learnSpell(spellId, true);
+    m_unannouncedLearnSpellId = outer;
+
+    PlayerSpellMap::const_iterator itr = m_spells.find(spellId);
+    if (itr == m_spells.end() || itr->second->State != PLAYERSPELL_TEMPORARY)
+        m_unannouncedSpells.erase(spellId);
 }
 
 uint32 Player::GetTemporarySpellReplacement(uint32 original) const

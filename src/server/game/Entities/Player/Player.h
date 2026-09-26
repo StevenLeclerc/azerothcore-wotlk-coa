@@ -1805,6 +1805,14 @@ public:
     // Transient action replacements; never written to character spell ownership.
     void SetTemporarySpellReplacement(uint32 original, uint32 replacement);
     [[nodiscard]] uint32 GetTemporarySpellReplacement(uint32 original) const;
+    // Learns, as a temporary spell, the target of a SetTemporarySpellReplacement call without giving
+    // it a spellbook entry of its own on the client: no SMSG_LEARNED_SPELL now, no SMSG_REMOVED_SPELL
+    // when it goes, and SMSG_INITIAL_SPELLS leaves it out. The client only ever sees it in the slot of
+    // the spell it replaces, which SMSG_SUPERCEDED_SPELL rewrites in place. Learning it with
+    // learnSpell(id, true) instead gives the client two entries for it: its own and the rewritten slot.
+    // Does nothing when the player already holds the spell in any state (owned, other spec, pending
+    // deletion): such a copy is not ours to hide.
+    void LearnTemporarySpellReplacementTarget(uint32 spellId);
     [[nodiscard]] bool CanUseTwoHandWithShield(ItemTemplate const* main, ItemTemplate const* off) const;
     [[nodiscard]] float GetMeleeAbilityRangeBonus() const;
 
@@ -2939,6 +2947,10 @@ protected:
     PlayerMails m_mail;
     PlayerSpellMap m_spells;
     std::map<uint32, uint32> m_temporarySpellReplacements;
+    // Spells learned by LearnTemporarySpellReplacementTarget that the client was never told about.
+    std::set<uint32> m_unannouncedSpells;
+    // The spell LearnTemporarySpellReplacementTarget is learning right now; _addSpell does not announce it.
+    uint32 m_unannouncedLearnSpellId{0};
     PlayerTalentMap m_talents;
     uint32 m_lastPotionId;                              // last used health/mana potion in combat, that block next potion use
 

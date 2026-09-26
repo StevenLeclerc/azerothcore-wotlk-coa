@@ -154,7 +154,8 @@ def main():
         ("PLAYER", "\n".join((add, remove, method(player, "void Player::learnSpell("),
             method(player, "bool Player::HasSpell("), method(player, "bool Player::HasActiveSpell("),
             method(storage, "void Player::_SaveSpells("), method(player, "void Player::SetTemporarySpellReplacement("),
-            method(player, "uint32 Player::GetTemporarySpellReplacement(")))),
+            method(player, "uint32 Player::GetTemporarySpellReplacement("),
+            method(player, "void Player::LearnTemporarySpellReplacementTarget(")))),
     ):
         harness = harness.replace("// ACTUAL_" + marker, code)
 

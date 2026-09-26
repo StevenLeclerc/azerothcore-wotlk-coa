@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <utility>
 #include <vector>
 using uint8 = std::uint8_t;
@@ -191,14 +192,21 @@ struct Player : Unit
     bool GetVehicle() const { return vehicle; }
     bool HasActiveSpell(uint32 id) const { auto it = spells.find(id); return it != spells.end() && it->second >= 0; }
     auto const& GetSpellMap() const { return spells; }
+    // Targets learned unannounced (Player::LearnTemporarySpellReplacementTarget, P-144).
+    std::set<uint32> unannounced;
     void learnSpell(uint32 id, bool temporary) { assert(temporary && !spells.contains(id)); spells[id] = 1; }
+    void LearnTemporarySpellReplacementTarget(uint32 id)
+    { if (!spells.contains(id)) { spells[id] = 1; unannounced.insert(id); } }
     void removeSpell(uint32 id, uint32 mask, bool temporary)
     {
         assert(mask == SPEC_MASK_ALL && temporary);
         ++removals;
         auto it = spells.find(id);
         if (it != spells.end() && it->second == 1)
+        {
             spells.erase(it);
+            unannounced.erase(id);
+        }
     }
     void SetTemporarySpellReplacement(uint32 original, uint32 replacement);
     uint32 GetTemporarySpellReplacement(uint32 original) const;

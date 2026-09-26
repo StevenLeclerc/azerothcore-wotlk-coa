@@ -393,8 +393,24 @@ void Refresh(Player* player)
              player->HasAura(807600) && Count(player,807244) >= 2),
              std::tuple(800887u,504706u,player->HasAura(630932))})
     {
-        if (enabled && !player->HasSpell(replacement))
-            player->learnSpell(replacement, true);
+        if (enabled && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+        {
+            // Unannounced only when an active original will show it in its rewritten slot (one entry, not
+            // two, P-144). The talent is bought apart from the root ability (CharacterAdvancement.dbc: no
+            // prerequisite): without an original an unannounced target would be invisible, so unusable.
+            // Announce it then, as before.
+            bool shown = false;
+            for (auto const& pair : player->GetSpellMap())
+                if (player->HasActiveSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first),root))
+                {
+                    shown = true;
+                    break;
+                }
+            if (shown)
+                player->LearnTemporarySpellReplacementTarget(replacement);
+            else
+                player->learnSpell(replacement,true);
+        }
         for (auto const& pair : player->GetSpellMap())
             if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first),root))
                 player->SetTemporarySpellReplacement(pair.first,enabled ? replacement : 0);

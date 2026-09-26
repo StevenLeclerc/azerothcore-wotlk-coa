@@ -43,7 +43,22 @@ class aura_ascension_playing_dirty : public AuraScript
         if (!CanSuckerPunch(player) || GetCaster() != player)
             return;
         if (player->GetSpellMap().find(SPELL_SUCKER_PUNCH) == player->GetSpellMap().end())
-            player->learnSpell(SPELL_SUCKER_PUNCH, true);
+        {
+            // Unannounced only when an active Assault will show it in its rewritten slot (P-144). Playing
+            // Dirty also comes from Skullpiercer, and Assault is a separate paid node: without it an
+            // unannounced Sucker Punch would be invisible, so unusable. Announce it then, as before.
+            bool shown = false;
+            for (auto const& [id, record] : player->GetSpellMap())
+                if (player->HasActiveSpell(id) && sSpellMgr->GetFirstSpellInChain(id) == SPELL_ASSAULT)
+                {
+                    shown = true;
+                    break;
+                }
+            if (shown)
+                player->LearnTemporarySpellReplacementTarget(SPELL_SUCKER_PUNCH);
+            else
+                player->learnSpell(SPELL_SUCKER_PUNCH, true);
+        }
         for (auto const& [id, record] : player->GetSpellMap())
             if (player->HasActiveSpell(id) && sSpellMgr->GetFirstSpellInChain(id) == SPELL_ASSAULT)
                 player->SetTemporarySpellReplacement(id, SPELL_SUCKER_PUNCH);

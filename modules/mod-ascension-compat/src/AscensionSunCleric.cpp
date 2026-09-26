@@ -354,8 +354,9 @@ void Refresh(Player* player)
     for (uint32 id : {803500, 803492, 807750, 807751, 807752, 807446, 805481, 805491, 681471})
         player->RemoveAurasDueToSpell(id);
     bool replacement = player->IsAlive() && player->HasAura(803238) && player->HasSpell(Highest(player, 800231));
-    if (replacement && !player->HasSpell(504764))
-        player->learnSpell(504764, true);
+    // Unannounced: the client sees Sun Ray only in the rewritten Sunflare slot (one entry, not two, P-144).
+    if (replacement && player->GetSpellMap().find(504764) == player->GetSpellMap().end())
+        player->LearnTemporarySpellReplacementTarget(504764);
     for (auto const& pair : player->GetSpellMap())
         if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first), 800231))
             player->SetTemporarySpellReplacement(pair.first, replacement ? 504764 : 0);

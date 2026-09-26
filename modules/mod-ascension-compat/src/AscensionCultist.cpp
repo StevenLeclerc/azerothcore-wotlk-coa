@@ -282,8 +282,9 @@ void Refresh(Player* player)
              std::tuple(524876u, 255282u, player->HasAura(255281))})
     {
         active = active && player->IsAlive() && player->HasSpell(Highest(player, root));
-        if (active && !player->HasSpell(replacement))
-            player->learnSpell(replacement, true);
+        // Unannounced: the client sees the target only in the rewritten slot (one entry, not two, P-144).
+        if (active && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(replacement);
         // Troisieme copie du meme balayage dans ce fichier, et la plus chere : elle repart
         // pour chacune des quatre lignes ci-dessus. Meme traitement qu'en 119-152, meme
         // semantique -- HasSpell(pair.first) refaisait un find() dans la carte parcourue et

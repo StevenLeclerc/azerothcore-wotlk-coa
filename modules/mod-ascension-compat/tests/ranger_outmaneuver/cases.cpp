@@ -46,6 +46,7 @@ int main()
     assert(decoy && decoy->position == enemy.position && decoy->position != player.position);
     assert(player.teleportDestination == cast.fixtureDestination && decoy->motion.idle);
     assert(player.GetTemporarySpellReplacement(SPELL_OUTMANEUVER) == SPELL_DECOY_STRIKE);
+    assert(player.unannounced.contains(SPELL_DECOY_STRIKE)); // No spellbook entry of its own (P-144).
     decoy->ai->UpdateAI(1000); assert(!decoy->removed); // Initial teleport awaits acknowledgement.
     player.teleporting = false; player.position = cast.fixtureDestination;
     enemy.position = {80, 0, 0, 0};

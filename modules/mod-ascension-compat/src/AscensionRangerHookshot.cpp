@@ -52,8 +52,9 @@ class spell_ascension_hookshot : public SpellScript
             uint32 original = GetSpellInfo()->Id;
             ready->SetScriptValue(HookRoot, original);
             ready->SetScriptValue(Hooked, target->GetGUID().GetRawValue());
+            // Unannounced: the client sees Hooked only in the rewritten Hookshot slot (P-144).
             if (player->GetSpellMap().find(Hooked) == player->GetSpellMap().end())
-                player->learnSpell(Hooked, true);
+                player->LearnTemporarySpellReplacementTarget(Hooked);
             player->SetTemporarySpellReplacement(original, Hooked);
             if (player->GetTemporarySpellReplacement(original) != Hooked)
                 player->RemoveAurasDueToSpell(HookReady, player->GetGUID());

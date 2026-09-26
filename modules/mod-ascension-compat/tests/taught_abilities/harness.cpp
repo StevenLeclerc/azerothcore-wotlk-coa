@@ -128,6 +128,9 @@ struct Player
     uint8 m_activeSpec = 0;
     PlayerSpellMap m_spells;
     std::map<uint32, uint32> m_temporarySpellReplacements;
+    // Mirror Player.h: targets learned by LearnTemporarySpellReplacementTarget, never announced.
+    std::set<uint32> m_unannouncedSpells;
+    uint32 m_unannouncedLearnSpellId = 0;
     Session session;
     Player() = default;
     Player(Player const&) = delete;
@@ -161,6 +164,7 @@ struct Player
     void _SaveSpells(CharacterDatabaseTransaction);
     void SetTemporarySpellReplacement(uint32, uint32);
     uint32 GetTemporarySpellReplacement(uint32) const;
+    void LearnTemporarySpellReplacementTarget(uint32);
     void Put(uint32 id, PlayerSpellState state = PLAYERSPELL_UNCHANGED, uint8 mask = 3)
     {
         assert(!m_spells.contains(id));
@@ -225,7 +229,12 @@ void CheckReplacements()
         service._activeSpecializations[1] = entry.SpecId;
         player.learnSpell(parent);
         assert(!player.HasSpell(base)); // A replacement must not grant an unlearned original ability.
+        uint32 const announced = player.learnPackets;
         player.learnSpell(original);
+        // Only the original is announced: the target is learned unannounced, or the client
+        // holds two spellbook entries for it - its own and the rewritten slot (2026-09-25).
+        assert(player.learnPackets == announced + 1);
+        assert(player.m_unannouncedSpells.contains(base));
         if (!player.HasSpell(base) || player.GetTemporarySpellReplacement(original) != base)
         {
             std::cerr << "Missing replacement " << base << " for " << original << " from " << parent << '\n';
@@ -244,8 +253,10 @@ void CheckReplacements()
             service.SynchronizeTalentReplacements(&player);
             assert(player.GetTemporarySpellReplacement(original) == previous);
             player.level = rank.RequiredLevel;
+            uint32 const beforeRank = player.learnPackets;
             service.SynchronizeTalentReplacements(&player);
             assert(player.GetTemporarySpellReplacement(original) == rank.SpellId);
+            assert(player.learnPackets == beforeRank && player.m_unannouncedSpells.contains(rank.SpellId));
             assert(!player.HasSpell(previous)); // Superseded temporary rank must not linger.
             previous = rank.SpellId;
         }

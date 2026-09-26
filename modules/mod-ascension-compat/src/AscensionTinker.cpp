@@ -342,8 +342,24 @@ void Refresh(Player* player)
     for (auto [root,replacement,enabled] : {std::tuple(500549u,500213u,mech),
         std::tuple(504527u,504594u,gear)})
     {
-        if (enabled && !player->HasSpell(replacement))
-            player->learnSpell(replacement,true);
+        if (enabled && player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
+        {
+            // Unannounced only when an active original will show it in its rewritten slot (one entry, not
+            // two, P-144). Grinding Gears is a free level-50 node while Makeshift Dynamite is a paid one
+            // (CharacterAdvancement.dbc): without an original an unannounced target would be invisible,
+            // so unusable. Announce it then, as before.
+            bool shown = false;
+            for (auto const& pair : player->GetSpellMap())
+                if (player->HasActiveSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first),root))
+                {
+                    shown = true;
+                    break;
+                }
+            if (shown)
+                player->LearnTemporarySpellReplacementTarget(replacement);
+            else
+                player->learnSpell(replacement,true);
+        }
         for (auto const& pair : player->GetSpellMap())
             if (player->HasSpell(pair.first) && Named(sSpellMgr->GetSpellInfo(pair.first),root))
                 player->SetTemporarySpellReplacement(pair.first,enabled ? replacement : 0);

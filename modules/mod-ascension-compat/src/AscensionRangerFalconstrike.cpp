@@ -40,8 +40,9 @@ void SyncFalconstrike(Player* player)
         for (uint32 rank : Falconstrikes)
             if (SpellInfo const* info = sSpellMgr->GetSpellInfo(rank); info && info->SpellLevel <= player->GetLevel())
                 replacement = rank;
+        // Unannounced: the client sees Falconstrike only in the rewritten Quick Shot slot (P-144).
         if (player->GetSpellMap().find(replacement) == player->GetSpellMap().end())
-            player->learnSpell(replacement, true);
+            player->LearnTemporarySpellReplacementTarget(replacement);
     }
     for (uint32 quick : QuickShots)
     {

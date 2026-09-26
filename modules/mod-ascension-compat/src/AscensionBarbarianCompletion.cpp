@@ -220,12 +220,13 @@ class aura_ascension_barbarian_lifecycle : public AuraScript
                 cost->RecalculateAmount();
         if (id == 560933 && player->HasAura(560910))
             player->CastSpell(player, 560909, true);
-        if (id == 705198 && !player->HasSpell(807482))
-            player->learnSpell(807482, true);
+        // Rapid Throw exists only as the transformed Throw Weapon: learned unannounced, the client
+        // sees it only in the slots SetTemporarySpellReplacement rewrites (P-144). Announced, it kept
+        // a spellbook entry of its own for as long as the talent was up, proc or not.
+        if ((id == 705198 || id == 706487) && player->GetSpellMap().find(807482) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(807482);
         if (id == 706487)
         {
-            if (!player->HasSpell(807482))
-                player->learnSpell(807482, true);
             for (auto const& [sid, entry] : player->GetSpellMap())
                 if (player->HasActiveSpell(sid) &&
                     Family(sSpellMgr->GetSpellInfo(sid), 1, 262144) && sid != 807236)
