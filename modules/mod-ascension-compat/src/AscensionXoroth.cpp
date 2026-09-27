@@ -228,6 +228,10 @@ void Refresh(Player* player)
     scale(302574, player->HasAura(804340) ? -int32(imps) * Amount(302574) : 0);
     scale(302592, imps);
     scale(805965, -150 * int32(imps));
+    // Impcaller: spell_linked_spell puts 707666 on the master only when 706755 is applied. 707666 is not
+    // passive, so death strips it while the passive 706755 stays, and it never comes back (P-162).
+    if (player->IsAlive() && player->HasAura(706755) && !player->HasAura(707666))
+        player->AddAura(707666, player);
     // Marker 805916 (see ApplyContracts): without it the client refuses Sacrificial Circle before the
     // server ever sees the cast, whatever the living imps.
     if (!imps)
