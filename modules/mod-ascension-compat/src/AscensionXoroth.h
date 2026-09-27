@@ -10,6 +10,7 @@
 class Player;
 class Unit;
 class Creature;
+class Aura;
 namespace AscensionXoroth
 {
 enum SecondarySpells : uint32
@@ -44,6 +45,12 @@ bool Infernal(SpellInfo const* info);
 bool Derived(SpellInfo const* info);
 bool Pestilence(uint32 id);
 uint32 Count(Unit const* unit, uint32 id);
+// The aura the unit owns for this spell, applied or not. A talent whose effects are all
+// SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS (190) has no application on its master, so
+// HasAura/GetAura never see it (UnitAura::FillTargetMap only takes m_Controlled).
+Aura* Owned(Unit const* unit, uint32 id);
+// Demonic Grit, highest rank first (807898 then 805678: no spell_ranks chain, P-046).
+Aura* Grit(Player* player);
 int32 Amount(uint32 id, uint8 slot = 0, Unit* caster = nullptr);
 void Cast(Unit* caster, Unit* target, uint32 id);
 void Copy(Unit* caster, Unit* target, uint32 id, uint32 damage);

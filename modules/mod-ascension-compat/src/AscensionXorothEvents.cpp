@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionXoroth.h"
 #include "AscensionSpellSafe.h"
+#include "Log.h"
 #include "Pet.h"
 #include "Player.h"
 #include "Random.h"
@@ -10,6 +11,7 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
+#include "WorldSession.h"
 namespace
 {
 using namespace AscensionXoroth;
@@ -33,7 +35,7 @@ class aura_ascension_xoroth_event : public AuraScript
         bool autoAttack = e.GetTypeMask() & PROC_FLAG_DONE_MELEE_AUTO_ATTACK;
         bool melee = autoAttack || (e.GetTypeMask() & PROC_FLAG_DONE_SPELL_MELEE_DMG_CLASS);
         uint32 damage = e.GetDamageInfo() ? e.GetDamageInfo()->GetDamage() : 0;
-        bool block = e.GetHitMask() & PROC_HIT_BLOCK, parry = e.GetHitMask() & PROC_HIT_PARRY,
+        bool block = e.GetHitMask() & (PROC_HIT_BLOCK | PROC_HIT_FULL_BLOCK), parry = e.GetHitMask() & PROC_HIT_PARRY,
              dodge = e.GetHitMask() & PROC_HIT_DODGE;
         if (GetTarget() != player)
         {
@@ -51,7 +53,19 @@ class aura_ascension_xoroth_event : public AuraScript
             switch (id)
             {
             case 92104:
-                return block && Chance(player, id, 3000);
+            {
+                if (!block)
+                    return false;
+                bool cooling = State(player).timers.HasTimeUntilEvent(id);
+                bool summon = Chance(player, id, 3000);
+                // Temporary, until Brimstone Buckler's rate is measured in game (players only, not bots).
+                // "cooldown" lines are excluded from the 30 % rate: only "summoned" / "roll failed" count.
+                if (player->GetSession() && !player->GetSession()->IsBot())
+                    LOG_INFO("module.ascension_compat", "Xoroth 92104 Brimstone Buckler: {} blocked (hitMask {}), imp {}",
+                             player->GetName(), e.GetHitMask(),
+                             summon ? "summoned" : (cooling ? "none (3 s cooldown)" : "none (roll failed)"));
+                return summon;
+            }
             case 560546:
                 return block;
             case 560630:
@@ -186,7 +200,8 @@ class aura_ascension_xoroth_event : public AuraScript
             Cast(player, player, 800703);
             break;
         case 520662:
-            Cast(player, player, 500605);
+            // 500605 targets TARGET_UNIT_MASTER: cast by the master himself it finds no target.
+            Cast(GetTarget(), player, 500605);
             break;
         case 800443:
         case 562029:
@@ -197,7 +212,8 @@ class aura_ascension_xoroth_event : public AuraScript
             Cast(GetTarget(), target, 520418);
             break;
         case 802604:
-            Cast(player, player, 803254);
+            // 803254 targets TARGET_UNIT_MASTER too: the Greater Imp casts it on its master.
+            Cast(GetTarget(), player, 803254);
             break;
         case 802605:
             Cast(GetTarget(), target, 803255);

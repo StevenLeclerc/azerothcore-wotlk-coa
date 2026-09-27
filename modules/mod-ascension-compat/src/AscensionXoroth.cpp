@@ -122,6 +122,21 @@ uint32 Count(Unit const* unit, uint32 id)
     Aura const* aura = unit ? unit->GetAura(id) : nullptr;
     return aura ? aura->GetStackAmount() : 0;
 }
+Aura* Owned(Unit const* unit, uint32 id)
+{
+    if (!unit)
+        return nullptr;
+    if (Aura* aura = unit->GetAura(id))
+        return aura;
+    Aura* aura = unit->GetOwnedAura(id);
+    return aura && !aura->IsRemoved() ? aura : nullptr;
+}
+Aura* Grit(Player* player)
+{
+    if (Aura* aura = Owned(player, 807898))
+        return aura;
+    return Owned(player, 805678);
+}
 int32 Amount(uint32 id, uint8 slot, Unit* caster)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
@@ -157,8 +172,14 @@ void Gain(Player* player, uint32 count)
 bool Chance(Player* player, uint32 id, uint32 cooldown, float bonus)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-    if (!player->HasAura(id) || !info || State(player).timers.HasTimeUntilEvent(id) ||
-        !roll_chance_f(std::min(100.0f, float(info->ProcChance) + bonus)))
+    // Owned, not HasAura: Hellfire Reprimand 706565 has only effects 190 and no application on the master.
+    if (!player || !info || !Owned(player, id) || State(player).timers.HasTimeUntilEvent(id))
+        return false;
+    // The core applies SPELLMOD_CHANCE_OF_SUCCESS to spell_proc's Chance (100), where it is capped
+    // away; this roll on the DBC ProcChance is the real one (Brimstone's Blood 300387 on 804345).
+    float chance = float(info->ProcChance);
+    player->ApplySpellMod(id, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+    if (!roll_chance_f(std::min(100.0f, chance + bonus)))
         return false;
     if (cooldown)
         State(player).timers.ScheduleEvent(id, Milliseconds(cooldown));
@@ -198,7 +219,11 @@ void Refresh(Player* player)
         if (aura && aura->GetEffect(EFFECT_0) && aura->GetEffect(EFFECT_0)->GetAmount() != value)
             aura->GetEffect(EFFECT_0)->ChangeAmount(value);
     };
-    scale(302546, player->GetAuraOfRankedSpell(706569) ? imps * Amount(302546) : 0);
+    // Hellsmelted Armor: rank 2 (707836, in no chain of 706569) quotes $302546s2, rank 1 $302546s1.
+    int32 perImp = player->HasAura(707836)                ? Amount(302546, EFFECT_1)
+                   : player->GetAuraOfRankedSpell(706569) ? Amount(302546, EFFECT_0)
+                                                          : 0;
+    scale(302546, int32(imps) * perImp);
     scale(302573, player->HasAura(804340) ? imps * Amount(302573) : 0);
     scale(302574, player->HasAura(804340) ? -int32(imps) * Amount(302574) : 0);
     scale(302592, imps);
@@ -317,8 +342,13 @@ void Spread(Player* player, Unit* target)
             (Named(aura->GetSpellInfo(), 806965) || aura->GetId() == 803334))
             source.push_back(aura);
     }
+    // Indiscriminate: "to up to $300397i enemies within $300397a1 yds" (6 yd).
+    float radius = 6.0f;
+    if (SpellInfo const* spread = sSpellMgr->GetSpellInfo(300397))
+        if (float r = spread->Effects[EFFECT_0].CalcRadius(player); r > 0.0f)
+            radius = r;
     uint32 count = 0;
-    for (Unit* enemy : Nearby(target, 10.0f))
+    for (Unit* enemy : Nearby(target, radius))
     {
         if (enemy == target || !player->IsValidAttackTarget(enemy) || !target->IsWithinLOSInMap(enemy))
             continue;

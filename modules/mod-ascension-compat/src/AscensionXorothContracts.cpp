@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionContract.h"
+#include "AscensionStarcaller.h"
 #include "AscensionXoroth.h"
 #include "AscensionXorothData.h"
 #include "DBCStores.h"
@@ -89,6 +90,22 @@ void ApplyContracts(SpellInfo* info)
             info->ProcFlags = 0;
             info->ProcCharges = 0;
         }
+    if (id == 560630)
+        info->StackAmount = 0; // Demon King: "+$560630s1% parry until you parry", one aura refreshed, not 10 stacks.
+    if (id == 707632 || id == 707914)
+        dummy(0); // SPELLMOD_CHARGES would give Burning Blade core charges (CalcMaxCharges) and end it after 4 attacks.
+    if (id == 704954)
+        dummy(1); // Boundless Fury: ALL_EFFECTS already carries the +30 %; SPELLMOD_DAMAGE on top gave x1.69.
+    if (id == 704964)
+        dummy(1); // Bloodrider: its native +50 % duration hits Unleash Death; Losing Momentum is done by hand.
+    if (id == 681206)
+        AscensionContract::SetDuration(info, 27, "Xoroth"); // Gorged: 3 ticks of damage/6, 50 % over 3 sec.
+    if (id == 520542)
+    {
+        // Conqueror's Will: the critically struck target only, not every enemy around the knight.
+        info->Effects[EFFECT_0].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ENEMY);
+        info->Effects[EFFECT_0].TargetB = SpellImplicitTargetInfo();
+    }
     if (id == 680197)
     {
         info->Effects[0].ApplyAuraName = SPELL_AURA_ADD_PCT_MODIFIER;
@@ -300,6 +317,8 @@ void ApplyContracts(SpellInfo* info)
                     effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ENEMY);
                     effect.TargetB = SpellImplicitTargetInfo();
                 }
+    if (id == 804801)
+        dummy(2); // MOD_DAMAGE_FROM_CASTER with an empty mask took every family 23 spell; Factor keeps it to Fire.
     if (id == 680204)
         info->Effects[1].Effect = 0;
     if (id == 712294)
@@ -336,6 +355,13 @@ class xoroth_scaling : public UnitScript
             double level = caster->GetLevel();
             value *= float(0.0267291844060354 + 0.0048541098014737 * level + 0.0001859597762293 * level * level);
         }
+        if (info->Id == 520857 && index == EFFECT_0)
+        {
+            // Behind cone of Hellfire Bellows: same $scalingbp as 520292 e0 (AscensionScalingBaseData.h),
+            // missed by the generator because the 520857 tooltip is the old '$m1+0'.
+            double level = player->GetLevel();
+            value *= float(0.0267291844060354 + 0.0048541098014737 * level + 0.0001859597762293 * level * level);
+        }
         for (auto const& row : XorothCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {
@@ -361,10 +387,10 @@ class xoroth_scaling : public UnitScript
             value = player->GetUInt32Value(PLAYER_FIELD_COMBAT_RATING_1 + CR_BLOCK) * .5f;
         if (info->Id == 573066 && index == 0)
             value += State(player).imps.size() * Amount(805916, 2);
-        if (info->Id == 804788 && index == 0)
-            value *= 1 + .2f * Count(player, 804787);
-        if (info->Id == 800999 && index == 1)
-            value = player->HasAura(302581) ? float(Amount(302581)) : 0;
+        if (info->Id == 804788 && index == 0) // Path of Hellfire e2 (+30 % per stack, dummied): read, not 0.2
+            value *= 1 + Count(player, 804787) * Amount(804787, EFFECT_2) / 100.0f;
+        // 800999 e1 (Demonskin armor) is left to the native SPELLMOD_EFFECT2 of 302581: forcing it here too
+        // counted the talent twice (+2 % per stack).
         if (info->Id == 801055 || info->Id == 560817 || info->Id == 802855)
             value *= State(player).unleash;
         value = std::clamp(value, float(INT32_MIN / 2), float(INT32_MAX / 2));
@@ -378,9 +404,9 @@ class xoroth_scaling : public UnitScript
         float defense = 1;
         if (target && (target->GetEntry() == 50301 || target->GetEntry() == 50375))
             if (Player* master = Owner(target->GetOwner()))
-                if (Aura* grit = master->GetAuraOfRankedSpell(805678))
+                if (Aura* grit = Grit(master)) // owned only: its effects 190 never reach TempSummon imps
                     if (!target->HasAura(grit->GetId(), master->GetGUID()))
-                        defense *= 1 - Amount(grit->GetId(), 1) / 100.0f;
+                        defense *= 1 - std::abs(Amount(grit->GetId(), 1)) / 100.0f; // e1 = +20 (bp 19, aura 79); abs is only a guard
         if (!player || !target || !info || Derived(info))
             return defense;
         float factor = defense;
@@ -391,10 +417,14 @@ class xoroth_scaling : public UnitScript
         {
             if (!pet)
             {
-                if (Aura* a = player->GetAuraOfRankedSpell(300374))
+                // Invasion: rank 2 301357 is in no chain of 300374 (P-046). Both keep a DUMMY application.
+                Aura* a = player->GetAura(301357);
+                if (!a)
+                    a = player->GetAura(300374);
+                if (a)
                     factor *= 1 + Amount(a->GetId()) / 100.0f;
             }
-            else if (caster->GetEntry() == 50301 && player->HasAura(807669))
+            else if (caster->GetEntry() == 50301 && Owned(player, 807669)) // effect 190 only: owned, never applied
                 factor *= 1 + Amount(807669) / 100.0f;
         }
         if (!pet && Named(info, 805671))
@@ -404,7 +434,8 @@ class xoroth_scaling : public UnitScript
             if (player->HasAura(807671) && target->HasAura(804801, player->GetGUID()))
                 factor *= 1 + (Amount(807671) + 10 * Count(player, 500906)) / 100.0f;
         }
-        if (!pet && Sever(info) && player->HasAura(300375) && target->HasAuraState(AuraStateType(30), info, player))
+        // "Burning" is no aura state anyone sets (30 is not in the enum): same rule as Starcaller.
+        if (!pet && Sever(info) && player->HasAura(300375) && AscensionStarcaller::Burning(target))
             factor *= 1 + Amount(300375) / 100.0f;
         // Amount() reads the DBC value of Spiked Chains whether the player owns the talent or
         // not, so the talent itself has to be tested here. Today the only caster of 806219
@@ -413,6 +444,9 @@ class xoroth_scaling : public UnitScript
         // out the bonus talentless.
         if (info->Id == 806219 && player->HasAura(704987) && target->GetCreatureType() == CREATURE_TYPE_HUMANOID)
             factor *= 1 + Amount(704987, 1) / 100.0f;
+        // Pestilence of Apocalypse: "+$s3% Fire Damage from you" (e2 dummied); player as caster keeps Harbinger.
+        if (!pet && (info->SchoolMask & SPELL_SCHOOL_MASK_FIRE) && target->HasAura(804801, player->GetGUID()))
+            factor *= 1 + Amount(804801, EFFECT_2, player) / 100.0f;
         return factor;
     }
     void ModifyMeleeDamage(Unit* target, Unit* caster, uint32& damage) override
@@ -443,7 +477,8 @@ class xoroth_scaling : public UnitScript
             {
                 State(player).timers.RescheduleEvent(804703, 3s);
                 if (player == target && player->HasAura(804703) && Count(player, 804787) && !player->HasAura(804785) &&
-                    !player->HasAura(805746) && !roll_chance_i(player->HasAura(704964) ? Amount(704964) : 0))
+                    // Bloodrider: "reduces the chance ... by $s1%" ($s1 = -25), so a 75 % loss chance.
+                    !player->HasAura(805746) && !roll_chance_i(player->HasAura(704964) ? -Amount(704964) : 0))
                     Cast(player, player, 805746);
             }
     }

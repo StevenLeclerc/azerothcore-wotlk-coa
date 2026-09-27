@@ -21,7 +21,8 @@ bool First(AuraEffect const* effect)
 }
 bool Mark(SpellInfo const* info)
 {
-    return info && info->SpellFamilyName == 23 && (info->SpellFamilyFlags[1] & 2147483648u);
+    // Greater Mark of Rivendare 803730 carries the Mark bit but SpellFamilyName 36 in Spell.dbc.
+    return info && (info->Id == 803730 || (info->SpellFamilyName == 23 && (info->SpellFamilyFlags[1] & 2147483648u)));
 }
 class aura_ascension_xoroth_lifecycle : public AuraScript
 {
@@ -35,7 +36,11 @@ class aura_ascension_xoroth_lifecycle : public AuraScript
         if (id == 520294 && effect->GetEffIndex() == EFFECT_1)
             amount = int32(amount * (1 + .2f * State(player).blood));
         if (id == 805680 && effect->GetEffIndex() == EFFECT_0)
-            amount = int32(amount * (1 + .2f * State(player).blood));
+        {
+            // $800999s3 per Demon's Blood stack (its native 317 is dummied), plus Hellwrath's $s2.
+            float per = float(Amount(800999, EFFECT_2)) + (player->HasAura(804014) ? float(Amount(804014, EFFECT_1)) : 0.0f);
+            amount = int32(amount * (1 + per / 100.0f * State(player).blood));
+        }
         if (id == 803889)
             amount = int32(amount * (1 + .2f * State(player).fire));
     }
@@ -72,7 +77,9 @@ class aura_ascension_xoroth_lifecycle : public AuraScript
         if (id == 524913)
             GetAura()->SetScriptValue(id, 5);
         if (id == 524920)
-            GetAura()->SetScriptValue(id, 6 + State(player).fire);
+            // Burning Swings 707632 is dummied (its SPELLMOD_CHARGES would end Burning Blade after 4 attacks).
+            GetAura()->SetScriptValue(id, 6 + State(player).fire +
+                                              (player->HasAura(707632) ? uint32(std::max(0, Amount(707632))) : 0));
         if (id == 712294)
             Replace(player, 800340, 504581);
         if (id == 800999 || id == 92104)
@@ -101,8 +108,15 @@ class aura_ascension_xoroth_lifecycle : public AuraScript
         {
             PreventDefaultAction();
             uint32 child = id == 801053 ? 801071 : id == 802344 ? 802347 : id == 804786 ? 804801 : 0;
+            // The child's own radius: Conquest $801071a1 = 12 yd, Famine 10 yd, Apocalypse $804801a3 = 8 yd.
+            float radius = 0.0f;
+            if (SpellInfo const* info = child ? sSpellMgr->GetSpellInfo(child) : nullptr)
+                for (auto const& fx : info->Effects)
+                    radius = std::max(radius, fx.CalcRadius(player));
+            if (radius <= 0.0f)
+                radius = 10.0f;
             if (child)
-                for (Unit* enemy : Nearby(player, 10))
+                for (Unit* enemy : Nearby(player, radius))
                     if (player->IsValidAttackTarget(enemy))
                         if (Aura* aura = player->AddAura(child, enemy))
                             aura->SetDuration(1500);

@@ -3996,6 +3996,17 @@ bool Unit::HasAscensionConditionalCombatState(int32 state) const
             return HasAuraState(AURA_STATE_BLEEDING);
         case AURA_STATE_ASCENSION_POISONED:
             return HasAuraState(AURA_STATE_ASCENSION_POISONED);
+        case 30:
+            // Ascension "Burning" (Inferno Blast 805697/807899): no aura state is ever set for it. Same rule
+            // as mod-ascension-compat's AscensionStarcaller::Burning: a harmful periodic Fire damage aura.
+            for (auto const& [spellId, application] : GetAppliedAuras())
+            {
+                SpellInfo const* info = application->GetBase()->GetSpellInfo();
+                if (!application->IsPositive() && (info->GetSchoolMask() & SPELL_SCHOOL_MASK_FIRE) &&
+                    (info->HasAura(SPELL_AURA_PERIODIC_DAMAGE) || info->HasAura(SPELL_AURA_PERIODIC_LEECH)))
+                    return true;
+            }
+            return false;
         default:
             return false;
     }

@@ -165,8 +165,8 @@ class xoroth_casts : public AllSpellScript
         if (!player)
             return;
         uint32 fire = State(player).fire, id = aura->GetId();
-        if (id == 801064)
-            duration = 3000 * fire;
+        if (id == 801064) // 500906 e2 (dummied) carries $s3 per Demonfire; Suffusion of Essence adds its EFFECT3 mod
+            duration = int32(fire) * Amount(500906, EFFECT_2, player);
         if (id == 801017)
             duration *= 1 + fire;
         if (id == 803889)
@@ -175,6 +175,9 @@ class xoroth_casts : public AllSpellScript
             duration = int32(duration * (1 + Amount(704964, 1) / 100.0f));
         if (id == 801052)
             duration = int32(duration * State(player).unleash);
+        // Darkrider's native +$s2% only reaches family 23: Greater Mark of Rivendare is family 36.
+        if (id == 803730 && duration > 0 && player->HasAura(704980))
+            duration = int32(duration * (1 + Amount(704980, EFFECT_1) / 100.0f));
     }
     void OnSpellBeforeEffects(Spell* spell, Unit* caster, SpellInfo const* info) override
     {
@@ -187,6 +190,20 @@ class xoroth_casts : public AllSpellScript
         if (!player || info->SpellFamilyName != 23)
             return;
         BeginResources(player, spell);
+        // Chainwhip interrupts through its silence (aura 27), never through effect 68, so the core's
+        // OnSpellSuccessfulInterrupt never runs. Note the target casting a silenceable spell now
+        // (same rule as HandleAuraModSilence); OnSpellHitResult refunds once the silence landed.
+        if (Named(info, 800081) && !spell->IsTriggered())
+            for (TargetInfo const& hit : *spell->GetUniqueTargetInfo())
+                if (!spell->GetScriptValue(800836))
+                    if (Unit* unit = ObjectAccessor::GetUnit(*player, hit.targetGUID); unit && unit != player)
+                        for (uint32 i = CURRENT_MELEE_SPELL; i < CURRENT_MAX_SPELL; ++i)
+                            if (Spell* current = unit->GetCurrentSpell(CurrentSpellTypes(i));
+                                current && current->m_spellInfo->PreventionType == SPELL_PREVENTION_TYPE_SILENCE)
+                            {
+                                spell->SetScriptValue(800836, unit->GetGUID().GetRawValue());
+                                break;
+                            }
         if (info->Id == 801037)
         {
             Unit* primary = spell->m_targets.GetUnitTarget();
@@ -257,6 +274,16 @@ class xoroth_casts : public AllSpellScript
             result.crit = true;
         if (spell->GetScriptValue(524913))
             factor *= target->IsControlledByPlayer() ? 1.25f : 2.0f;
+        // Annihilation: "+$712402s1% damage if you are above 75% health or below 35% health". The DBC
+        // grants it through 712294's periodic triggers, which the contract removes.
+        if (Named(info, 504581))
+        {
+            float health = player->GetHealthPct();
+            if (health > 75.0f)
+                factor *= 1 + Amount(712402, EFFECT_0, player) / 100.0f;
+            else if (health < 35.0f)
+                factor *= 1 + Amount(712320, EFFECT_0, player) / 100.0f;
+        }
         result.damage = int32(std::min<double>(INT32_MAX / 2, double(result.damage) * factor));
         result.damageBeforeTakenMods =
             int32(std::min<double>(INT32_MAX / 2, double(result.damageBeforeTakenMods) * factor));
@@ -283,6 +310,16 @@ class xoroth_casts : public AllSpellScript
         RecordBellowsResult(player, info, target, miss);
         if (miss != SPELL_MISS_NONE)
             return;
+        // Chainwhip: "If you successfully interrupt an enemy, this will refund $800835s1% of the cooldown."
+        if (Named(info, 800081) && !spell->IsTriggered() && !spell->GetScriptValue(800835) &&
+            spell->GetScriptValue(800836) == target->GetGUID().GetRawValue() &&
+            target->HasAuraEffect(info->Id, EFFECT_2, player->GetGUID()))
+        {
+            spell->SetScriptValue(800835, 1);
+            int32 cooldown = int32(info->RecoveryTime);
+            player->ApplySpellMod(info->Id, SPELLMOD_COOLDOWN, cooldown);
+            Reduce(player, 800081, cooldown * std::max(0, Amount(800835)) / 100);
+        }
         uint32 id = info->Id, fire = spell->GetScriptValue(500906);
         if (id == 520292 || id == 520857)
             Reduce(player, 706756, std::abs(Amount(704541)));
@@ -346,12 +383,8 @@ class xoroth_casts : public AllSpellScript
             Cast(player, player, 804886);
             Gain(player, 1);
         }
-        // Carver (707390): "Critical strikes with Gore now generate 1 additional Demonfire."
-        // Its DBC effect is a PROC_TRIGGER_SPELL towards 524912 ("Add 1 Demonfire") with ProcFlags 0
-        // and no spell_proc row, so the native path never fires (P-045). Gore is single target, and
-        // this whole block already returned for triggered casts, so one crit means one Demonfire.
-        if (critical && Named(info, 805555) && player->HasAura(707390))
-            Gain(player, 1);
+        // Carver (707390) is granted by the FirstCriticalDamagingHit rows of AscensionCustomResourceData.h
+        // alone: a Gain here as well gave 3 Demonfire per Gore crit instead of 2.
         if (Named(info, 805671))
         {
             if (player->HasActiveSpell(SPELL_DEMONIC_VISAGE))
@@ -483,14 +516,22 @@ class xoroth_casts : public AllSpellScript
                     State(player).timers.ScheduleEvent(300398, 10s);
                 }
             if (Infernal(info) && player->HasAura(707666))
-                Summon(player, 50301, player->GetNearPosition(2, 0),
-                       uint32(AscensionSpellSafe::Duration(807699, 30000)));
+            {
+                // Impcaller's imp is 807699, whose e0 Imp Gang Boss 706754 raises by 2 (mask 32).
+                uint32 imps = uint32(std::clamp(Amount(807699, EFFECT_0, player), 1, 12));
+                for (uint32 n = 0; n < imps; ++n)
+                    Summon(player, 50301, player->GetNearPosition(2, 0),
+                           uint32(AscensionSpellSafe::Duration(807699, 30000)));
+            }
             if (Named(info, 801059) && fire == 6 && player->HasAura(704452))
                 Cast(player, player, 801006);
             if (Named(info, 800340) && Chance(player, 704975))
                 Cast(player, player, 707376);
             if (Sever(info))
             {
+                // Brimstone Bludgeon: "Unleashes your active Pestilence to trigger a powerful effect."
+                if (Named(info, 520005))
+                    Unleash(player, target && target->IsInWorld() ? target : player);
                 if (player->HasAura(680199))
                     Reduce(player, id, Named(info, 520005) ? -12000 : -2000);
                 if (player->HasAura(705005))
@@ -522,7 +563,26 @@ class xoroth_casts : public AllSpellScript
                     Reduce(player, 802602, std::abs(Amount(802611)));
             }
             if (id == 804703 && player->HasAura(706295))
+            {
                 Cast(player, player, 706384);
+                // Mounted Champion "now has a $/1000;s2 sec cooldown": the core drops a flat SPELLMOD_COOLDOWN
+                // on a spell without base cooldown, and the client knows none, hence the packet.
+                if (uint32 cooldown = uint32(std::max(0, Amount(706295, EFFECT_1))))
+                {
+                    player->AddSpellCooldown(id, 0, cooldown);
+                    WorldPacket data;
+                    player->BuildCooldownPacket(data, SPELL_COOLDOWN_FLAG_NONE, id, cooldown);
+                    player->SendDirectMessage(&data);
+                }
+            }
+            // Hellfire Bellows: the 15 sec cooldown exists only server side (contract); the client's DBC has none.
+            if (id == 520292)
+                if (uint32 left = player->GetSpellCooldownDelay(id))
+                {
+                    WorldPacket data;
+                    player->BuildCooldownPacket(data, SPELL_COOLDOWN_FLAG_NONE, id, left);
+                    player->SendDirectMessage(&data);
+                }
             if ((Named(info, 500020) || Named(info, 800081)) && player->HasAura(807336))
             {
                 Cast(player, target, 807522);

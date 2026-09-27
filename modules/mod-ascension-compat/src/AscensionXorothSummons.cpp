@@ -38,7 +38,7 @@ void Scale(Creature* unit, Player* player)
         health *= 1.3f;
     if (imp && player->HasAura(804879))
         health *= 1.5f;
-    if (Aura* grit = player->GetAuraOfRankedSpell(805678))
+    if (Aura* grit = Grit(player)) // owned only (effects 190), and 807898 is in no chain of 805678
         health *= 1 + Amount(grit->GetId()) / 100.0f;
     uint32 maximum = std::max(1u, uint32(health));
     float percent = unit->GetHealthPct() / 100.0f;
@@ -170,6 +170,7 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
 class spell_ascension_xoroth_sacrificial_circle : public SpellScript
 {
     PrepareSpellScript(spell_ascension_xoroth_sacrificial_circle);
+    int32 shield = 0;
     static bool OwnImp(Player const* player, WorldObject const* object)
     {
         Creature const* imp = object ? object->ToCreature() : nullptr;
@@ -199,13 +200,40 @@ class spell_ascension_xoroth_sacrificial_circle : public SpellScript
         Creature* imp = GetHitCreature();
         if (!player || !OwnImp(player, imp))
             return;
+        // Soul Furnace: 15% of each destroyed imp's total health, read before 706753 kills it. The native
+        // chain (e0 -> 706752 -> 706759) is the effect prevented above.
+        if (player->HasAura(706758))
+            shield += int32(imp->CountPctFromMaxHealth(15));
         // The tooltip adds 25% of each sacrificed imp's maximum health; 706753 heals the master and kills the imp.
         imp->CastCustomSpell(706753, SPELLVALUE_BASE_POINT0, int32(imp->CountPctFromMaxHealth(25)), player,
                              TRIGGERED_FULL_MASK);
     }
+    void Shield()
+    {
+        Player* player = Owner(GetCaster());
+        if (!player || shield <= 0 || !player->IsAlive())
+            return;
+        // One shield per cast, all imps summed. 706759 stacks natively (StackAmount 25, amount x stacks):
+        // fold what is left of the previous one in and cast afresh instead.
+        int64 total = shield;
+        if (AuraEffect const* old = player->GetAuraEffect(706759, EFFECT_2, player->GetGUID()))
+            total += std::max(0, old->GetAmount());
+        player->RemoveAurasDueToSpell(706759);
+        player->CastCustomSpell(706759, SPELLVALUE_BASE_POINT2, int32(std::min<int64>(total, INT32_MAX / 2)), player,
+                                TRIGGERED_FULL_MASK);
+        // 706759 has no duration of its own: Soul Furnace's SPELLMOD_DURATION (+$s1) is all of it.
+        if (Aura* aura = player->GetAura(706759, player->GetGUID()); aura && aura->GetMaxDuration() <= 0)
+        {
+            int32 duration = std::max(1000, Amount(706758));
+            aura->SetMaxDuration(duration);
+            aura->SetDuration(duration);
+        }
+        shield = 0;
+    }
     void Register() override
     {
         OnCheckCast += SpellCheckCastFn(spell_ascension_xoroth_sacrificial_circle::CheckImps);
+        AfterCast += SpellCastFn(spell_ascension_xoroth_sacrificial_circle::Shield);
         // Spell.dbc declares EFFECT_0 as TargetA 22 (TARGET_SRC_CASTER) / TargetB 30
         // (TARGET_UNIT_SRC_AREA_ALLY); the hook only binds when it names a target the record carries.
         OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_ascension_xoroth_sacrificial_circle::SelectImps,

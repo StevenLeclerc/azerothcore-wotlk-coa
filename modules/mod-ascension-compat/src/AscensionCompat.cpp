@@ -6931,6 +6931,48 @@ class spell_ascension_experience_potion : public SpellScript
     }
 };
 
+// Talent replacement targets (Shieldgore 804353/806869-806874, Warbringer, Hellfire Bellows, Brimstone
+// Bludgeon, and the other classes' rows) are taught only as PLAYERSPELL_TEMPORARY, by
+// SynchronizeTalentReplacements, after _LoadActions: a bar button holding one failed
+// IsActionButtonDataValid at login and was deleted. The button is kept as the highest active rank of
+// the original chain instead; SMSG_SUPERCEDED_SPELL then shows the replacement in that slot again.
+class AscensionCompatReplacementButtonScript : public PlayerScript
+{
+public:
+    AscensionCompatReplacementButtonScript()
+        : PlayerScript("AscensionCompatReplacementButtonScript", {PLAYERHOOK_ON_NORMALIZE_ACTION_BUTTON_SPELL})
+    {
+    }
+
+    void OnPlayerNormalizeActionButtonSpell(Player* player, uint32& action, bool /*loading*/) override
+    {
+        if (!player || !action || !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
+            return;
+        // A target the player owns for good (not the temporary replacement copy) stays on its button.
+        auto const& spells = player->GetSpellMap();
+        if (auto owned = spells.find(action); owned != spells.end() && owned->second &&
+            owned->second->State != PLAYERSPELL_TEMPORARY && owned->second->State != PLAYERSPELL_REMOVED)
+            return;
+        for (auto const& entry : AscensionCompatData::TalentReplacements)
+        {
+            if (entry.ClassId != player->getClass())
+                continue;
+            bool const listed = std::any_of(entry.Ranks.begin(), entry.Ranks.end(),
+                [action](auto const& rank) { return rank.SpellId && rank.SpellId == action; });
+            if (!listed)
+                continue;
+            for (uint32 id = sSpellMgr->GetLastSpellInChain(entry.OriginalSpellId); id;
+                 id = sSpellMgr->GetPrevSpellInChain(id))
+                if (player->HasActiveSpell(id))
+                {
+                    action = id;
+                    return;
+                }
+            // Several rows may share a target's class; another row may still own the original.
+        }
+    }
+};
+
 } // namespace
 
 bool IsAscensionPrimalistTameEligible(Player const* player)
@@ -7117,6 +7159,7 @@ void AddAscensionCompatScripts() {
   new AscensionCompatServerScript();
   new AscensionCompatCommandScript();
   new AscensionCompatPlayerScript();
+  new AscensionCompatReplacementButtonScript();
   new AscensionCompatAllSpellScript();
   new AscensionCompatUnitScript();
   new AscensionCompatChangelogScript();
