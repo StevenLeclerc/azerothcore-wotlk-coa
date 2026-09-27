@@ -1,6 +1,8 @@
 // mod-coa-challenges (review split): CoA.Challenges.Scripts.cpp
 // Mechanical split of review-CoAChallenges.cpp; no logic changes.
 #include "CoA.Challenges.Review.h"
+#include "AscensionCreatureOnlyDamageTaken.h"
+#include "SpellAuraEffects.h"
 #include "RBAC.h"
 #include "Random.h"
 
@@ -2277,7 +2279,8 @@ namespace CoAChallenges
             };
             static ChatCommandTable coaChallengesTable =
             {
-                { "reload", HandleCoAReloadCommand, SEC_ADMINISTRATOR, Console::Yes }
+                { "reload", HandleCoAReloadCommand, SEC_ADMINISTRATOR, Console::Yes },
+                { "damageprobe", HandleCoADamageProbeCommand, SEC_ADMINISTRATOR, Console::Yes }
             };
             static ChatCommandTable coaCommandTable =
             {
@@ -2397,6 +2400,71 @@ namespace CoAChallenges
             SendChallengeSyncToGroup(p, 60000, false, pairs, false, {});
             handler->PSendSysMessage("Sent CHALLENGES_SYNC (0x59B) for challenge {} level {} to {}'s party.",
                 challengeId, lvl, p->GetName());
+            return true;
+        }
+
+        // .coa challenges damageprobe <victim> <attacker> [spellId]
+        // GM-only, read-only: what the victim's damage-taken modifiers make of
+        // 10000 damage dealt by <attacker> (a player or a bot), then by the
+        // nearest living creature not controlled by a player. Melee goes
+        // through Unit::MeleeDamageBonusTaken (physical), the spell through
+        // Unit::SpellDamageBonusTaken (default 686 Shadow Bolt, shadow). Also
+        // prints the product of the victim's PvE-only challenge auras for the
+        // school ("creature-only factor"): before the creature-only filter, a
+        // player's hit was multiplied by it too.
+        static bool HandleCoADamageProbeCommand(ChatHandler* handler, PlayerIdentifier victimId,
+            PlayerIdentifier attackerId, Optional<uint32> spellId)
+        {
+            Player* victim = victimId.GetConnectedPlayer();
+            Player* attacker = attackerId.GetConnectedPlayer();
+            if (!victim || !attacker || !victim->IsInWorld() || !attacker->IsInWorld())
+            {
+                handler->SendErrorMessage("Victim and attacker must both be online and in world.");
+                return false;
+            }
+            SpellInfo const* spell = sSpellMgr->GetSpellInfo(spellId.value_or(686));
+            if (!spell)
+            {
+                handler->SendErrorMessage("Unknown spell {}.", spellId.value_or(686));
+                return false;
+            }
+
+            uint32 const base = 10000;
+            auto creatureOnlyFactor = [victim](uint32 schoolMask)
+            {
+                return victim->GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,
+                    [schoolMask](AuraEffect const* effect)
+                    {
+                        return (effect->GetMiscValue() & schoolMask) &&
+                            AscensionCreatureOnlyDamageTaken::IsCreatureOnly(effect->GetId());
+                    });
+            };
+            auto probe = [&](Unit* source, char const* label)
+            {
+                uint32 melee = victim->MeleeDamageBonusTaken(source, base, BASE_ATTACK, nullptr, SPELL_SCHOOL_MASK_NORMAL);
+                uint32 magic = victim->SpellDamageBonusTaken(source, spell, base, SPELL_DIRECT_DAMAGE);
+                handler->PSendSysMessage("  {} {} (guid {}, player-controlled {}): melee {} -> {}, spell {} -> {}",
+                    label, source->GetName(), source->GetGUID().GetCounter(),
+                    source->IsCharmedOwnedByPlayerOrPlayer() ? 1 : 0, base, melee, spell->Id, magic);
+            };
+
+            handler->PSendSysMessage("Damage probe on {} (guid {}, level {}): creature-only factor physical x{:.3f}, spell school x{:.3f}",
+                victim->GetName(), victim->GetGUID().GetCounter(), victim->GetLevel(),
+                creatureOnlyFactor(SPELL_SCHOOL_MASK_NORMAL), creatureOnlyFactor(spell->GetSchoolMask()));
+            probe(attacker, "attacker");
+
+            std::list<Creature*> creatures;
+            // false = no "dead only" filter (AllDeadCreaturesInRange); alive checked below.
+            victim->GetDeadCreatureListInGrid(creatures, 100.0f, false);
+            Creature* nearest = nullptr;
+            for (Creature* c : creatures)
+                if (c && c->IsAlive() && !c->IsCharmedOwnedByPlayerOrPlayer()
+                    && (!nearest || victim->GetDistance(c) < victim->GetDistance(nearest)))
+                    nearest = c;
+            if (nearest)
+                probe(nearest, "creature");
+            else
+                handler->PSendSysMessage("  no living creature within 100 yd of {}", victim->GetName());
             return true;
         }
 
@@ -3096,15 +3164,11 @@ namespace CoAChallenges
             if (!a || !t || a == t)
                 return true;
 
-            // PVE_ONLY (Adventure Mode): cannot fight other players at all.
-            // KNOWN LIMITATION: only attack is blocked; flag/BG/arena scope not
-            // modelled (the client tooltip is empty; About 211 doesn't mention PvP).
-            if (PlayerHasRule(a, "CHALLENGE_RULES_TYPE_PVE_ONLY"))
-            {
-                if (a->GetSession())
-                    NotifyPlayer(a, "Your challenge is PvE only: you cannot fight players.");
-                return false;
-            }
+            // PVE_ONLY (Adventure Mode) no longer blocks attacking players: the
+            // gate was one-sided (players and bots could still attack the
+            // challenger, who could not answer), and the realm keeps PvP open.
+            // What the rule still does: its damage-taken malus only counts
+            // creature hits (RegisterCreatureOnlyDamageTakenSpells).
 
             if (a->GetMap()->IsBattlegroundOrArena())
                 return true;

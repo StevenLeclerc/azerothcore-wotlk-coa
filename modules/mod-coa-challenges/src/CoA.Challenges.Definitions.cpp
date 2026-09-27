@@ -194,6 +194,7 @@ namespace CoAChallenges
             ObjectiveCache.clear();
         }
         BuildGameModeBaseMap();
+        RegisterCreatureOnlyDamageTakenSpells();
 
         LOG_INFO("module.coa_challenges",
             "Challenge definitions loaded from world DB: {} definition(s), "

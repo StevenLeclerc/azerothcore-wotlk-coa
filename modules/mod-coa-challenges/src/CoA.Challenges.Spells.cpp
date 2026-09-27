@@ -1,6 +1,7 @@
 // mod-coa-challenges (review split): CoA.Challenges.Spells.cpp
 // Mechanical split of review-CoAChallenges.cpp; no logic changes.
 #include "CoA.Challenges.Review.h"
+#include "AscensionCreatureOnlyDamageTaken.h"
 
 namespace CoAChallenges
 {
@@ -127,6 +128,77 @@ namespace CoAChallenges
 
         // DB-only: auras come from coa_challenge_spell (no conf fallback).
         return ParseSpellList(raw);
+    }
+
+    // PVE_ONLY (Adventure Mode): the challenge's "enemies deal more damage"
+    // auras (SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN) are meant for creatures. The
+    // core applied them to every source, so a player or a bot one-shot a
+    // character in Adventure Mode. Register those spells with the core, which
+    // then skips them when the source is on the player side
+    // (IsPlayerSideDamageSource in Unit.cpp). A spell also used
+    // by a challenge that is not PvE-only is left alone: that challenge's
+    // malus would otherwise disappear in PvP too.
+    void RegisterCreatureOnlyDamageTakenSpells()
+    {
+        auto collect = [](uint32 id)
+        {
+            std::set<uint32> out;
+            for (uint32 s : GetChallengeSpells(id, 0))
+                out.insert(s);
+            for (uint32 lv = 1; lv <= ChallengeLevelCount(id); ++lv)
+                for (uint32 s : GetChallengeSpells(id, lv))
+                    out.insert(s);
+            return out;
+        };
+
+        std::set<uint32> pveOnly, shared;
+        std::set<uint32> pveOnlyChallenges;
+        for (uint32 id : DefIds())
+        {
+            if (RuleListContains(ChallengeRules(id), "CHALLENGE_RULES_TYPE_PVE_ONLY"))
+            {
+                pveOnlyChallenges.insert(id);
+                for (uint32 s : collect(id))
+                    pveOnly.insert(s);
+            }
+        }
+        for (uint32 id : DefIds())
+        {
+            if (pveOnlyChallenges.count(id))
+                continue;
+            for (uint32 s : collect(id))
+                if (pveOnly.count(s))
+                    shared.insert(s);
+        }
+
+        std::unordered_set<uint32> creatureOnly;
+        for (uint32 s : pveOnly)
+        {
+            if (shared.count(s))
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(s);
+            if (!info)
+                continue;
+            for (SpellEffectInfo const& eff : info->Effects)
+            {
+                if (eff.IsAura(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN))
+                {
+                    creatureOnly.insert(s);
+                    break;
+                }
+            }
+        }
+
+        size_t const count = creatureOnly.size();
+        AscensionCreatureOnlyDamageTaken::SetSpells(std::move(creatureOnly));
+        LOG_INFO("module.coa_challenges",
+            "PvE-only challenges: {} challenge(s), {} damage-taken aura spell(s) limited to creature sources, "
+            "{} spell(s) left untouched (shared with a challenge that allows PvP)",
+            pveOnlyChallenges.size(), count, shared.size());
+        if (!pveOnlyChallenges.empty() && !count)
+            LOG_ERROR("module.coa_challenges",
+                "PvE-only challenges found but none of their spells carries SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN: "
+                "check coa_challenge_spell, their damage-taken malus (if any) now applies to every source");
     }
 
     void ApplyChallengeSpell(Player* player, uint32 challengeID, uint32 level)

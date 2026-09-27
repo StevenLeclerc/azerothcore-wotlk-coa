@@ -362,6 +362,7 @@ void UntrackModeLives(Player* player, uint32 bit);
 void ReapplyGameModeBehavior(Player* player);
 char const* ChallengeResponseString(uint32 code);
     std::vector<uint32> GetChallengeSpells(uint32 challengeID, uint32 level = 0);
+    void RegisterCreatureOnlyDamageTakenSpells();
     void ReapplyActiveSpells(Player* player);
     void StripOrphanChallengeAuras(Player* player);
     std::vector<RewardDef> GetChallengeRewards(uint32 challengeID, uint32 level);

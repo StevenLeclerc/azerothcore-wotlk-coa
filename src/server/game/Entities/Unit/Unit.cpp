@@ -19,6 +19,7 @@
 #include "AbstractFollower.h"
 #include "AreaDefines.h"
 #include "ArenaSpectator.h"
+#include "AscensionCreatureOnlyDamageTaken.h"
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
 #include "Battleground.h"
@@ -9303,6 +9304,35 @@ uint32 Unit::SpellDamageBonusDone(Unit* victim, SpellInfo const* spellProto, uin
     return uint32(std::max(tmpDamage, 0.0f));
 }
 
+// Player side of a fight, for the PvE-only challenge auras: a player or a bot,
+// what they charm or own (pets, guardians, totems: owner GUID), a unit flagged
+// as controlled by a player, and a wild summon (no owner GUID) of such a unit
+// that is not hostile to it. A creature a player summons as an enemy (a quest
+// boss) stays a creature.
+static bool IsPlayerSideDamageSource(Unit const* source)
+{
+    if (source->IsCharmedOwnedByPlayerOrPlayer() || source->IsControlledByPlayer())
+        return true;
+    if (TempSummon const* summon = source->ToTempSummon())
+        if (Unit* summoner = summon->GetSummonerUnit())
+            return summoner->IsCharmedOwnedByPlayerOrPlayer() && !source->IsHostileTo(summoner);
+    return false;
+}
+
+// SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN effects that only count damage dealt by
+// creatures. Domination's copied selector 2 (cf. Thunder Hide 92815) keeps its
+// original test. The PvE-only challenge auras registered by mod-coa-challenges
+// (AscensionCreatureOnlyDamageTaken.h) skip the player side as a whole. An
+// unknown source triggers neither.
+static bool DamageTakenPctAppliesToSource(AuraEffect const* effect, Unit const* source)
+{
+    if (effect->GetId() == 887083 && effect->GetMiscValueB() == 2)
+        return source && !source->IsCharmedOwnedByPlayerOrPlayer();
+    if (AscensionCreatureOnlyDamageTaken::IsCreatureOnly(effect->GetId()))
+        return source && !IsPlayerSideDamageSource(source);
+    return true;
+}
+
 float Unit::GetAscensionNormalTuningDamageMultiplier(Unit const* victim, uint32 schoolMask) const
 {
     // Copied aura 341 means damage against monsters (e.g. Frozen Waters 271942
@@ -9347,13 +9377,12 @@ uint32 Unit::SpellDamageBonusTaken(Unit* caster, SpellInfo const* spellProto, ui
 
     // from positive and negative SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN
     // multiplicative bonus, for example Dispersion + Shadowform (0.10*0.85=0.085)
-    // Domination uses copied selector 2: damage from creatures (cf. Thunder Hide 92815).
+    // Creature-only effects (Domination, PvE-only challenges): DamageTakenPctAppliesToSource.
     TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,
         [caster, spellProto](AuraEffect const* effect)
         {
             return (effect->GetMiscValue() & spellProto->GetSchoolMask()) &&
-                (effect->GetId() != 887083 || effect->GetMiscValueB() != 2 ||
-                    (caster && !caster->IsCharmedOwnedByPlayerOrPlayer()));
+                DamageTakenPctAppliesToSource(effect, caster);
         });
     TakenTotalMod *= GetHealthBasedDamageTakenMultiplier();
 
@@ -10852,13 +10881,12 @@ uint32 Unit::MeleeDamageBonusTaken(Unit* attacker, uint32 pdamage, WeaponAttackT
     // Taken total percent damage auras
     float TakenTotalMod = 1.0f;
 
-    // Domination uses copied selector 2: damage from creatures (cf. Thunder Hide 92815).
+    // Creature-only effects (Domination, PvE-only challenges): DamageTakenPctAppliesToSource.
     TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN,
         [attacker, damageSchoolMask](AuraEffect const* effect)
         {
             return (effect->GetMiscValue() & damageSchoolMask) &&
-                (effect->GetId() != 887083 || effect->GetMiscValueB() != 2 ||
-                    (attacker && !attacker->IsCharmedOwnedByPlayerOrPlayer()));
+                DamageTakenPctAppliesToSource(effect, attacker);
         });
     TakenTotalMod *= GetHealthBasedDamageTakenMultiplier();
 

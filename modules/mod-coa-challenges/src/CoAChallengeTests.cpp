@@ -1830,7 +1830,7 @@ namespace CoAChallenges
             return !sScriptMgr->OnPlayerCanInitTrade(a, b); });
 
         RES("CHALLENGE_RULES_TYPE_PVE_ONLY", [&]() {
-            return !sScriptMgr->CanUnitAttack(a, b, nullptr); });
+            return sScriptMgr->CanUnitAttack(a, b, nullptr); });   // no longer gates PvP
 
         RES("CHALLENGE_RULES_TYPE_ONLY_GROUP_IN_3_LEVEL_RANGE", [&]() {
             if (a->GetLevel() < 10)
