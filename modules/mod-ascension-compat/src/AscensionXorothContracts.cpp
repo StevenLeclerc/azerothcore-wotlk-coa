@@ -185,6 +185,19 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == 805677)
         info->CasterAuraSpell = 0; // spell_ascension_xoroth_sacrificial_circle checks the living Hellfire Imps
+    if (id == 805916)
+        // Hellfire Imp owner area aura. Only the marker survives: Refresh puts it on the master while
+        // imps live, because the client's Spell.dbc still makes Sacrificial Circle require it
+        // (CasterAuraSpell 805916). Its cost and effect modifiers are already applied per imp by 805965
+        // and 573066; BasePoints stay, Amount(805916, 2) still reads them.
+        for (auto& e : info->Effects)
+        {
+            e.Effect = SPELL_EFFECT_APPLY_AURA;
+            e.ApplyAuraName = SPELL_AURA_DUMMY;
+            e.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+            e.TargetB = SpellImplicitTargetInfo();
+            e.SpellClassMask = flag96();
+        }
     if (id == 805965)
     {
         auto& e = info->Effects[0];

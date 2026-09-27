@@ -164,7 +164,8 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
     }
 };
 // Sacrificial Circle names owner area aura 805916 as its caster requirement, but no Hellfire Imp applies it
-// (its cost modifier is rebuilt as 805965). Check the living imps instead, and sacrifice only the caster's own
+// (its cost modifier is rebuilt as 805965; Refresh keeps 805916 on the master as a marker for the client).
+// The server checks the living imps instead, and sacrifices only the caster's own
 // imps: the native ally area would also force party members to cast the self-killing helper.
 class spell_ascension_xoroth_sacrificial_circle : public SpellScript
 {

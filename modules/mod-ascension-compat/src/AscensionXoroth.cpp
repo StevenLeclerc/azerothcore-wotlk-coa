@@ -203,6 +203,12 @@ void Refresh(Player* player)
     scale(302574, player->HasAura(804340) ? -int32(imps) * Amount(302574) : 0);
     scale(302592, imps);
     scale(805965, -150 * int32(imps));
+    // Marker 805916 (see ApplyContracts): without it the client refuses Sacrificial Circle before the
+    // server ever sees the cast, whatever the living imps.
+    if (!imps)
+        player->RemoveAurasDueToSpell(805916);
+    else if (!player->HasAura(805916))
+        player->AddAura(805916, player);
     if (AuraEffect* effect = player->GetAuraEffect(573066, EFFECT_0))
         effect->ChangeAmount(Amount(573066) + imps * Amount(805916, 2));
     for (uint32 id : {704195, 704217, 707630})
