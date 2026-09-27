@@ -33,7 +33,7 @@ public:
     {
         static ChatCommandTable gearCommandTable =
         {
-            { "repair",  HandleGearRepairCommand, rbac::RBAC_PERM_COMMAND_GEAR_REPAIR, Console::No },
+            { "repair",  HandleGearRepairCommand, rbac::RBAC_PERM_COMMAND_GEAR_REPAIR, Console::Yes }, // CoA : panneau web, par la console RA
             { "stats",   HandleGearStatsCommand,  rbac::RBAC_PERM_COMMAND_GEAR_STATS,  Console::No }
         };
 
