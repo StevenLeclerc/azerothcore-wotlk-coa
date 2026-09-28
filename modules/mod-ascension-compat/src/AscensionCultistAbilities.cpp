@@ -97,8 +97,8 @@ public:
             return;
         if (aura->GetId() == Herald && player->HasAura(807128))
             duration = std::max(1000, duration - std::abs(Amount(806769)));
-        if (Named(aura->GetSpellInfo(), 582591) && player->HasAura(704881))
-            duration += std::abs(Amount(704881, 2));
+        // Lost in the Void 704881 effect 2 is a native SPELLMOD_DURATION on Embrace the Void 582591,
+        // applied by Aura::CalcMaxDuration right after this hook: adding it here counted it twice.
     }
     void OnSpellCast(Spell* spell, Unit* caster, SpellInfo const* info, bool) override
     {
@@ -391,7 +391,11 @@ class spell_ascension_cultist_ability : public SpellScript
             {
                 done = true;
                 Position position = GetExplTargetDest() ? GetExplTargetDest()->GetPosition() : player->GetNearPosition(2, 0);
-                Summon(player, effect.MiscValue, position, std::max(1000, GetSpellInfo()->GetDuration()), GetExplTargetUnit());
+                // The prevented native summon applied SPELLMOD_DURATION (Eternal Grasp 704878/704879).
+                int32 duration = GetSpellInfo()->GetDuration();
+                if (duration > 0)
+                    player->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
+                Summon(player, effect.MiscValue, position, std::max(1000, duration), GetExplTargetUnit());
             }
         }
         if (id == 804779 && (effect.Effect == 174 || effect.Effect == 164))

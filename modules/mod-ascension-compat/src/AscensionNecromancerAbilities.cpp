@@ -153,6 +153,10 @@ class necromancer_casts : public AllSpellScript
             result = SPELL_FAILED_CASTER_AURASTATE;
         if (id == 802121 && Minions(player).empty())
             result = SPELL_FAILED_NO_PET;
+        // Transfer Life only ever targets Raised minions (Filter): without one the channel would
+        // run its 10 s for nothing.
+        if (id == 801530 && Minions(player, true).empty())
+            result = SPELL_FAILED_NO_PET;
         if (id == 807098)
         {
             bool ritual = false;
@@ -320,7 +324,9 @@ class necromancer_casts : public AllSpellScript
                 if (player->HasAura(707133))
                     for (uint8 stack = 0; stack < 3; ++stack)
                         Cast(player, target, 707133);
-                if (player->HasAura(705754))
+                // Expunge only lands on a diseased target (Hit repeats the test); casting it on a
+                // healthy one succeeded for nothing now that its TargetAuraSpell is cleared.
+                if (player->HasAura(705754) && Diseases(player, target))
                     Cast(player, target, 500443);
             }
         }
@@ -355,7 +361,7 @@ class spell_ascension_necromancer_ability : public SpellScript
         if (!player || player != GetCaster())
             return;
         uint32 id = GetSpellInfo()->Id;
-        if (id == 805031 || id == 801545 || id == 525388)
+        if (id == 805031 || id == 801545 || id == 525388 || id == 801530)
             return; // their native payloads are selected by the bounded owner target
                     // filters below
         PreventHitDefaultEffect(index);
@@ -437,8 +443,12 @@ class spell_ascension_necromancer_ability : public SpellScript
             targets.clear();
             return;
         }
-        targets.remove_if([player](WorldObject* object)
-                          { return !object->ToUnit() || !IsMinion(player, object->ToUnit()); });
+        // Transfer Life 801530 channels onto its Raised minions only: every other ally in its area
+        // (the Necromancer included) would fail its tick 801545 on Raise Marker 807177, and a
+        // failed periodic trigger cuts the player's channel (Spell::prepare, SendChannelUpdate(0)).
+        bool raisedOnly = GetSpellInfo()->Id == 801530;
+        targets.remove_if([player, raisedOnly](WorldObject* object)
+                          { return !object->ToUnit() || !IsMinion(player, object->ToUnit(), raisedOnly); });
     }
     void Register() override
     {

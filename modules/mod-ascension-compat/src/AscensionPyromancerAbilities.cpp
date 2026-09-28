@@ -57,6 +57,24 @@ void Finish(Player* player, Spell* spell)
         if (uint64 generation = spell->GetScriptValue(id))
             if (Aura* aura = player->GetAura(id); aura && generation == aura->GetScriptValue(802168))
             {
+                if (id == 802168)
+                {
+                    // Flames of Fate (707325): Aspect's Blessing lasts $s1 more casts. Its
+                    // SPELLMOD_CHARGES gives the aura charges that Player::RemoveSpellMods drops
+                    // before this hook on every cast its crit modifier served; the count is kept
+                    // here instead, and the charges are topped up so the core never ends the aura.
+                    uint32 allowed = 1 + (player->HasAura(707325) ? uint32(std::max(0, Amount(707325))) : 0);
+                    uint64 used = aura->GetScriptValue(707325) + 1;
+                    if (used < allowed)
+                    {
+                        aura->SetScriptValue(707325, used);
+                        if (aura->IsUsingCharges())
+                            aura->SetCharges(std::max<uint8>(1, aura->CalcMaxCharges()));
+                    }
+                    else
+                        aura->Remove();
+                    continue;
+                }
                 if (id == 524707 && aura->GetCharges() > 1)
                     aura->SetCharges(aura->GetCharges() - 1);
                 else
@@ -268,7 +286,8 @@ class pyromancer_spells : public AllSpellScript
                 if (tender)
                     for (Unit* ally : Allies(player, target, 10, AscensionSpellSafe::MaxAffectedTargets(704274, 1)))
                         Copy(player, ally, 704274, CalculatePct(healing, Amount(tender->GetId())));
-                if (player->HasAura(806747) && target->ToCreature() && AnyPet(target))
+                // Fueling the Fire's only effect is 190: the player owns the aura, never carries it.
+                if (Owned(player, 806747) && target->ToCreature() && AnyPet(target))
                 {
                     if (SpellInfo const* fuel = AscensionSpellSafe::Get(806749))
                         for (Unit* ally : Allies(player, target, fuel->Effects[0].CalcRadius(player),

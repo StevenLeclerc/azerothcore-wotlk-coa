@@ -120,7 +120,9 @@ bool Summon(Player* player, uint32 spell, Unit* target, Position const& position
 void Order(Player* player, Unit* target, uint32 spell);
 void Reduce(Player* player, uint32 root, int32 milliseconds);
 uint32 KnownRank(Player* player, uint32 root);
+Aura* Owned(Unit const* unit, uint32 spell);
 bool Chance(Player* player, uint32 talent, float multiplier = 1.0f, uint32 cooldown = 0);
+bool MinionChance(Player* player, Unit* minion, uint32 talent, float multiplier = 1.0f);
 bool Disease(SpellInfo const* info);
 uint32 Diseases(Player* player, Unit* target);
 void Plague(Player* player, Unit* target, uint8 stacks = 1);

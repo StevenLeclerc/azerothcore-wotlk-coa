@@ -29,6 +29,10 @@ class aura_ascension_pyromancer_lifecycle : public AuraScript
             return;
         uint32 id = GetId();
         GetAura()->SetScriptValue(802168, ++State(player).sequence);
+        // Flames of Fate (707325): a fresh or refreshed Aspect's Blessing starts its cast count
+        // again (Finish, AscensionPyromancerAbilities.cpp, keeps it in this script value).
+        if (id == 802168)
+            GetAura()->SetScriptValue(707325, 0);
         if (Any(GetSpellInfo(), {800791, 805500, 706874}))
             GetAura()->SetScriptValue(704856, 0);
         if (Any(GetSpellInfo(), {800791, 706874}) && (mode & AURA_EFFECT_HANDLE_REAPPLY) && GetEffect(EFFECT_1))

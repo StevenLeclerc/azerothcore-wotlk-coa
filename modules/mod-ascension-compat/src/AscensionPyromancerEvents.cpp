@@ -136,7 +136,13 @@ class aura_ascension_pyromancer_event : public AuraScript
             Mana(player, CalculatePct(player->GetCreateMana(), Amount(504878)), 504878);
             break;
         case 504720:
-            Mana(player, CalculatePct(player->GetCreateMana(), Amount(505187)), 505187);
+            // Magma Guardian 706872 is +50% SPELLMOD_ALL_EFFECTS on 505187: 1% becomes 1.5%, which
+            // CalcValue would truncate back to 1. The modifier is applied here in float.
+            if (SpellInfo const* ash = sSpellMgr->GetSpellInfo(505187))
+                Mana(player,
+                     CalculatePct(player->GetCreateMana(),
+                                  player->ApplyEffectModifiers(ash, EFFECT_0, float(Amount(505187)))),
+                     505187);
             break;
         case 504733:
             Resource(player, HeatAura, 10);

@@ -57,8 +57,12 @@ void ApplyContracts(SpellInfo* info)
     // Written through dummy() rather than by hand so that this loop, which
     // rewrites the router of every event spell of the class, is journalled like
     // the rest when the slot can no longer carry the aura it writes.
+    // 704504 "Malignant" is skipped: its slot 0 is effect 169, not an aura, so the rewrite was
+    // inert and only journalled "1 assumptions refused" at every start. No grantor reaches it
+    // (audit-classe-23.json: atteignable non, no code, no data).
     for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
-        if (info->Effects[index].ApplyAuraName == 42 || info->Effects[index].ApplyAuraName == 354)
+        if (id != 704504 &&
+            (info->Effects[index].ApplyAuraName == 42 || info->Effects[index].ApplyAuraName == 354))
             dummy(index);
     for (auto const& row : NecromancerSummons)
         if (row.spell == id)
@@ -158,6 +162,17 @@ void ApplyContracts(SpellInfo* info)
         dummy(1);
     if (id == 300945)
         info->Effects[0].Effect = SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS;
+    if (id == 501968)
+    {
+        // Razorice rank 10 lost its minion spikes in the DBC (effect 1 is a bare DUMMY); ranks 1-9
+        // (500967 and 501967 re-read in Spell.dbc; the others unchecked) carry them as effect 190 / DAMAGE_SHIELD / caster / radius 12.
+        // BasePoints (106) and MiscValue (16) are already the rank-10 ones.
+        info->Effects[1].Effect = SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS;
+        info->Effects[1].ApplyAuraName = SPELL_AURA_DAMAGE_SHIELD;
+        info->Effects[1].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+        info->Effects[1].TargetB = SpellImplicitTargetInfo();
+        info->Effects[1].RadiusEntry = sSpellRadiusStore.LookupEntry(12);
+    }
     if (id == 300748 || id == 301326)
         info->Effects[1].BasePoints = info->Effects[0].BasePoints;
     if (id == 504439)
@@ -242,15 +257,25 @@ void ApplyContracts(SpellInfo* info)
     if (id == 807796)
         periodic(1, 5000);
     if (id == 808016)
+    {
         info->SchoolMask = SPELL_SCHOOL_MASK_FROST | SPELL_SCHOOL_MASK_SHADOW;
+        // The 20% gate is read live by the 807796 script (HealthBelowPct); the aura-state flag is
+        // only refreshed at the end of Unit::Update and would reject a threshold crossed this tick.
+        info->TargetAuraState = 0;
+    }
     if (id == 680928)
     {
         info->Effects[1].Effect = SPELL_EFFECT_APPLY_AURA;
         info->Effects[1].ApplyAuraName = SPELL_AURA_MOD_STUN;
     }
     if (id == 801728)
+    {
         dummy(1); // actual Frost-only stacking vulnerability is applied below, not
                   // family-mask wildcard aura 271
+        // Frozen is checked once when Soulfreeze 801724 is applied (Events.cpp, Permafrost
+        // included); rechecked on each tick it cut the whole aura (Spell::prepare, periodic trigger).
+        info->TargetAuraState = 0;
+    }
     if (id == 800979)
         info->Effects[1].SpellClassMask = flag96(0, 64, 0);
     if (id == 572777)
@@ -339,6 +364,10 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].TargetB = SpellImplicitTargetInfo();
         info->Effects[1].Effect = info->Effects[2].Effect = 0;
     }
+    // 802913 "Plagued" is put on by nothing (570132 is rebuilt as a DUMMY, 806457 is unreachable);
+    // the diseases are checked by Diseases() in the Expunge hit. 500443 has no button.
+    if (id == 500443)
+        info->TargetAuraSpell = 0;
     if (id == 805031)
     {
         info->Effects[0].Effect = 0; // owner-controlled sacrifice already removed the selected minion

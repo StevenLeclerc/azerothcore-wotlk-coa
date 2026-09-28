@@ -39,7 +39,9 @@ bool Derived(SpellInfo const* info)
 void LeechArmy(Player* player, uint32 damage)
 {
     auto minions = Minions(player);
-    uint32 amount = uint32(uint64(damage) * std::max(0, Amount(680388)) / (100 * (minions.size() + 1)));
+    // With the Necromancer as caster, CalcValue applies his SPELLMOD_ALL_EFFECTS: Plague Protection
+    // 570046/570226 raises Fetid Ward's leech 30 -> 34/39 as its tooltip says.
+    uint32 amount = uint32(uint64(damage) * std::max(0, Amount(680388, 0, player)) / (100 * (minions.size() + 1)));
     Copy(player, player, 681463, amount);
     for (Creature* unit : minions)
         Copy(player, unit, 681463, amount);
@@ -173,16 +175,19 @@ class aura_ascension_necromancer_event : public AuraScript
             for (auto const& row : State(player).minions)
                 if (row.guid == actor->GetGUID())
                     cost = std::max<uint8>(1, row.cost);
-            if (Chance(player, 531128, cost))
+            // Overwhelming Force, Ghoul Mastery, Depravity and Plague Horde are effect-190 talents:
+            // the rolling minion carries them, never the Necromancer.
+            if (MinionChance(player, actor, 531128, cost))
                 Cast(player, player, 531129);
             // Pandemic is an aura-to-summons passive, so the Necromancer never carries it; the minion does.
             if (actor->HasAura(560798, player->GetGUID()))
                 Reduce(player, 801938, std::abs(Amount(806322)));
-            if (actor->GetEntry() == 50073 && Chance(player, 503740))
-                Cast(player, actor, 707014);
+            // Frenzied Ghoul targets its caster: the Ghoul must cast it, or the Necromancer turns.
+            if (actor->GetEntry() == 50073 && MinionChance(player, actor, 503740))
+                Cast(actor, actor, 707014);
             if (critical && Chance(player, 537208, 1, 1000))
                 Reduce(player, 805029, std::abs(Amount(680553)));
-            if (critical && melee && Chance(player, 638403))
+            if (critical && melee && MinionChance(player, actor, 638403))
                 Copy(actor, target, 801241, uint64(damage) * std::max(0, Amount(638403, 1)) / 100);
             if (critical && (actor->GetEntry() == 50068 || actor->GetEntry() == 50115) && player->HasAura(707283))
                 Cast(actor, target, 707284);
@@ -198,9 +203,10 @@ class aura_ascension_necromancer_event : public AuraScript
                             break;
                     }
             }
-            if (Chance(player, 802986))
+            if (MinionChance(player, actor, 802986))
             {
-                Cast(player, actor, 807653);
+                // Plague Horde's enrage targets its caster: cast by the minion, not the Necromancer.
+                Cast(actor, actor, 807653);
                 Cast(actor, actor, 504022);
             }
             // P-070: second dead test on 561319, see the note in the periodic branch above.

@@ -94,6 +94,12 @@ bool Chance(Player* player, uint32 id, uint32 cooldown)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
     float chance = info ? float(info->ProcChance) : 0;
+    // The native roll reads spell_proc Chance = 100 and caps there, so CHANCE_OF_SUCCESS talents
+    // (Everpresent 300272, Embodied Presences 803283 on the Presences) only count on this roll.
+    // 706245 also receives 680602 effect 2, which stays 0 while Horrific Visions 707753 effect 0
+    // is a dummy (Contracts): the Horrific Visions bonus below is then counted once.
+    if (info)
+        player->ApplySpellMod(id, SPELLMOD_CHANCE_OF_SUCCESS, chance);
     if ((id == 300313 || id == 706245) && Count(player, Insanity) > 40 && player->HasAura(707753))
         chance += Amount(707753);
     if (!info || !player->HasAura(id) || State(player).timers.HasTimeUntilEvent(id) ||

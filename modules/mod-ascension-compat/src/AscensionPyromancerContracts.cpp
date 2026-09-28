@@ -63,7 +63,12 @@ void ApplyContracts(SpellInfo* info)
             info->Effects[0].TargetB = SpellImplicitTargetInfo();
         }
     if (id == 503864)
+    {
         info->Effects[0].Effect = SPELL_EFFECT_SCHOOL_DAMAGE;
+        // Aspect() reads the echo's damage right after casting it, to chain the next one and to
+        // feed Lifebringer's Blessing: the hit must land inside that cast, not on a later tick.
+        info->Speed = 0.0f;
+    }
     if (id == 520868)
         info->Effects[0].Effect = SPELL_EFFECT_DUMMY;
     if (id == 572806)
@@ -154,29 +159,25 @@ void ApplyContracts(SpellInfo* info)
     {
         // Gaze of Ysera: "Direct damage dealt may interrupt this effect". Both records carry the
         // same 40 s (DurationIndex 64) MECHANIC_SLEEP stun on effect 0 (SPELL_AURA_MOD_STUN) plus a
-        // SPELL_AURA_DUMMY on effect 1, and neither of them ever broke on damage.
+        // SPELL_AURA_DUMMY on effect 1.
         // The two records differ, and only one of the two statements below is about both:
         //   806148 (SkillLineAbility 89592, skill 86): ProcFlags 0x222A8 (melee, ranged and negative
         //     spell hits taken, deliberately without PROC_FLAG_TAKEN_PERIODIC), ProcChance 100,
         //     RecoveryTime 90000, AuraInterruptFlags 0x00480000.
         //   503229 (rank "Sleep", SkillLineAbility 87635, skill 85): ProcFlags already 0,
         //     ProcChance 80, RecoveryTime 30000, AuraInterruptFlags 0.
-        // On 806148 only, SpellMgr::LoadSpellProcs turns those flags into a default proc entry,
-        // because isTriggerAura[SPELL_AURA_DUMMY] is true, and that entry lands on a dummy nobody
-        // handles. Clearing ProcFlags spares a proc entry evaluated for nothing on every hit the
-        // sleeping target takes; on 503229 the same line is a no-op kept for idempotence.
-        // AURA_INTERRUPT_FLAG_DIRECT_DAMAGE is the core's own name for the tooltip rule:
-        // Unit::DealDamage removes it on DIRECT_DAMAGE and SPELL_DIRECT_DAMAGE only, never on a
-        // periodic tick. That flag is a new fact for both records (503229 had none).
-        // Two consequences, both deliberate and neither expressible through AuraInterruptFlags:
-        //   1. the break is now certain, where 503229's own ProcChance 80 said "may" at 80%. That
-        //      chance is not carried over: an interrupt flag has no chance field.
-        //   2. DIRECT_DAMAGE is not TAKE_DAMAGE, and Unit::HasBreakableByDamageAuraType tests only
-        //      TAKE_DAMAGE, so HasBreakableByDamageCrowdControlAura will not report this sleep as
-        //      breakable CC. Pets and combat AI (PetAI, CombatAI, pet_hunter, pet_mage) therefore
-        //      keep attacking a sleeping target and break it on their first direct hit. The flag
-        //      matching the tooltip was preferred over the flag protecting the sleep from pets.
-        info->AuraInterruptFlags |= AURA_INTERRUPT_FLAG_DIRECT_DAMAGE;
+        // The break is a proc of the sleep itself, from a spell_proc row
+        // (2026_09_28_30_ascension_pyromancer_gaze_of_ysera.sql): the same taken-hit flags as
+        // 806148, direct damage only (SpellTypeMask DAMAGE, no periodic flag), triggered hits
+        // included, one charge, Chance 0 so the record's ProcChance applies (100 and 80), and
+        // DisableEffectsMask 6 so only the stun effect decides (it needs non-zero damage: a fully
+        // absorbed hit does not break). That SQL must be applied BEFORE this binary starts.
+        // Aura::CalcProcChance then applies the caster's SPELLMOD_CHANCE_OF_SUCCESS, which is
+        // Ysera's Blessing 704820 (-10). Until 2026-09-28 the break was AURA_INTERRUPT_FLAG_DIRECT_DAMAGE:
+        // certain, with no chance field, so 503229's 80% and Ysera's Blessing were both lost.
+        // ProcFlags stays 0 on the record: the explicit row carries the flags, and a CC aura with
+        // DBC ProcFlags would get a damage cap (AuraEffect::CalculateAmount) instead of breaking.
+        // Pets and combat AI still attack a sleeping target, as before.
         info->ProcFlags = 0;
     }
     if (id == 706893)
@@ -259,6 +260,17 @@ class pyromancer_scaling : public UnitScript
             factor *= 1 + Amount(706238) / 100.0f;
         if (Named(info, 800792) && player->HasAura(520884))
             factor *= 1 + Burning(player, target) * .15f;
+        // Cataclysmic Power: $s1% more Flare Bolt damage per periodic effect on the target. The DBC
+        // route (SPELLMOD_EFFECT2 on the DoTs' aura 271 slot) lands in slots the contract turned
+        // into storage dummies. Ranks are not chained (P-046): each id is tested.
+        if (Named(info, 800790))
+            for (uint32 rank : {807912u, 807882u, 804617u})
+                if (player->HasAura(rank))
+                {
+                    if (uint32 dots = Burning(player, target))
+                        factor *= 1 + dots * std::max(0, Amount(rank)) / 100.0f;
+                    break;
+                }
         return factor;
     }
     void ModifySpellDamageTaken(Unit* target, Unit* caster, int32& damage, SpellInfo const* info) override

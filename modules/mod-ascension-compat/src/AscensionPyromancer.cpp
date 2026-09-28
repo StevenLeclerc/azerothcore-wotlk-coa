@@ -83,6 +83,17 @@ bool Derived(SpellInfo const* info)
 {
     return info && Any(info, {503864, 704817, 804103, 680962, 704274, 707892, 707595, 807403});
 }
+Aura* Owned(Unit const* unit, uint32 id)
+{
+    // An aura whose effects are all SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS (190) is owned by
+    // the player but applied to the summons only: HasAura on the player is always false.
+    if (!unit)
+        return nullptr;
+    if (Aura* aura = unit->GetAura(id))
+        return aura;
+    Aura* aura = unit->GetOwnedAura(id);
+    return aura && !aura->IsRemoved() ? aura : nullptr;
+}
 uint32 Count(Unit const* unit, uint32 id)
 {
     Aura const* aura = unit ? unit->GetAura(id) : nullptr;
@@ -111,8 +122,15 @@ void Mana(Player* player, uint32 amount, uint32 spell)
 bool Chance(Player* player, uint32 id, uint32 cooldown)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-    if (!info || !player->HasAura(id) || State(player).timers.HasTimeUntilEvent(id) ||
-        !roll_chance_f(std::min(100.0f, float(info->ProcChance))))
+    if (!info || !player->HasAura(id) || State(player).timers.HasTimeUntilEvent(id))
+        return false;
+    // The chance talents are SPELLMOD_CHANCE_OF_SUCCESS on the rolled id: Roasted Alive 707482
+    // (+30 on Fired Up! 704823), Blessing of the Inferno 707451 (+50 on Inferno 806736), Aspect's
+    // Blessing 802168 (+67 on Aspect of Time 504750). Each of these ids is rolled here only: the
+    // core's own roll on 806736 is spell_proc.Chance 100, already certain.
+    float chance = float(info->ProcChance);
+    player->ApplySpellMod(id, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+    if (!roll_chance_f(std::clamp(chance, 0.0f, 100.0f)))
         return false;
     if (cooldown)
         State(player).timers.ScheduleEvent(id, Milliseconds(cooldown));
@@ -373,7 +391,9 @@ void Aspect(Player* player, Unit* target, uint32 damage, bool guaranteed)
         damage = State(player).aspectDamage;
         if (damage && player->HasAura(707479))
             Copy(player, player, 707595, CalculatePct(damage, Amount(707479)));
-        if (!damage || !Chance(player, 504750))
+        // Aspect's Blessing (802168) makes every relaunch certain (33 + 67). Its aura is already
+        // gone when the Echo or Flames projectile lands, so its modifier cannot carry that here.
+        if (!damage || (!guaranteed && !Chance(player, 504750)))
             break;
     }
     State(player).event = previous;

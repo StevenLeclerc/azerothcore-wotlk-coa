@@ -36,6 +36,7 @@ bool Named(SpellInfo const* info, uint32 root);
 bool Any(SpellInfo const* info, std::initializer_list<uint32> roots);
 bool Spender(SpellInfo const* info);
 bool Derived(SpellInfo const* info);
+Aura* Owned(Unit const* unit, uint32 id);
 uint32 Count(Unit const* unit, uint32 id);
 int32 Amount(uint32 id, uint8 slot = 0, Unit* caster = nullptr);
 void Cast(Unit* caster, Unit* target, uint32 id);

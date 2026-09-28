@@ -228,8 +228,14 @@ class aura_ascension_cultist_event : public AuraScript
             case 802043: Cast(player, player, 572613); break;
             case 803035: Cast(player, target, 805180); break;
             case 803037:
-                Summon(player, 500464, player->GetNearPosition(1, 0), AscensionSpellSafe::Duration(500707, 8000), target);
+            {
+                // Eternal Grasp 704878/704879 and Teachings of Mythrax 561035 lengthen 500707.
+                int32 duration = AscensionSpellSafe::Duration(500707, 8000);
+                if (duration > 0)
+                    player->ApplySpellMod(500707, SPELLMOD_DURATION, duration);
+                Summon(player, 500464, player->GetNearPosition(1, 0), std::max(1000, duration), target);
                 break;
+            }
             case 803082: Cast(player, target, 803083); break;
             case 803339: Cast(player, player, 803340); break;
             case 805110: Cast(player, target, 806039); break;

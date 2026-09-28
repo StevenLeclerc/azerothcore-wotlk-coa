@@ -216,15 +216,40 @@ void Reduce(Player* player, uint32 root, int32 milliseconds)
                 player->ModifySpellCooldown(id, -std::abs(milliseconds));
         }
 }
+Aura* Owned(Unit const* unit, uint32 spell)
+{
+    if (!unit)
+        return nullptr;
+    if (Aura* aura = unit->GetAura(spell))
+        return aura;
+    // A talent whose effects are all 190 (Depravity 638403, Death and Ice 560012) is owned by the
+    // Necromancer and applied to the minions only: GetAura() and HasAura() never see it.
+    Aura* aura = unit->GetOwnedAura(spell);
+    return aura && !aura->IsRemoved() ? aura : nullptr;
+}
 bool Chance(Player* player, uint32 talent, float multiplier, uint32 cooldown)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(talent);
-    if (!info || !player->HasAura(talent) || State(player).cooldowns.HasTimeUntilEvent(talent) ||
-        !roll_chance_f(std::min(100.0f, std::max(0.0f, info->ProcChance * multiplier))))
+    if (!player || !info || !Owned(player, talent) || State(player).cooldowns.HasTimeUntilEvent(talent))
+        return false;
+    // Talents that raise a chance are native SPELLMOD_CHANCE_OF_SUCCESS (Frigid Winds 504357 on
+    // Refreshing Chill 300940): the core only applies them in its own proc engine, which these
+    // hand-rolled procs never reach.
+    float chance = float(info->ProcChance);
+    player->ApplySpellMod(talent, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+    if (!roll_chance_f(std::clamp(chance * multiplier, 0.0f, 100.0f)))
         return false;
     if (cooldown)
         State(player).cooldowns.ScheduleEvent(talent, Milliseconds(cooldown));
     return true;
+}
+bool MinionChance(Player* player, Unit* minion, uint32 talent, float multiplier)
+{
+    // Effect-190 talents reach only the minions in m_Controlled: the rolling minion must carry
+    // this Necromancer's application, as Pandemic 560798 is tested in Events.cpp.
+    if (!player || !minion || !minion->HasAura(talent, player->GetGUID()))
+        return false;
+    return Chance(player, talent, multiplier);
 }
 bool Disease(SpellInfo const* info)
 {
@@ -378,8 +403,11 @@ class necromancer_lifecycle : public UnitScript
             if (event == 1)
             {
                 Sync(player);
+                // Owned, not only applied: Death and Ice 560012 is a single effect 190, owned by
+                // the Necromancer and applied to the minions only (GetAura() is always null).
+                // RecalculateAmountOfEffects asserts !IsRemoved(), which Owned() guarantees.
                 for (uint32 id : {572638, 706472, 531126, 560012, 500982, 500985, 301207})
-                    if (Aura* aura = player->GetAura(id))
+                    if (Aura* aura = Owned(player, id))
                         aura->RecalculateAmountOfEffects();
                 state.events.ScheduleEvent(1, 500ms);
             }

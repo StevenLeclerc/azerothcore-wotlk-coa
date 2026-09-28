@@ -349,6 +349,10 @@ class npc_ascension_necromancer : public ScriptedAI
         me->SetCombatMovement(!Stationary(me->GetEntry()) && !Ranged(me->GetEntry()));
         State(player).minions.push_back({me->GetGUID(), _spell, _cost});
         me->AddAura(805015, me);
+        // Raise Marker (passive, permanent) is Transfer Life 801545's TargetAuraSpell: only the
+        // Raised minions, those that occupy Life Force, may receive its heal.
+        if (_cost)
+            me->AddAura(807177, me);
         Scale(player, me, _cost, _inheritedSpeed);
         me->SetHealth(me->GetMaxHealth());
         me->SetPower(POWER_MANA, me->GetMaxPower(POWER_MANA));
@@ -387,6 +391,9 @@ class npc_ascension_necromancer : public ScriptedAI
         {
             if (!player->HasSpell(807098))
                 player->learnSpell(807098, true);
+            // Range Checker: owner area aura (40 yd) that is Ritual Return 807098's CasterAuraSpell,
+            // which the client checks by itself. The owner GUID is already set above.
+            me->CastSpell(me, 807317, true);
             auto previous = State(player).minions;
             for (auto const& row : previous)
                 if (row.guid != me->GetGUID())

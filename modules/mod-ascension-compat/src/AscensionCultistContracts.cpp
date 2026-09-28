@@ -300,6 +300,25 @@ public:
             value *= float(0.0267291844060354 + 0.0048541098014737 * level +
                 0.0001859597762293 * level * level);
         }
+        if (info->Id == 567524 && index == EFFECT_1 && caster == player)
+        {
+            // Dreadnought: only rank 1 is ever taught (TaughtAbilities) and rank 1 stops growing at
+            // its MaxLevel 18. Give it the base of the highest unchained rank the level reaches,
+            // with the CalcValue formula of that rank; its STA/INT row below is added once.
+            for (uint32 rankId : {567552u, 567551u, 567550u, 567549u, 567548u})
+                if (SpellInfo const* rank = sSpellMgr->GetSpellInfo(rankId);
+                    rank && rank->SpellLevel && player->GetLevel() >= rank->SpellLevel)
+                {
+                    SpellEffectInfo const& effect = rank->Effects[EFFECT_1];
+                    int32 level = int32(player->GetLevel());
+                    if (rank->MaxLevel && level > int32(rank->MaxLevel))
+                        level = int32(rank->MaxLevel);
+                    level -= int32(std::max(rank->BaseLevel, rank->SpellLevel));
+                    value = float(effect.BasePoints + (effect.DieSides == 1 ? 1 : 0)) +
+                            float(std::max(0, level)) * effect.RealPointsPerLevel;
+                    break;
+                }
+        }
         for (auto const& row : CultistCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {
