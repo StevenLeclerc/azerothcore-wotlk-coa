@@ -14,6 +14,7 @@
 #include "SpellScript.h"
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 namespace AscensionBarbarian
 {
@@ -139,19 +140,72 @@ void ApplyContracts(SpellInfo* info)
         info->AttributesEx4 |= SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS;
         info->AttributesCu |= SPELL_ATTR0_CU_IGNORE_ARMOR;
     }
-    if (id == 707410)
-        info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY; // cost only while Unbridled Rage is active
+    // Raging Spirit keeps its native EFFECT2 -100 on 804889 (Unbridled Rage SLS), whose
+    // effect 1 is the Spirit cost modifier; 804889 is held only while 801761 is up.
     if (id == 801761)
+        // Effect 1 stays the native Ancestral Combat CHANCE_OF_SUCCESS that Unified Rage
+        // raises by 25; the DBC target is TARGET_SRC_CASTER with no unit target.
+        info->Effects[EFFECT_1].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+    // Barbaric Rage keeps its native SPELLMOD_GLOBAL_COOLDOWN; barbarian_scaling zeroes it
+    // outside the enrage aura state and barbarian_enrage_gcd recalculates it.
+    if (id == 807911 && info->Effects[EFFECT_0].Effect == SPELL_EFFECT_ASCENSION_RESET_COOLDOWN &&
+        info->Effects[EFFECT_0].MiscValue == 500915)
+        info->Effects[EFFECT_0].MiscValueB = 1; // clear category 629: every Crush rank, not rank 1 only
+    if (id == 560441)
+        // Savage: +10% critical damage on Unbridled Rage, i.e. 804889 effect 0 (aura 163).
+        // 0x8 (unobtainable 804338) is kept.
+        info->Effects[EFFECT_0].SpellClassMask = flag96(4 | 8, 0, 0);
+    if (id == 705168 && info->Effects[EFFECT_1].MiscValue == SPELLMOD_EFFECT3)
+        // Ancestor's Fury: 801762 has a single effect (aura 350 Frost crit), EFFECT3 hit nothing.
+        info->Effects[EFFECT_1].MiscValue = SPELLMOD_EFFECT1;
+    if (id == 560879)
+        // No Survivors' DURATION +5 s is family-matched on the aura itself; this debuff had no flags.
+        info->SpellFamilyFlags[0] |= 0x400;
+    if (id == 807183)
+        // Crusher: "Removes the cast time of Crush, but its damage is reduced": Crush only,
+        // not Ancestral Strike (word 1 0x100000).
+        for (SpellEffIndex e : { EFFECT_0, EFFECT_1 })
+            info->Effects[e].SpellClassMask[1] = 0x40;
+    if (id == 804730)
+        // Symbol of the Warspear: every Spear (Barbed, Maiming, Headhunter's, Impaling), as Spear().
+        info->Effects[EFFECT_2].SpellClassMask = flag96(0x1400, 0x104, 0);
+    if (id == 803908 && info->TargetAuraState == 28)
+        // 28 = ASCENSION_TARGET_HEALTH_ABOVE_80_PERCENT is never set in UNIT_FIELD_AURASTATE;
+        // the Mak'Gora proc Check already requires HealthAbovePct(80).
+        info->TargetAuraState = 0;
+    if (id == 801759 && info->CasterAuraState == AURA_STATE_ENRAGE)
+        // Outrage: each new ENRAGE aura state makes Unit::ModifyAuraState re-run HandleAllEffects(REAL,
+        // true) on owned auras with this CasterAuraState, never undone (ENRAGE is exempt on removal):
+        // crit (290) and haste (192) were stacked for good. The cast requirement is kept by
+        // barbarian_casts::OnSpellCheckCast (Enraged) and by the client's own DBC.
+        info->CasterAuraState = 0;
+    if ((id == 804889 || id == 801762) && info->Dispel == DISPEL_ENRAGE)
+        // Hidden helpers of Unbridled Rage, held and removed with 801761: an enrage dispel must
+        // take 801761 itself, not a helper that would leave the rage up without its modifiers.
+        info->Dispel = DISPEL_NONE;
+    if (id == 782801)
+        info->StackAmount = 0; // Bleed() already folds the remainder into BP0
+    if (id >= 578277 && id <= 578285)
+        // Smash off-hand ranks 2-10: "plus X with your main-hand", the flat term is applied once.
+        info->Effects[EFFECT_0].BasePoints = -1;
+    if (id == 560909 && !info->ProcCharges && !info->ProcFlags)
+        // Utter Devastation is consumed by the next Crush or Decapitate that uses its crit modifier.
+        info->ProcCharges = 1;
+    if (info->SpellFamilyFlags[1] & 0x40000)
+        // Axe Twirling's JUMP_TARGETS is added to each effect's ChainTarget; a 0 left the weapon
+        // percent effect one target short, so the last chained target took no damage.
+        for (SpellEffectInfo& effect : info->Effects)
+            if (effect.Effect && effect.TargetA.GetTarget() == TARGET_UNIT_TARGET_ENEMY && !effect.ChainTarget)
+                effect.ChainTarget = 1;
+    if (id == 706558 && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER)
     {
-        SpellEffectInfo& cost = info->Effects[EFFECT_1];
-        cost.ApplyAuraName = SPELL_AURA_ADD_PCT_MODIFIER;
-        cost.MiscValue = SPELLMOD_COST;
-        cost.SpellClassMask = flag96(65536, 0, 0);
-        cost.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+        // Hunting for Sport only modified 804338, an Unbridled Rage nobody gets: armour
+        // penetration of its own, zeroed by barbarian_scaling outside Unbridled Rage.
+        SpellEffectInfo& effect = info->Effects[EFFECT_0];
+        effect.ApplyAuraName = SPELL_AURA_MOD_ARMOR_PENETRATION_PCT;
+        effect.MiscValue = 0;
+        effect.SpellClassMask = flag96(0, 0, 0);
     }
-    if (id == 804337)
-        // The native DBC targets the ~1.5s global cooldown instead of ability cooldowns.
-        info->Effects[EFFECT_0].MiscValue = SPELLMOD_COOLDOWN;
 }
 }
 
@@ -182,9 +236,74 @@ public:
             value += player->GetTotalAttackPowerValue(RANGED_ATTACK) * 0.055f;
         if ((info->Id == 801753 || info->Id == 803908) && index == 1)
             value += player->GetTotalAttackPowerValue(BASE_ATTACK);
-        if (info->Id == 801761 && index == 1)
-            value = player->HasAura(707410) ? -100.0f : 0.0f;
+        // "While enraged": passives are applied whatever the aura state, and losing enrage
+        // does not undo them (Unit::ModifyAuraState); barbarian_enrage_gcd recalculates.
+        if (info->Id == 804337 && !index && !player->HasAuraState(AURA_STATE_ENRAGE))
+            value = 0.0f;
+        if (info->Id == 706558 && !index && !player->HasAura(801761))
+            value = 0.0f;
     }
+};
+
+// Keeps Barbaric Rage's global cooldown modifier in step with the enrage aura state.
+// RecalculateAmount re-registers the effect and resends the client modifier once.
+class barbarian_enrage_gcd : public UnitScript
+{
+public:
+    barbarian_enrage_gcd() : UnitScript("barbarian_enrage_gcd", true, { UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE }) { }
+
+    static void Sync(Player* player)
+    {
+        if (AuraEffect* gcd = player->GetAuraEffect(804337, EFFECT_0))
+            gcd->RecalculateAmount();
+    }
+
+    void OnAuraApply(Unit* unit, Aura* aura) override
+    {
+        if (Player* player = Owner(unit))
+            if (aura && aura->GetSpellInfo()->GetAuraState() == AURA_STATE_ENRAGE)
+                Sync(player);
+    }
+
+    void OnAuraRemove(Unit* unit, AuraApplication* application, AuraRemoveMode /*mode*/) override
+    {
+        if (Player* player = Owner(unit))
+            if (application && application->GetBase()->GetSpellInfo()->GetAuraState() == AURA_STATE_ENRAGE)
+                Sync(player);
+    }
+};
+
+// Grisly Meal and Killing Spree gate on markers nothing applies (804755 from the unlearned
+// 804754 proc, 850025 from the unlearned, proc-less 561324): grant them on the killing blow.
+class barbarian_kills : public PlayerScript
+{
+public:
+    barbarian_kills() : PlayerScript("barbarian_kills",
+        { PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_CREATURE_KILL, PLAYERHOOK_ON_CREATURE_KILLED_BY_PET }) { }
+
+    static bool Knows(Player* player, std::initializer_list<uint32> ids)
+    {
+        return std::any_of(ids.begin(), ids.end(), [player](uint32 id) { return player->HasSpell(id); });
+    }
+
+    static void Reward(Player* killer, Unit* killed, bool byPet)
+    {
+        Player* player = Owner(killer);
+        // OnPlayerPVPKill also arrives with killer == victim (falling, drowning).
+        if (!player || !killed || killed == player || !player->IsAlive() ||
+            killed->GetCharmerOrOwnerPlayerOrPlayerItself() == player)
+            return;
+        // "After you kill an enemy that yields experience or honor".
+        if (Knows(player, { 804765, 807946, 807947, 807948 }) && player->isHonorOrXPTarget(killed))
+            player->CastSpell(player, 804755, true);
+        // "Within 6 sec of scoring a killing blow".
+        if (!byPet && Knows(player, { 850021, 850038, 850039, 850040, 850041, 850042, 850043 }))
+            player->CastSpell(player, 850025, true);
+    }
+
+    void OnPlayerPVPKill(Player* killer, Player* killed) override { Reward(killer, killed, false); }
+    void OnPlayerCreatureKill(Player* killer, Creature* killed) override { Reward(killer, killed, false); }
+    void OnPlayerCreatureKilledByPet(Player* owner, Creature* killed) override { Reward(owner, killed, true); }
 };
 
 class aura_ascension_barbarian_lifecycle : public AuraScript
@@ -209,14 +328,29 @@ class aura_ascension_barbarian_lifecycle : public AuraScript
         if (!player)
             return;
         uint32 id = GetId();
-        if (Spirit(id))
-            for (uint32 spirit : { 707763, 707764, 707775, 712467, 712468 })
-                if (spirit != id)
-                    player->RemoveAurasDueToSpell(spirit);
+        // Killing Spree: "or applying Born in Blood" (a refresh re-opens the window too).
+        // AddAura, not CastSpell: this also runs while auras load at login.
+        if (id == 560521 && barbarian_kills::Knows(player, { 850021, 850038, 850039, 850040, 850041, 850042, 850043 }))
+            player->AddAura(850025, player);
         if (id == 801761 && player->HasAura(707410))
             player->CastSpell(player, 521240, true);
+        if (id == 801761)
+        {
+            // 804889 carries the Spirit cost (Raging Spirit) and the crit damage (Savage).
+            player->AddAura(804889, player);
+            // Ancestor's Fury's Frost crit rides on 801762; it lives as long as 801761,
+            // whose duration Unstoppable Rage and Extend() lengthen.
+            if (player->HasAura(705168))
+                if (Aura* crit = player->AddAura(801762, player))
+                {
+                    crit->SetMaxDuration(-1);
+                    crit->SetDuration(-1);
+                }
+            if (AuraEffect* arp = player->GetAuraEffect(706558, EFFECT_0))
+                arp->RecalculateAmount();
+        }
         if (id == 707410)
-            if (AuraEffect* cost = player->GetAuraEffect(801761, EFFECT_1))
+            if (AuraEffect* cost = player->GetAuraEffect(804889, EFFECT_1))
                 cost->RecalculateAmount();
         if (id == 560933 && player->HasAura(560910))
             player->CastSpell(player, 560909, true);
@@ -263,8 +397,16 @@ class aura_ascension_barbarian_lifecycle : public AuraScript
         if (id == 804141)
             player->RemoveAurasDueToSpell(572531);
         if (id == 707410)
-            if (AuraEffect* cost = player->GetAuraEffect(801761, EFFECT_1))
+            if (AuraEffect* cost = player->GetAuraEffect(804889, EFFECT_1))
                 cost->RecalculateAmount();
+        if (id == 801761)
+        {
+            player->RemoveAurasDueToSpell(804889);
+            player->RemoveAurasDueToSpell(801762);
+            // HasAura(801761) is already false here: _UnapplyAura erases it before the effects.
+            if (AuraEffect* arp = player->GetAuraEffect(706558, EFFECT_0))
+                arp->RecalculateAmount();
+        }
         if (id == 800637 || id == 355562)
             player->RemoveAurasDueToSpell(800645);
     }
@@ -329,6 +471,15 @@ public:
                 player->CastSpell(player, child, true);
         };
         uint32 id = info->Id;
+        // "You may only have 1 Spirit active". The Spirits' effect 0 is an enemy area aura
+        // that never reaches the caster's lifecycle Apply, so the rule is kept at the cast.
+        if (Spirit(id))
+            for (uint32 spirit : { 707763u, 707764u, 707775u, 712467u, 712468u })
+                if (spirit != id)
+                    player->RemoveOwnedAura(spirit);
+        // Breath of the North has no cooldown: one breath per emptied Tankard.
+        if (info->CasterAuraSpell == 806055)
+            player->RemoveAurasDueToSpell(806055);
         if (Family(info, 1, 16777216))
         {
             talent(805812, 570106);
@@ -365,7 +516,12 @@ public:
             player->AddSpellCooldown(712429, 0, 90000);
         }
         if (Family(info, 1, 536870912))
+        {
             talent(705162, 560946);
+            // Ancestral Roar: "and 1 Fill Level stack" under the Fill Level specialization.
+            if (player->HasAura(500061))
+                player->CastSpell(player, 805813, true);
+        }
         if (Family(info, 0, 268435456))
         {
             uint32 chance = player->HasAura(681466) ? 60 : player->HasAura(681063) ? 30 : 0;
@@ -416,6 +572,8 @@ public:
 void AddAscensionBarbarianCompletionScripts()
 {
     new barbarian_scaling();
+    new barbarian_enrage_gcd();
+    new barbarian_kills();
     new barbarian_casts();
     RegisterSpellScript(aura_ascension_barbarian_lifecycle);
 }

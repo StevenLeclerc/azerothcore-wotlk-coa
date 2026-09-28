@@ -16,6 +16,11 @@ constexpr uint32 HEADHUNTER_EFFECTS = 706432;
 constexpr uint32 FILL_LEVEL = 92083;
 constexpr uint32 FILL_LEVEL_EFFECTS = 500061;
 constexpr uint32 TANKARD = 805813;
+// CasterAuraSpell of every Ale of the God-King rank (805780, 573224, 573225, 573064):
+// nothing in the DBC applies it, so the specialization holds it.
+constexpr uint32 FULL_TANKARD = 805814;
+// CasterAuraSpell of every Breath of the North rank: granted when the Tankard empties.
+constexpr uint32 EMPTY_TANKARD = 806055;
 constexpr uint32 BODY_BUILDER = 706481;
 constexpr uint32 BODY_BUILDER_SIZE = 706508;
 constexpr uint32 SPEAR_THROWER = 574321;
@@ -42,8 +47,16 @@ void HandleAscensionBarbarianAura(Player* player, uint32 spellId, bool apply)
             break;
         case FILL_LEVEL:
             helper = FILL_LEVEL_EFFECTS;
-            if (!apply)
+            if (apply)
+            {
+                if (!player->HasAura(FULL_TANKARD))
+                    player->AddAura(FULL_TANKARD, player);
+            }
+            else
+            {
                 player->RemoveAurasDueToSpell(TANKARD);
+                player->RemoveAurasDueToSpell(FULL_TANKARD);
+            }
             break;
         case BODY_BUILDER:
             helper = BODY_BUILDER_SIZE;
@@ -91,10 +104,14 @@ void HandleAscensionBarbarianCast(Spell* spell)
         SpellInfo const* resource = tankard->GetSpellInfo();
         if (!preserveTankard && resource->SpellFamilyName == info->SpellFamilyName &&
             (resource->Effects[EFFECT_0].SpellClassMask & info->SpellFamilyFlags))
+        {
             // OnSpellCast runs AFTER SendSpellCooldown: the native -10% per stack
             // modifier has already shortened this cast's cooldown, then empties.
             // The Finest Ale keeps those stacks after Ale of the God-King.
             player->RemoveAurasDueToSpell(TANKARD);
+            // "Can only be used after emptying your Tankard": Breath of the North's gate.
+            player->CastSpell(player, EMPTY_TANKARD, true);
+        }
     }
 
     // Exact Throw Weapon family bit, shared by all its installed ranks.

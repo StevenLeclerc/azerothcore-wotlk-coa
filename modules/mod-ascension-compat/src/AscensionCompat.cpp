@@ -2407,7 +2407,7 @@ public:
         }
     }
 
-    [[nodiscard]] bool CanPrepare(Spell* spell) const
+    [[nodiscard]] bool AllowsReaperSoulHelper(Spell* spell) const
     {
         if (!spell)
             return true;
@@ -6085,7 +6085,7 @@ class AscensionCompatAllSpellScript : public AllSpellScript
 public:
     AscensionCompatAllSpellScript()
         : AllSpellScript("AscensionCompatAllSpellScript",
-              {ALLSPELLHOOK_ON_SPELL_CHECK_CAST, ALLSPELLHOOK_CAN_PREPARE,
+              {ALLSPELLHOOK_ON_SPELL_CHECK_CAST,
                   ALLSPELLHOOK_ON_CAST, ALLSPELLHOOK_ON_BEFORE_EFFECTS,
                   ALLSPELLHOOK_ON_CALCULATED_TARGET,
                   ALLSPELLHOOK_ON_HIT_RESULT,
@@ -6096,21 +6096,24 @@ public:
     void OnSpellCheckCast(Spell* spell, bool /*strict*/,
         SpellCastResult& result) override
     {
-        if (ascensionCompatConfig.GetConfigValue<bool>(
-                AscensionCompatConfig::ENABLED))
-            AscensionResourceService::Instance().CheckCast(spell, result);
-    }
-
-    [[nodiscard]] bool CanPrepare(Spell* spell,
-        SpellCastTargets const* /*targets*/,
-        AuraEffect const* /*triggeredByAura*/) override
-    {
         if (!ascensionCompatConfig.GetConfigValue<bool>(
                 AscensionCompatConfig::ENABLED))
-            return true;
+            return;
 
-        return CanPrepareAscensionClassMechanics19To25(spell) &&
-            AscensionResourceService::Instance().CanPrepare(spell);
+        // These gates refuse triggered helpers too (Forest Dweller's heal, Cleansing Flames'
+        // +5 Heat, Reaper's soul helper). They used to sit in CanPrepare, whose refusal returns
+        // from Spell::prepare before the SpellEvent is created: the Spell allocated by
+        // Unit::CastSpell was never deleted. CheckCast runs after that event exists, and a
+        // triggered cast reports nothing (TRIGGERED_DONT_REPORT_CAST_ERROR).
+        if (result == SPELL_CAST_OK &&
+            (!CanCastAscensionClassMechanics19To25(spell) ||
+                !AscensionResourceService::Instance().AllowsReaperSoulHelper(spell)))
+        {
+            result = SPELL_FAILED_CASTER_AURASTATE;
+            return;
+        }
+
+        AscensionResourceService::Instance().CheckCast(spell, result);
     }
 
     void OnSpellCast(Spell* spell, Unit* /*caster*/,

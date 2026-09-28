@@ -99,7 +99,9 @@ class spell_ascension_witch_hunter_vampiric_tonic : public AuraScript
 
     bool Load() override
     {
-        return IsWitchHunter(GetCaster()) && GetCaster() == GetTarget();
+        // GetTarget() is only valid in effect/proc hooks; in Load() it returns null
+        // and the core drops the whole script (P-094).
+        return IsWitchHunter(GetCaster()) && GetCaster() == GetUnitOwner();
     }
 
     bool CheckProc(ProcEventInfo& eventInfo)

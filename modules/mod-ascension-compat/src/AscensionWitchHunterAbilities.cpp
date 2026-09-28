@@ -2,6 +2,8 @@
 
 #include "AscensionSpellSafe.h"
 #include "AscensionWitchHunterCompletion.h"
+#include "DBCStores.h"
+#include "DataMap.h"
 #include "Map.h"
 #include "MovementTypedefs.h"
 #include "ObjectAccessor.h"
@@ -15,6 +17,7 @@
 #include "SpellScript.h"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace
 {
@@ -38,6 +41,15 @@ enum WitchHunterCastSpells
 
 // Pommel Smash's own SpellFamilyFlags word, read from 680515: the only family-21 record with it.
 constexpr uint32 POMMEL_SMASH_FAMILY_FLAG = 0x2000000;
+
+// Dead and Gone (705524): "Bolt and Dash affects one additional use of Heartseeking Bolt". The core
+// charge (SPELLMOD_CHARGES) is disarmed in ApplyContracts, because RemoveSpellMods would drop it on
+// the very shot that grants it; the extra use is counted here, keyed to the buff's apply time.
+constexpr char const* BOLT_AND_DASH_USE_KEY = "wh_bolt_dash_use";
+struct BoltAndDashUse : DataMap::Base
+{
+    time_t applied = 0;
+};
 
 void ApplyShadowblastTalents(Player* player)
 {
@@ -75,6 +87,27 @@ class witch_hunter_casts : public AllSpellScript
         Player* player = Owner(caster);
         if (!player || spell->IsTriggered())
             return;
+        // Rearmament "resetting the cooldown of all Traps": its effect 197 is EffectNULL in the core.
+        // Traps (word 2, 0x40000) also carry a category cooldown shared with their Launcher twin, so the
+        // family-21 trap siblings of each category are cleared one by one; RemoveCategoryCooldown would
+        // clear the other families that share those categories.
+        if (info->Id == 805738)
+            for (auto const& [known, state] : player->GetSpellMap())
+            {
+                if (state->State == PLAYERSPELL_REMOVED)
+                    continue;
+                SpellInfo const* trap = sSpellMgr->GetSpellInfo(known);
+                if (!Family(trap, 2, 0x40000))
+                    continue;
+                // Reset() follows the temporary replacement (Trap Launcher): clear the id itself as well.
+                player->RemoveSpellCooldown(known, true);
+                Reset(player, known);
+                if (uint32 category = trap->GetCategory())
+                    if (auto it = sSpellsByCategoryStore.find(category); it != sSpellsByCategoryStore.end())
+                        for (auto const& [byItem, sibling] : it->second)
+                            if (!byItem && sibling != known && Family(sSpellMgr->GetSpellInfo(sibling), 2, 0x40000))
+                                player->RemoveSpellCooldown(sibling, true);
+            }
         if (Family(info, 0, 65536))
         {
             uint32 extra = player->GetPower(POWER_RAGE);
@@ -98,7 +131,44 @@ class witch_hunter_casts : public AllSpellScript
         if (info->Id == SPELL_BRAND_OF_THE_DAMNED_DAMAGE && info->SpellFamilyName == 21 &&
             hit.missCondition == SPELL_MISS_NONE && (target->GetCreatureTypeMask() & CREATURE_TYPEMASK_DEMON_OR_UNDEAD))
             multiplier *= 2.0f;
+        // Silver Bullets (574149 / 574163) e1 and Silver Bolts (804026) e0 are the private selector 20014
+        // (OVERRIDE_CLASS_SCRIPTS, creature types in MiscValueB) that neither the core nor the module
+        // reads. The +s1% of the same talent already reached hit.damage through its native
+        // SPELLMOD_DAMAGE (multiplicative, Player::ApplySpellMod), so the factor below lands the total on
+        // 1 + (s1 + s2) / 100 rather than stacking a second multiplier.
+        if (hit.missCondition == SPELL_MISS_NONE)
+        {
+            for (uint32 silver : {574163u, 574149u})
+                if (AuraEffect const* extra = player->GetAuraEffect(silver, EFFECT_1))
+                {
+                    AuraEffect const* base = player->GetAuraEffect(silver, EFFECT_0);
+                    if (extra->GetAuraType() == SPELL_AURA_OVERRIDE_CLASS_SCRIPTS && extra->GetMiscValue() == 20014 &&
+                        extra->IsAffectedOnSpell(info) &&
+                        (target->GetCreatureTypeMask() & uint32(extra->GetMiscValueB())))
+                    {
+                        float s1 = base ? float(std::max(0, base->GetAmount())) : 0.0f;
+                        multiplier *= (100.0f + s1 + float(std::max(0, extra->GetAmount()))) / (100.0f + s1);
+                    }
+                    break; // one rank only
+                }
+            // "doubled against Undead or Demons or enemies affected by Shadow Trap": while the stun is up the
+            // trapped case is already served by Shadow Trapped 681179 e1 (MOD_DAMAGE_FROM_CASTER, raised by
+            // 804026 e1), so a stunned target is not doubled twice. Once the stun has ended the target is still
+            // "affected by Shadow Trap" through its DoT 681177 (same caster, Summons.cpp), and is doubled here.
+            if (AuraEffect const* silver = player->GetAuraEffect(804026, EFFECT_0))
+                if (silver->GetAuraType() == SPELL_AURA_OVERRIDE_CLASS_SCRIPTS && silver->GetMiscValue() == 20014 &&
+                    silver->IsAffectedOnSpell(info) &&
+                    ((target->GetCreatureTypeMask() & uint32(silver->GetMiscValueB())) ||
+                     target->HasAura(681177, player->GetGUID())) &&
+                    !target->HasAura(681179, player->GetGUID()))
+                {
+                    float a = float(std::max(0, silver->GetAmount()));
+                    multiplier *= (100.0f + 2.0f * a) / (100.0f + a);
+                }
+        }
         bool brand = target->HasAura(680517, player->GetGUID());
+        // Night King's +50%: its data side (707067 e0 on Shadow Brand's MOD_DAMAGE_FROM_CASTER) is
+        // disarmed in ApplyContracts so the bonus is counted once, here, whenever the brand was applied.
         if (brand && Noctis(info) && player->HasAura(707067))
             multiplier *= 1.5f;
         if (brand && (Noctis(info) || info->Id == 680483) && player->HasAura(681098))
@@ -133,6 +203,9 @@ class witch_hunter_casts : public AllSpellScript
             result = SPELL_FAILED_CASTER_AURASTATE;
             return;
         }
+        // Smite Evil (Wickedness) 802844 carries CasterAuraSpell 802015, which nothing applies, and it is
+        // skipped for triggered casts, so Smite Evil ranks 2-7 grant its payload on every cast. Enforcing the
+        // requirement would make that payload inert: left as is, pending the commissioner's decision.
         Player* player = Owner(caster);
         if (!player || spell->IsTriggered())
             return;
@@ -145,6 +218,10 @@ class witch_hunter_casts : public AllSpellScript
             result = SPELL_FAILED_BAD_TARGETS;
         if (id == 501380 && (!target || !(target->GetCreatureTypeMask() & (36 | 64))))
             result = SPELL_FAILED_BAD_TARGETS;
+        // Launched traps are held as temporary entries once Trap Launcher has been up; they stay castable
+        // only while it is (a bot or a macro could otherwise reach them after the swap is undone).
+        if ((id == 680376 || id == 681562 || id == 681563 || id == 681564) && !player->HasAura(802272))
+            result = SPELL_FAILED_CASTER_AURASTATE;
         if (id == 805770 && !player->HasAura(805771))
             result = SPELL_FAILED_CASTER_AURASTATE;
         if (Quickdraw(spell->GetSpellInfo()) && !player->HasAura(680244))
@@ -200,10 +277,15 @@ class spell_ascension_witch_hunter_ability : public SpellScript
             ++_hits;
         if (Dusk(GetSpellInfo()) || id == 803502 || Noctis(GetSpellInfo()))
         {
-            uint32 percent = Noctis(GetSpellInfo()) ? 50 : 25;
+            // Read from the passives the tooltips name (${$574336m1}% = 100 since the 2026-09-19 client
+            // DBC, 574334 = 25), no caster so no spell mod applies; the fallbacks are the old constants.
+            int32 percent = Noctis(GetSpellInfo()) ? AscensionSpellSafe::EffectValue(574336, EFFECT_0, nullptr, 50)
+                                                   : AscensionSpellSafe::EffectValue(574334, EFFECT_0, nullptr, 25);
             if (dealt)
                 player->CastCustomSpell(Noctis(GetSpellInfo()) ? 574337 : 574335, SPELLVALUE_BASE_POINT0,
-                                        int32(dealt * uint64(percent) / 100), player, TRIGGERED_FULL_MASK);
+                                        int32(std::min<uint64>(dealt * uint64(std::max(0, percent)) / 100,
+                                                               std::numeric_limits<int32>::max())),
+                                        player, TRIGGERED_FULL_MASK);
             if (Noctis(GetSpellInfo()) && dealt && player->HasAura(707067))
                 target->RemoveAurasDueToSpell(680517, player->GetGUID());
         }
@@ -224,9 +306,9 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                                     TRIGGERED_FULL_MASK);
         if (id == 503662 && dealt && player->HasAura(680544))
             for (uint32 stack : {681413, 681523})
-                if (Aura* aura = target->GetAura(stack, player->GetGUID()))
+                if (target->HasAura(stack, player->GetGUID()))
                 {
-                    uint32 count = aura->GetStackAmount();
+                    // The tooltip gives one fixed amount per consumption, not one per stack.
                     target->RemoveAurasDueToSpell(stack, player->GetGUID());
                     uint32 child = stack == 681413 ? 681415 : 681524;
                     if (SpellInfo const* helper = AscensionSpellSafe::Get(child))
@@ -234,7 +316,7 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                         float value = helper->Effects[EFFECT_0].CalcValue(player) +
                                       player->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_HOLY) * 0.25f +
                                       player->GetTotalAttackPowerValue(BASE_ATTACK) * 0.45f;
-                        player->CastCustomSpell(child, SPELLVALUE_BASE_POINT0, int32(value * count), target,
+                        player->CastCustomSpell(child, SPELLVALUE_BASE_POINT0, int32(std::max(0.0f, value)), target,
                                                 TRIGGERED_FULL_MASK);
                     }
                 }
@@ -252,7 +334,8 @@ class spell_ascension_witch_hunter_ability : public SpellScript
             target->KnockbackFrom(player->GetPositionX(), player->GetPositionY(), 10.0f, 5.0f);
         if (id == 802139 && !target->IsControlledByPlayer())
             Cast(player, target, 32747);
-        if (Family(GetSpellInfo(), 1, 16384) && dealt && player->HasAura(680503))
+        // Shadow Order rank 2 (681486) replaces rank 1 in the spell book, it is not chained to it.
+        if (Family(GetSpellInfo(), 1, 16384) && dealt && (player->HasAura(680503) || player->HasAura(681486)))
             Cast(player, target, 680517);
         if (id == 684330)
             Cast(player, target, 504472);
@@ -358,8 +441,16 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                 player->RemoveAurasDueToSpell(504478);
             if (_boltDash)
             {
-                player->RemoveAurasDueToSpell(520670);
-                Cast(player, player, 524602);
+                Aura* dash = player->GetAura(520670);
+                BoltAndDashUse* use = player->CustomData.GetDefault<BoltAndDashUse>(BOLT_AND_DASH_USE_KEY);
+                if (dash && player->HasAura(705524) && use->applied != dash->GetApplyTime())
+                    use->applied = dash->GetApplyTime(); // first use: the buff stays for one more Heartseeking
+                else
+                {
+                    player->CustomData.Erase(BOLT_AND_DASH_USE_KEY);
+                    player->RemoveAurasDueToSpell(520670);
+                    Cast(player, player, 524602);
+                }
             }
         }
         if (Quickdraw(info))
@@ -384,6 +475,7 @@ class spell_ascension_witch_hunter_ability : public SpellScript
         if (Desecrate(info))
         {
             talent(560208, 680519);
+            talent(520277, 520278); // Shadowstorm: "Casting Desecrate always triggers Shadowstorm"
             player->RemoveAurasDueToSpell(803166);
             if (player->HasAura(504645) && roll_chance_i(15))
                 for (auto const& [known, state] : player->GetSpellMap())
@@ -405,6 +497,12 @@ class spell_ascension_witch_hunter_ability : public SpellScript
                 if (SpellInfo const* hound = AscensionSpellSafe::Get(803886))
                     SummonHounds(player, 1, hound->GetDuration(), 803886, target);
             CallHounds(player, target);
+            // Feast of Talons: "or casting Houndmaster's Call". The hounds' own hits are not tracked, so
+            // the flock is released around the called target, same radius and filter as the Darkflock branch.
+            if (target && player->HasAura(500056))
+                for (Unit* enemy : Nearby(target, 6.0f))
+                    if (player->IsValidAttackTarget(enemy))
+                        Cast(player, enemy, 500564);
         }
         if (Family(info, 2, 8))
         {

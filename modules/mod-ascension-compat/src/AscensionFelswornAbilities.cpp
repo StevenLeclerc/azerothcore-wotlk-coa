@@ -2,6 +2,7 @@
 #include "AscensionFelsworn.h"
 #include "AscensionSpellSafe.h"
 #include "GameObject.h"
+#include "GameTime.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "Random.h"
@@ -58,6 +59,15 @@ class felsworn_casts : public AllSpellScript
     void OnSpellCheckCast(Spell* spell, bool, SpellCastResult& result) override
     {
         Player* player = Owner(spell->GetCaster());
+        // Betray's blast (804349, CasterAuraSpell 804216) is triggered by 804220 effect 2, and triggered
+        // casts skip CasterAuraSpell: it hit for 1 outside Inner Demon. "Inner Demon: Blast the enemy".
+        // Refused here, not in CanPrepare: a CanPrepare refusal returns before the SpellEvent exists and
+        // leaks the Spell (Spell.cpp:3492-3496 vs 3529-3530). A CheckCast failure is cleaned up normally.
+        if (player && result == SPELL_CAST_OK && spell->GetSpellInfo()->Id == 804349 && !Inner(player))
+        {
+            result = SPELL_FAILED_CASTER_AURASTATE;
+            return;
+        }
         if (!player || Triggered(spell) || result != SPELL_CAST_OK)
             return;
         uint32 id = spell->GetSpellInfo()->Id;
@@ -170,9 +180,22 @@ class felsworn_casts : public AllSpellScript
                     if (charges == 1)
                         aura->Remove();
                 }
+        // Annihilan Strike (both hands, every rank): "guaranteed to critically strike against enemies
+        // above 75% health". Set here, like Annihilation, so the victim's resilience cannot undo it.
+        if ((info->Id == 801913 || info->Id == 801914) && target->GetHealthPct() > 75.0f)
+            hit.crit = true;
         float factor = 1;
+        // Grommash's Folly: Carve criticals "deal 5% increased damage, increasing up to 60%" with the
+        // channel. 807427 carries the 5 % (CRIT_DMG_BONUS on Carve) and 12 stacks: 5 % at no step,
+        // 60 % at the full 10 steps of a 2.5 s channel, linear between.
         if (info->Id == 803715 && player->HasAura(805236) && hit.crit)
-            factor *= 1.0f + .03f * std::min<uint64>(10, spell->GetScriptValue(800206));
+        {
+            SpellInfo const* folly = sSpellMgr->GetSpellInfo(807427);
+            float base = float(std::max(0, Amount(807427, EFFECT_0, player)));
+            float top = base * float(folly ? std::max<uint32>(1, folly->StackAmount) : 1);
+            uint64 steps = std::min<uint64>(10, spell->GetScriptValue(800206));
+            factor *= 1.0f + (base + (top - base) * float(steps) / 10.0f) / 100.0f;
+        }
         if (Named(info, 801312))
         {
             uint32 index = 0;
@@ -266,7 +289,16 @@ class felsworn_casts : public AllSpellScript
         if (Named(info, 800204))
             talent(705141, 705143);
         if (Named(info, 801904))
+        {
             talent(560645, 560646);
+            // "Extends the duration of Inner Demon by $/1000;803089s1 sec": 803089 is only reached by
+            // the proc passive 706300, which nothing grants.
+            if (Inner(player))
+                Extend(player, Amount(803089));
+        }
+        // Sargeron Smite: "generate $521213s1 Energy". Nothing triggered 521213.
+        if (Named(info, 802060))
+            Cast(player, player, 521213);
         if ((Named(info, 801895) || Named(info, 520236)) && player->HasAura(560840))
             if (++State(player).ruin % 3 == 0)
                 Summon(player,
@@ -336,10 +368,22 @@ class felsworn_casts : public AllSpellScript
             if (count > 5)
                 Cast(player, target, 520832);
         }
+        // Twin Fury: "Critically striking with Twin Slice or Annihilan Strike now generates an additional
+        // 1 Felfury". The wrappers carry no damage (Direct() excludes them) and the shared
+        // FirstCriticalDamagingHit rule never fires on them, so the hand strikes own this event. Both
+        // hands of one cast land in the same world tick: one extra Felfury per cast, not per hand.
+        bool annihilan = info->SpellFamilyName == 20 && (info->SpellFamilyFlags[1] & 65536);
+        if ((Twin(info) || annihilan) && Direct(info) && crit && player->HasAura(801892))
+        {
+            uint32 now = uint32(GameTime::GetGameTimeMS().count());
+            if (State(player).twinFuryMs != now)
+            {
+                State(player).twinFuryMs = now;
+                Gain(player, 1);
+            }
+        }
         if (Twin(info) && Direct(info))
         {
-            if (crit && player->HasAura(801892))
-                Gain(player, 1); // the wrapper has no damage; the critical helper owns this event
             if (Aura* aura = player->GetAura(807163))
             {
                 Gain(player, 1);

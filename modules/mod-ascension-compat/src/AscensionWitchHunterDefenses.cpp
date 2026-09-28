@@ -36,6 +36,15 @@ void Tracking(Player* player, bool night)
     player->SetUInt32Value(PLAYER_TRACK_CREATURES, tracking);
 }
 
+// Trap Launcher (802272): "allow your Traps to be launched up to 30 yds away". Each ground trap has a
+// launched twin in the DBC (range 30 yd, TARGET_DEST_DEST, same summoned creature) that nothing handed out.
+constexpr std::array<std::pair<uint32, uint32>, 4> TRAP_LAUNCHES = {{
+    {680238, 680376}, // Shadow Trap
+    {681445, 681562}, // Inquisitor's Trap
+    {681450, 681563}, // Death Trap
+    {681455, 681564}, // Scourge Trap
+}};
+
 class aura_ascension_witch_hunter_lifecycle : public AuraScript
 {
     PrepareAuraScript(aura_ascension_witch_hunter_lifecycle);
@@ -224,6 +233,21 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
             player->SetTemporarySpellReplacement(500085, 802006);
         if (id == 803166 && player)
             player->ModifyAuraState(AURA_STATE_DEFENSE, true);
+        if (id == 802272 && player)
+            for (auto const& [ground, launched] : TRAP_LAUNCHES)
+            {
+                if (!player->HasActiveSpell(ground))
+                    continue;
+                // Held unannounced: the client sees it only in the ground trap's rewritten slot (P-144).
+                player->LearnTemporarySpellReplacementTarget(launched);
+                player->SetTemporarySpellReplacement(ground, launched);
+                if (uint32 left = player->GetSpellCooldownDelay(launched))
+                {
+                    WorldPacket data;
+                    player->BuildCooldownPacket(data, SPELL_COOLDOWN_FLAG_NONE, launched, left);
+                    player->SendDirectMessage(&data);
+                }
+            }
     }
 
     void Removed(AuraEffect const* effect, AuraEffectHandleModes /*mode*/)
@@ -304,6 +328,12 @@ class aura_ascension_witch_hunter_lifecycle : public AuraScript
                 break;
             case 803166:
                 player->ModifyAuraState(AURA_STATE_DEFENSE, false);
+                break;
+            case 802272:
+                // Only the replacement is undone, as for Hunt (807797): the launched twin stays a
+                // temporary, unannounced entry and is not saved.
+                for (auto const& [ground, launched] : TRAP_LAUNCHES)
+                    player->SetTemporarySpellReplacement(ground, 0);
                 break;
         }
     }

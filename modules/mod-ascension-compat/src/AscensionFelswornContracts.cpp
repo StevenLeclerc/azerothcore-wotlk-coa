@@ -9,6 +9,7 @@
 #include "Spell.h"
 #include "SpellAuraEffects.h"
 #include "SpellAuras.h"
+#include "SpellMgr.h"
 #include <algorithm>
 
 namespace AscensionFelsworn
@@ -64,12 +65,9 @@ void ApplyContracts(SpellInfo* info)
     {
         AscensionContract::SetDuration(info, 1, "Felsworn");
         info->Effects[2].Effect = 0;
-        // Inner Demon is the only Felsworn button the client DBC leaves out of the shared global
-        // cooldown, so it can be recast without delay and cast during another spell's cooldown.
-        // Ruin, Felwrath, Sunder, Twin Slice and Fel Fireball all use category 133 for 1000 ms.
-        // The matching client record is produced by apps/coa-spells/inner_demon_gcd.py.
-        info->StartRecoveryCategory = 133;
-        info->StartRecoveryTime = 1000;
+        // No global cooldown here: the client Spell.dbc leaves 804216 at category 0 / 0 ms and no
+        // patch ships another record (apps/coa-spells/inner_demon_gcd.py does not exist). A server-only
+        // 133/1000 refused casts the client had sent and hid its own lockout (2026-09-28).
     }
     for (auto const& rift : FelswornRifts)
         if (id == rift.spell)
@@ -95,7 +93,7 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].ApplyAuraName = SPELL_AURA_OVERRIDE_CLASS_SCRIPTS;
         info->Effects[1].MiscValue = ASCENSION_CREATURE_GLOBAL_CRIT;
         info->Effects[1].MiscValueB = 4;
-        info->Effects[1].BasePoints = id == 705109 ? 2 : 4;
+        // BasePoints stay the client's (2 and 5, so 3 % and 6 %): the former override to 4 left rank 2 at 5 %.
     }
     if (id == 92087)
         info->Effects[1].MiscValue = ASCENSION_STATE_MASKED_GUARANTEED_CRIT;
@@ -271,7 +269,7 @@ void ApplyContracts(SpellInfo* info)
     if (Named(info, 704368))
         for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
             if (info->Effects[i].TriggerSpell == 803717)
-                periodic(i, 2000);
+                periodic(i, info->Effects[i].Amplitude ? info->Effects[i].Amplitude : 6000); // client $t2, 6 s
     if (id >= 552210 && id <= 552213)
     {
         periodic(0, 2000);
@@ -313,6 +311,46 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].MiscValue = 0;
         info->Effects[1].SpellClassMask = flag96(0, 0, 0);
     }
+    // Ruin: "piercing all absorption effects" (SpellCustomAttr.dbc col5 2097152 / col6 16, as Cultist 805116).
+    // Resistances are not promised, so not AscensionIgnoreAbsorbAndResistance.
+    if (Named(info, 801895))
+        info->AscensionIgnoreAbsorb = true;
+    // Tyrant's Gaze: "an enemy and all enemies nearby". The client record targets the enemy only
+    // (6/0) and never uses its 8 yd radius; Felwrath (520236) carries the native 53/16 pair.
+    if (id == 805240)
+    {
+        info->Effects[EFFECT_0].TargetA = SpellImplicitTargetInfo(TARGET_DEST_TARGET_ENEMY);
+        info->Effects[EFFECT_0].TargetB = SpellImplicitTargetInfo(TARGET_UNIT_DEST_AREA_ENEMY);
+    }
+    // Armaments of the Legion: effect 1 (aura 317, absorb %) and effect 2 (SPELLMOD_EFFECT1) both
+    // raise Hateforged Barrier; keep the spellmod, which is what the client tooltip applies to $m1.
+    if (id == 706266 || id == 707844)
+        dummy(1);
+    // Outland Slaver: "increases their damage dealt by $s2%". Effect 2 (SPELLMOD_ALL_EFFECTS) also
+    // selects Fel Fireball (flags[1] 0x1), which effect 1 already raises: x1.21 instead of +10 %.
+    // Keep only its Twin Slice bit.
+    if ((id == 705123 || id == 707846) && info->Effects[EFFECT_2].MiscValue == SPELLMOD_ALL_EFFECTS)
+        info->Effects[EFFECT_2].SpellClassMask = flag96(0, 16777216, 0);
+    // Hateforged Barrier ranks 2-6: the physical reduction (aura 87) has school mask 0 in the client
+    // record, so it reduced nothing; rank 1 (705129) carries 1.
+    if (id >= 707523 && id <= 707527 &&
+        info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN && !info->Effects[EFFECT_1].MiscValue)
+        info->Effects[EFFECT_1].MiscValue = SPELL_SCHOOL_MASK_NORMAL;
+    // Sunder's attack power reducer: its 20 s came from 807428 effect 2 (SPELLMOD_DURATION +20000 on
+    // 803477), which is dummied with the rest of 807428 above. Without it the aura landed expired.
+    if (id == 803477)
+        AscensionContract::SetDuration(info, 18, "Felsworn"); // 20000 ms
+    // Felforged proc: "Your next 3 Fel Fireballs". Effect 2 (DAMAGE +0 % on Banes and Fel Eruption,
+    // flags 32/32) would otherwise eat a charge on every Bane.
+    if (id == 806104)
+    {
+        info->ProcCharges = 3;
+        dummy(2);
+    }
+    // Fury Unleashed: the tooltip of 555738 shows $806095s1 (200 %), the pulse carried 150 %.
+    if (id == 555739)
+        if (SpellInfo const* shown = sSpellMgr->GetSpellInfo(806095))
+            info->Effects[EFFECT_0].BasePoints = shown->Effects[EFFECT_0].BasePoints;
     info->_InitializeExplicitTargetMask();
 }
 } // namespace AscensionFelsworn
@@ -360,9 +398,13 @@ class felsworn_scaling : public UnitScript
             value = player->GetStat(STAT_SPIRIT);
         if (info->Id == 500531)
             value = player->GetTotalAttackPowerValue(BASE_ATTACK) * (index == 0 ? .5f : .05f);
-        if (player->HasAura(574146) && index == 0 && (Named(info, 801312) || Named(info, 802060) || Twin(info)))
+        // Twin Slice ranks 3-8 pass effect 0 on as BASE_POINT0 (effect 142) to the main-hand strike,
+        // which is Twin() itself: adding Agility on the rank too counted it twice.
+        bool passed = info->Effects[index].Effect == SPELL_EFFECT_TRIGGER_SPELL_WITH_VALUE;
+        if (player->HasAura(574146) && index == 0 && !passed &&
+            (Named(info, 801312) || Named(info, 802060) || Twin(info)))
             value += player->GetStat(STAT_AGILITY) * .20f;
-        if (player->HasAura(574145) && index == 0 && (Named(info, 802060) || Twin(info)))
+        if (player->HasAura(574145) && index == 0 && !passed && (Named(info, 802060) || Twin(info)))
             value += player->GetStat(STAT_AGILITY) * .15f;
         if (Named(info, 705129) && index == 0 && player->HasAura(803478))
             value += player->GetMaxHealth() * .10f;

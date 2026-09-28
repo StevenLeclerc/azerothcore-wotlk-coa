@@ -303,6 +303,33 @@ void ApplyContracts(SpellInfo* info)
         dummy(EFFECT_1);
         dummy(EFFECT_2);
     }
+    // Dark Effigy's "2 additional nearby enemies" is delivered by witch_doctor_casts::OnSpellBeforeEffects.
+    // The record's own +3 SPELLMOD_JUMP_TARGETS added a second, overlapping set on top (Bad Juju up to 5,
+    // Hexfire up to 6): keep the script, which adds exactly two to every covered spell.
+    if (id == DarkEffigy && info->Effects[EFFECT_0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_JUMP_TARGETS)
+        dummy(EFFECT_0);
+    // Jungle Booms' "-3 targets" is operation 34, outside SpellModOp, so CalculateSpellMod dropped it, and its
+    // mask missed the heal. Carry it as the native target-count aura on Jungle Shrooms' heal 802703 alone
+    // (the (0, 0, 2048) bit effect 0 already targets): 8 - 3 = 5, the count 801660's tooltip prints.
+    if (id == JungleBooms && info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[EFFECT_1].MiscValue == 34)
+    {
+        info->Effects[EFFECT_1].ApplyAuraName = SPELL_AURA_MOD_MAX_AFFECTED_TARGETS;
+        info->Effects[EFFECT_1].SpellClassMask = flag96(0, 0, 2048);
+    }
+    // Frog Bones' field lacked the (word 2, 128) bit its three sibling cauldron fields carry, so Spice:
+    // Earthroot and Master Mixologist raised the DUMMY ingredient instead of the -3% it applies.
+    if (id == BonesField)
+        info->SpellFamilyFlags[2] |= 128;
+    // Potent Mixes' threat reduction is SPELL_AURA_MOD_TOTAL_THREAT, a flat offset of -15/-30 points in this
+    // core. The tooltip promises a percentage of the threat generated: SPELL_AURA_MOD_THREAT, all schools.
+    if ((id == PotentMixesOne || id == PotentMixesTwo) &&
+        info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_TOTAL_THREAT)
+    {
+        info->Effects[EFFECT_1].ApplyAuraName = SPELL_AURA_MOD_THREAT;
+        info->Effects[EFFECT_1].MiscValue = SPELL_SCHOOL_MASK_ALL;
+    }
     if (IsJuju(info))
         info->Effects[EFFECT_1].Effect = 0;
     if (id == PuppetHit)
@@ -392,6 +419,8 @@ void ApplyContracts(SpellInfo* info)
         periodic(EFFECT_1, 1000);
     if (id == Vigil)
         periodic(EFFECT_1, 1000);
+    // Slither: the tooltip says "You cannot attack or cast spells", yet this line (upstream 93f6ee1) removes
+    // the PACIFY_SILENCE. Restoring it is a nerf reserved to the sponsor: left as is, reported.
     if (id == Slither)
         info->Effects[EFFECT_2].Effect = 0;
     if (id == StalkerSpeed)

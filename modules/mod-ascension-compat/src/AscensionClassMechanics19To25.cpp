@@ -95,7 +95,7 @@ void ApplyAscensionClassMechanics19To25(SpellInfo* spellInfo)
     }
 }
 
-bool CanPrepareAscensionClassMechanics19To25(Spell* spell)
+bool CanCastAscensionClassMechanics19To25(Spell* spell)
 {
     if (!spell || !spell->GetCaster())
         return true;
@@ -106,8 +106,8 @@ bool CanPrepareAscensionClassMechanics19To25(Spell* spell)
         info->Id == SPELL_RANGER_FOREST_DWELLER_HEAL && info->Effects[EFFECT_0].Effect == SPELL_EFFECT_HEAL_PCT)
     {
         // The passive's periodic trigger otherwise heals even outside Elude.
-        // Onslaught explicitly grants Elude's benefits without stealth. Use
-        // CanPrepare because triggered casts bypass CasterAuraSpell checks.
+        // Onslaught explicitly grants Elude's benefits without stealth. Checked
+        // in OnSpellCheckCast because triggered casts bypass CasterAuraSpell.
         return player->HasAura(SPELL_RANGER_FOREST_DWELLER) &&
             (player->HasAura(SPELL_RANGER_ELUDE) || player->HasAura(SPELL_RANGER_ONSLAUGHT));
     }
@@ -125,7 +125,7 @@ bool CanPrepareAscensionClassMechanics19To25(Spell* spell)
     // Cleansing Flames' native tick already triggers +10 Heat. Its second
     // authored helper is the +5 talent bonus, not an unconditional extra gain.
     // This check intentionally includes triggered spells: native triggered
-    // casts ignore CasterAuraSpell, while CanPrepare still runs for them.
+    // casts ignore CasterAuraSpell, while Spell::CheckCast still runs for them.
     return player->HasAura(SPELL_PYROMANCER_UNFATHOMABLY_HOT);
 }
 

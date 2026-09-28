@@ -116,7 +116,7 @@ struct ResourceGainRule
 // These active abilities advertise resource generation in their tooltips, but
 // their public Spell.dbc records contain no effect that performs it. Ranges are
 // rank chains verified against the local Ascension spell dump.
-inline constexpr std::array<ResourceGainRule, 183> ResourceGainRules =
+inline constexpr std::array<ResourceGainRule, 188> ResourceGainRules =
 {{
     // Native helpers already supply Twin Slice, Fel Fireball, and Seeking Flame.
     // Fel Torpedo and the current Bane variants generate through their class scripts.
@@ -167,6 +167,20 @@ inline constexpr std::array<ResourceGainRule, 183> ResourceGainRules =
         ResourceGainEvent::FirstSuccessfulHostileTarget, 0, 800098},
     {16, 560030, 560030, 803102, 50, ResourceMutation::AuraStacks,
         ResourceGainEvent::Cast, 0, 800098},
+    // Conjuration Mastery 300595: "Your Updraft / Conjure Storm now refunds 10 Static". Its aura 42
+    // triggers 804084 (Add 10 Static) with ProcFlags 0 and no spell_proc row, so nothing ran it.
+    // Updraft (802354, 570161-570166 through Tempest Calling; 355240 is a second rank-1 record)
+    // is in no rank chain: every id is listed. The gain lands before the rule's cost is taken.
+    {16, 800227, 800227, 803102, 10, ResourceMutation::AuraStacks,
+        ResourceGainEvent::Cast, 300595, 800098},
+    {16, 501415, 501420, 803102, 10, ResourceMutation::AuraStacks,
+        ResourceGainEvent::Cast, 300595, 800098},
+    {16, 355240, 355240, 803102, 10, ResourceMutation::AuraStacks,
+        ResourceGainEvent::Cast, 300595, 800098},
+    {16, 802354, 802354, 803102, 10, ResourceMutation::AuraStacks,
+        ResourceGainEvent::Cast, 300595, 800098},
+    {16, 570161, 570166, 803102, 10, ResourceMutation::AuraStacks,
+        ResourceGainEvent::Cast, 300595, 800098},
 
     {17, 801016, 801016, 500906, 2, ResourceMutation::AuraStacks,
         ResourceGainEvent::FirstSuccessfulHostileTarget},
@@ -562,7 +576,7 @@ struct ResourceCostRule
 // Rules marked None still receive a local power check, but their public DBC
 // effect already performs the spend. Fixed and All replace private-server
 // consumption that is absent from the public DBC.
-inline constexpr std::array<ResourceCostRule, 59> ResourceCostRules =
+inline constexpr std::array<ResourceCostRule, 67> ResourceCostRules =
 {{
     {14, 801904, 801904, 800058, 2, ResourceConsumption::Fixed,
         705137, 30},
@@ -605,6 +619,17 @@ inline constexpr std::array<ResourceCostRule, 59> ResourceCostRules =
     {16, 806430, 806436, 803102, 40, ResourceConsumption::Fixed},
     {16, 806400, 806400, 803102, 50, ResourceConsumption::Fixed},
     {16, 807713, 807717, 803102, 50, ResourceConsumption::Fixed},
+    // "Depletes N Static" in the tooltip, no power cost and no effect 175 in the DBC: the threshold
+    // was never checked and nothing was spent (Aeroblast and Torrential Wrath recast in a loop).
+    // Aeroblast, Torrential Wrath and Updraft are talent replacements in no rank chain: ids listed.
+    {16, 801839, 801839, 803102, 50, ResourceConsumption::Fixed},
+    {16, 501450, 501458, 803102, 50, ResourceConsumption::Fixed},
+    {16, 804017, 804017, 803102, 40, ResourceConsumption::Fixed},
+    {16, 503352, 503360, 803102, 40, ResourceConsumption::Fixed},
+    {16, 355240, 355240, 803102, 20, ResourceConsumption::Fixed},
+    {16, 802354, 802354, 803102, 20, ResourceConsumption::Fixed},
+    {16, 570161, 570166, 803102, 20, ResourceConsumption::Fixed},
+    {16, 572303, 572303, 803102, 10, ResourceConsumption::Fixed},
 
     {24, 502057, 502063, 807533, 1, ResourceConsumption::Fixed},
     {24, 534600, 534604, 807533, 1, ResourceConsumption::Fixed},

@@ -43,7 +43,9 @@ public:
             case RecklessAbandon:
             case DeepSecrets:
             case CharmOfWarding:
-            case Superconductor:
+                // Superconductor 705646 left this list on 2026-09-28: its native effect 0 (aura 107,
+                // SPELLMOD_EFFECT2 on 707038 Static Hidden, +1 per Static stack) is kept, and the class
+                // code (AscensionStormbringerTalents.cpp) mirrors 707038 from the Static stack.
                 // The live talent-tree descriptions specify 1%; normalize the marker before adding its behavior.
                 info->Effects[EFFECT_0].BasePoints = 1;
                 info->Effects[EFFECT_0].DieSides = 0;
@@ -119,28 +121,9 @@ class aura_ascension_resource_talent_refresh : public AuraScript
     }
 };
 
-class stormbringer_superconductor : public AllSpellScript
-{
-public:
-    stormbringer_superconductor() : AllSpellScript("stormbringer_superconductor",
-        {ALLSPELLHOOK_ON_CALCULATED_TARGET}) { }
-
-    void OnSpellCalculatedTarget(Spell* spell, Unit* /*target*/, TargetInfo& result) override
-    {
-        Unit* caster = spell->GetCaster();
-        if (!caster->IsPlayer() || caster->getClass() != CLASS_STORMBRINGER || spell->IsTriggered() ||
-            sSpellMgr->GetFirstSpellInChain(spell->GetSpellInfo()->Id) != ArmOfThorim ||
-            caster->HasAura(ChargedConduit))
-            return;
-        // Launch damage is calculated before the resource service depletes Static at successful cast completion.
-        if (AuraEffect const* talent = caster->GetAuraEffect(Superconductor, EFFECT_0))
-        {
-            float multiplier = 1.0f + Stacks(caster, Static) * talent->GetAmount() / 100.0f;
-            result.damage = uint32(result.damage * multiplier);
-            result.damageBeforeTakenMods = uint32(result.damageBeforeTakenMods * multiplier);
-        }
-    }
-};
+// stormbringer_superconductor (a launch-damage multiplier on Arm of Thorim) was removed on 2026-09-28
+// together with the DUMMY contract above: with 707038 applied by the class code, keeping it would
+// count Superconductor twice.
 }
 
 void AddSC_AscensionResourceTalents()
@@ -148,5 +131,4 @@ void AddSC_AscensionResourceTalents()
     new resource_talent_contracts();
     RegisterSpellScript(aura_ascension_resource_talent);
     RegisterSpellScript(aura_ascension_resource_talent_refresh);
-    new stormbringer_superconductor();
 }

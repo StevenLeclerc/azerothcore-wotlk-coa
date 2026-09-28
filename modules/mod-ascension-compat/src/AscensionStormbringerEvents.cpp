@@ -27,7 +27,17 @@ enum StormbringerEventSpells : uint32
     // Rank-one anchors of the chains involved, taken from `spell_ranks`.
     SPELL_GALE_RANK_1 = 804036,
     SPELL_CALL_LIGHTNING_RANK_1 = 500040,
-    SPELL_ELECTROCUTE_RANK_1 = 801844
+    SPELL_ELECTROCUTE_RANK_1 = 801844,
+    SPELL_SHOCK_RANK_1 = 804020,
+
+    // 300827 "Cyclone's Recharge": Shock, Gale or Electrocute reduce Kiss of the Clouds by
+    // 300828's amount. 705719 "Master Airbender": Gale reduces the Static spenders named by its
+    // three EffectTriggerSpell records; 681257 "(CD Reduction)4" (Unshackle) is the fourth
+    // record of the same authored series, named by no effect, and Unshackle depletes Static.
+    SPELL_CYCLONES_RECHARGE = 300827,
+    SPELL_CYCLONES_RECHARGE_REDUCTION = 300828,
+    SPELL_MASTER_AIRBENDER = 705719,
+    SPELL_MASTER_AIRBENDER_UNSHACKLE = 681257
 };
 
 enum StormbringerEventEntries : uint32
@@ -109,12 +119,22 @@ void ReduceCooldownOverChain(Player* player, uint32 spellId, int32 delta, bool r
     }
 }
 
-// 707546 "Enveloping Winds", first sentence: "Casting Gale now causes your Air Elemental
-// to cast Gale." Its effect 0 is a SPELL_AURA_DUMMY (aura 4) whose EffectTriggerSpell
-// (707547, the same record effect 1 points at) is never read by the dummy handler, so
-// nothing in the data can express it. The second sentence (the raid armour aura) is
-// already carried natively by
-// effect 1, a SPELL_AURA_PERIODIC_TRIGGER_SPELL firing 707547 every 5 s, and is untouched.
+// Every SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN of one authored record, applied over the
+// named spell's whole rank chain (same reading as Titanstorm below).
+void ApplyCooldownRecord(Player* player, uint32 recordId)
+{
+    SpellInfo const* record = sSpellMgr->GetSpellInfo(recordId);
+    if (!record)
+        return;
+    for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
+    {
+        SpellEffectInfo const& effect = record->Effects[index];
+        if (effect.Effect != SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN || effect.MiscValue <= 0)
+            continue;
+        ReduceCooldownOverChain(player, uint32(effect.MiscValue), effect.CalcValue(player), effect.MiscValueB != 0);
+    }
+}
+
 class stormbringer_event_casts : public AllSpellScript
 {
 public:
@@ -127,9 +147,35 @@ public:
             return;
 
         Player* player = caster ? caster->ToPlayer() : nullptr;
-        if (!player || player->getClass() != CLASS_STORMBRINGER || !spell || spell->IsTriggered() ||
-            sSpellMgr->GetFirstSpellInChain(spellInfo->Id) != SPELL_GALE_RANK_1 ||
-            !player->HasAura(SPELL_ENVELOPING_WINDS))
+        if (!player || player->getClass() != CLASS_STORMBRINGER || !spell || spell->IsTriggered())
+            return;
+
+        uint32 const first = sSpellMgr->GetFirstSpellInChain(spellInfo->Id);
+
+        if ((first == SPELL_SHOCK_RANK_1 || first == SPELL_GALE_RANK_1 || first == SPELL_ELECTROCUTE_RANK_1) &&
+            player->HasAura(SPELL_CYCLONES_RECHARGE))
+            ApplyCooldownRecord(player, SPELL_CYCLONES_RECHARGE_REDUCTION);
+
+        if (first != SPELL_GALE_RANK_1)
+            return;
+
+        if (SpellInfo const* airbender = player->HasAura(SPELL_MASTER_AIRBENDER) ?
+                sSpellMgr->GetSpellInfo(SPELL_MASTER_AIRBENDER) : nullptr)
+        {
+            for (uint8 index = 0; index < MAX_SPELL_EFFECTS; ++index)
+                if (airbender->Effects[index].ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL &&
+                    airbender->Effects[index].TriggerSpell)
+                    ApplyCooldownRecord(player, airbender->Effects[index].TriggerSpell);
+            ApplyCooldownRecord(player, SPELL_MASTER_AIRBENDER_UNSHACKLE);
+        }
+
+        // 707546 "Enveloping Winds", first sentence: "Casting Gale now causes your Air
+        // Elemental to cast Gale." Its effect 0 is a SPELL_AURA_DUMMY (aura 4) whose
+        // EffectTriggerSpell (707547, the same record effect 1 points at) is never read by the
+        // dummy handler, so nothing in the data can express it. The second sentence (the raid
+        // armour aura) is already carried natively by effect 1, a
+        // SPELL_AURA_PERIODIC_TRIGGER_SPELL firing 707547 every 5 s, and is untouched.
+        if (!player->HasAura(SPELL_ENVELOPING_WINDS))
             return;
 
         Pet* pet = LiveAirElemental(player);

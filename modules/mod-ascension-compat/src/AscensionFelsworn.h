@@ -52,6 +52,7 @@ struct FelswornState
     uint32 ruin = 0;
     uint32 carveSteps = 0;
     uint32 spenderCrit = 0;
+    uint32 twinFuryMs = 0; // game time of the last Twin Fury gain: one per cast, not one per hand
     bool event = false;
     bool refreshing = false;
 };

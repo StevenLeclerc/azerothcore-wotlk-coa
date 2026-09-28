@@ -1,5 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 // Generated from the pinned client records by tools/Generate-FelswornCompletion.py.
+// That generator is on no disk of this machine (find /, 2026-09-28): the rows that carry a
+// trailing comment were added by hand from the tooltip formula they cite.
 #ifndef ASCENSION_FELSWORN_DATA_H
 #define ASCENSION_FELSWORN_DATA_H
 #include "Define.h"
@@ -12,6 +14,7 @@ struct FelswornCoefficient
 };
 constexpr FelswornCoefficient FelswornCoefficients[] = {
     {300469, 0, 0.08000000f, 0.20000000f, 1.00000000f, 0.00000000f, 36},
+    {500761, 0, 0.35000000f, 0.00000000f, 0.00000000f, 0.00000000f, 36}, // Fel Torpedo (500610): +$AP*.35
     {501270, 0, 0.23000000f, 0.30000000f, 0.00000000f, 0.00000000f, 4},
     {501271, 0, 0.23000000f, 0.30000000f, 0.00000000f, 0.00000000f, 4},
     {501272, 0, 0.23000000f, 0.30000000f, 0.00000000f, 0.00000000f, 4},
@@ -72,6 +75,8 @@ constexpr FelswornCoefficient FelswornCoefficients[] = {
     {803485, 1, 0.28500000f, 0.00000000f, 0.00000000f, 0.00000000f, 36},
     {803486, 1, 0.28500000f, 0.00000000f, 0.00000000f, 0.00000000f, 36},
     {803487, 1, 0.28500000f, 0.00000000f, 0.00000000f, 0.00000000f, 36},
+    {804349, 2, 0.50000000f, 0.00000000f, 0.00000000f, 0.00000000f, 36}, // Betray (804220): $AP*.5
+    {804766, 0, 0.25000000f, 0.50000000f, 0.00000000f, 0.00000000f, 36}, // Betrayer's Blow: +$AP*.25+$SP*.5
     {805240, 0, 0.35000000f, 0.00000000f, 0.00000000f, 0.00000000f, 36},
     {805241, 0, 0.50000000f, 0.00000000f, 0.00000000f, 0.00000000f, 36},
     {806062, 0, 0.22000000f, 0.34300000f, 0.00000000f, 0.00000000f, 32},

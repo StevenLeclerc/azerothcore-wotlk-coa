@@ -383,7 +383,11 @@ struct npc_ascension_witch_hunter_field : ScriptedAI
                     {
                         uint32 count = 0;
                         uint32 limit = AscensionSpellSafe::MaxAffectedTargets(681179, 1);
-                        for (Unit* victim : Nearby(enemy, 5.0f))
+                        // Shadow Trap: "$681179i enemies within $681179a1 yds" (e0, 3 yd). Inquisitor's and
+                        // Scourge Trap read 5 yd ($681447a1, 681457 e0).
+                        float radius = entry == 506250 ? AscensionSpellSafe::EffectRadius(681179, EFFECT_0, owner, 3.0f)
+                                                       : 5.0f;
+                        for (Unit* victim : Nearby(enemy, radius))
                             if (owner->IsValidAttackTarget(victim))
                             {
                                 if (entry == 506250 && limit && count++ >= limit)
@@ -444,9 +448,27 @@ class spell_ascension_witch_hunter_summon : public SpellScript
         }
         player->SummonCreature(effect.MiscValue, position, TEMPSUMMON_TIMED_DESPAWN, duration);
     }
+    // Death Trap and its Launcher twin do not share a category (681450: none, 681563: 21), unlike the
+    // three other trap pairs: mirror the cooldown the cast just received onto the twin, client included.
+    void ShareDeathTrapCooldown()
+    {
+        Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        uint32 id = GetSpellInfo()->Id;
+        if (!player || (id != 681450 && id != 681563))
+            return;
+        uint32 twin = id == 681450 ? 681563 : 681450;
+        uint32 left = player->GetSpellCooldownDelay(id);
+        if (!left || player->GetSpellCooldownDelay(twin) >= left)
+            return;
+        player->AddSpellCooldown(twin, 0, left);
+        WorldPacket data;
+        player->BuildCooldownPacket(data, SPELL_COOLDOWN_FLAG_NONE, twin, left);
+        player->SendDirectMessage(&data);
+    }
     void Register() override
     {
         OnEffectHit += SpellEffectFn(spell_ascension_witch_hunter_summon::Summon, EFFECT_ALL, SPELL_EFFECT_SUMMON);
+        AfterCast += SpellCastFn(spell_ascension_witch_hunter_summon::ShareDeathTrapCooldown);
     }
 };
 
@@ -455,9 +477,25 @@ class spell_ascension_witch_hunter_smoke : public SpellScript
     PrepareSpellScript(spell_ascension_witch_hunter_smoke);
     void After()
     {
-        if (WorldLocation const* destination = GetExplTargetDest())
-            GetCaster()->CastSpell(destination->GetPositionX(), destination->GetPositionY(),
-                                   destination->GetPositionZ(), 805757, true);
+        // 805756 is a delayed spell (speed 30): its cloud does not exist yet in AfterCast. The allies'
+        // cloud 805757 (no family flags, so no Trickster) gets the smoke's own duration the way
+        // Aura::CalcMaxDuration will compute it for 805756, SPELLMOD_DURATION included.
+        WorldLocation const* destination = GetExplTargetDest();
+        SpellInfo const* allies = sSpellMgr->GetSpellInfo(805757);
+        Unit* caster = GetCaster();
+        if (!destination || !allies || !caster)
+            return;
+        int32 duration = caster->CalcSpellDuration(GetSpellInfo());
+        if (Player* modOwner = caster->GetSpellModOwner())
+            if (duration != -1)
+                modOwner->ApplySpellMod(GetSpellInfo()->Id, SPELLMOD_DURATION, duration);
+        SpellCastTargets targets;
+        targets.SetDst(destination->GetPositionX(), destination->GetPositionY(), destination->GetPositionZ(),
+                       destination->GetOrientation());
+        CustomSpellValues values;
+        if (duration > 0)
+            values.AddSpellMod(SPELLVALUE_AURA_DURATION, duration);
+        caster->CastSpell(targets, allies, &values, TRIGGERED_FULL_MASK);
     }
     void Register() override
     {

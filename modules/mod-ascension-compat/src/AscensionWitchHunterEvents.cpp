@@ -295,6 +295,11 @@ class aura_ascension_witch_hunter_event : public AuraScript
                         Cast(owner, pet, 573266);
                 break;
             case 504742:
+                // "reset the cooldown and reduce the channel time of your next Darkflock": 500566 only
+                // carries the two -50% spell mods, so the reset is done here (Darkflock = word 0, 0x2).
+                for (auto const& [known, state] : player->GetSpellMap())
+                    if (state->State != PLAYERSPELL_REMOVED && Family(sSpellMgr->GetSpellInfo(known), 0, 2))
+                        Reset(player, known);
                 self(500566);
                 break;
             case 707064:
@@ -400,15 +405,17 @@ class aura_ascension_witch_hunter_event : public AuraScript
                 break;
             case 681329:
             case 681488:
-                // Le nombre d'attaques supplementaires vit dans le payload, pas ici. 681329 dit
-                // "strike 2 additional times" et declenche 681392 (val = 2) ; 681488 dit
-                // "strike 3 additional times" et declenche 681489 (val = 3). L'effet est
-                // SPELL_EFFECT_ADD_EXTRA_ATTACKS, qui s'ACCUMULE (Unit::AddExtraAttacks :
-                // extraAttacksTargets[guid] += count) : un seul lancement suffit, deux en
-                // delivraient 4 aux deux rangs. La cible du payload est TARGET_UNIT_CASTER,
-                // d'ou self() plutot que Cast(owner, other, ...).
+                // ApplyContracts turns the payloads 681392 / 681489 into one 100% off-hand weapon strike
+                // on the enemy (TARGET_UNIT_TARGET_ENEMY), overwriting the BasePoints that held the
+                // strike count: cast one per promised attack, 2 at rank 1 and 3 at rank 2, on the
+                // victim. Cast on the caster, CheckCast refused them as a bad target. Extra() keeps the
+                // payload from re-entering this proc.
                 if (uint32 payload = GetSpellInfo()->Effects[EFFECT_0].TriggerSpell)
-                    self(payload);
+                {
+                    uint32 strikes = GetId() == 681488 ? 3u : 2u;
+                    for (uint32 i = 0; i < strikes; ++i)
+                        Cast(owner, other, payload);
+                }
                 self(1257670);
                 break;
             case 806195:

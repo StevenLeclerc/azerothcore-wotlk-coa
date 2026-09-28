@@ -180,6 +180,38 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[EFFECT_1].Effect = 0; // missing private visual 500565 is not the damage payload
     if (id == 681098)
         info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
+    // Night King: e0 (SPELLMOD_EFFECT1 +50 on Shadow Brand) raised the brand's MOD_DAMAGE_FROM_CASTER on
+    // Noctis to 50% while the hit script also multiplies by 1.5 and consumes the brand: x2.25. The script
+    // owns the bonus (it holds whenever the brand was applied), so the data side is disarmed.
+    if (id == 707067 && info->Effects[EFFECT_0].IsAura(SPELL_AURA_ADD_FLAT_MODIFIER) &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_EFFECT1)
+        info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
+    // Shadow Order rank 2: the 2026-09-19 import authored e2 as a copy of e0 (SPELLMOD_DOT on Shadow Brand,
+    // so the DoT took x1.96) where rank 1 carries SPELLMOD_DAMAGE on Dawn Blade (word 0, 0x400). Restore the
+    // rank 1 shape, keeping the rank 2 value (40 = $s1). Inert if a later import fixes the record.
+    if (id == 681486 && info->Effects[EFFECT_2].IsAura(SPELL_AURA_ADD_PCT_MODIFIER) &&
+        info->Effects[EFFECT_2].MiscValue == SPELLMOD_DOT &&
+        info->Effects[EFFECT_2].SpellClassMask == info->Effects[EFFECT_0].SpellClassMask)
+    {
+        info->Effects[EFFECT_2].MiscValue = SPELLMOD_DAMAGE;
+        info->Effects[EFFECT_2].SpellClassMask = flag96(0x400, 0, 0);
+    }
+    // Silver Bolts names Shadowblast (word 2, 0x10) but its damage effect e2 only covers Damnation and
+    // Heartseeking Bolt; e0, which carries the doubling, already lists it.
+    if (id == 804026 && info->Effects[EFFECT_2].IsAura(SPELL_AURA_ADD_PCT_MODIFIER) &&
+        info->Effects[EFFECT_2].MiscValue == SPELLMOD_DAMAGE)
+        info->Effects[EFFECT_2].SpellClassMask[2] |= 0x10;
+    // Decimate "ignore Armor" reaches the hounds through effect 190; aura 280 is read for player attackers
+    // only (Unit.cpp), the Ascension ignore-armor aura 338 for any attacker.
+    if (id == 804194 && info->Effects[EFFECT_1].Effect == SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS &&
+        info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_ARMOR_PENETRATION_PCT)
+        info->Effects[EFFECT_1].ApplyAuraName = SPELL_AURA_ASCENSION_MOD_IGNORE_ARMOR_PCT;
+    // Dead and Gone e0 (SPELLMOD_CHARGES +1 on Bolt and Dash) would arm a core charge that RemoveSpellMods
+    // drops on the same shot, and that also reached Quickdraw 680244 (same family flags). The extra
+    // Heartseeking use is counted by the cast script instead; e1 and e2 (Pavise) stay native.
+    if (id == 705524 && info->Effects[EFFECT_0].IsAura(SPELL_AURA_ADD_FLAT_MODIFIER) &&
+        info->Effects[EFFECT_0].MiscValue == SPELLMOD_CHARGES)
+        info->Effects[EFFECT_0].ApplyAuraName = SPELL_AURA_DUMMY;
     if (id == 524669)
     {
         info->StackAmount = 1; // one explicit sum of the last three contributions

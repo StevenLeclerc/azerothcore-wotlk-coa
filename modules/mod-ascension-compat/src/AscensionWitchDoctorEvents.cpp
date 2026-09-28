@@ -10,6 +10,7 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <algorithm>
+#include <cstdlib>
 
 namespace
 {
@@ -89,10 +90,17 @@ class aura_ascension_witch_doctor_event : public AuraScript
             case Hexplosion:
                 return damage && critical;
             case UmbralTalent:
-                return damage &&
-                       (event.GetTypeMask() &
-                        (PROC_FLAG_DONE_RANGED_AUTO_ATTACK | PROC_FLAG_DONE_SPELL_RANGED_DMG_CLASS)) &&
-                       roll_chance_f(GetSpellInfo()->ProcChance + player->GetRatingBonusValue(CR_CRIT_RANGED));
+            {
+                // This roll is the only one: spell_proc keeps Chance = 100 for 681242
+                // (2026_09_28_13_ascension_witchdoctor_proc_et_scripts.sql), otherwise the core rolls the
+                // record's 10% again after this check and the proc drops to (10 + crit)% x 10%.
+                if (!damage || !(event.GetTypeMask() &
+                                 (PROC_FLAG_DONE_RANGED_AUTO_ATTACK | PROC_FLAG_DONE_SPELL_RANGED_DMG_CLASS)))
+                    return false;
+                float chance = float(GetSpellInfo()->ProcChance);
+                player->ApplySpellMod(UmbralTalent, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+                return roll_chance_f(chance + player->GetRatingBonusValue(CR_CRIT_RANGED));
+            }
             case Malignant:
                 return damage && (IsJuju(info) || Family(info, 1, 262144));
             case Overflow:
@@ -166,7 +174,7 @@ class aura_ascension_witch_doctor_event : public AuraScript
                 buff(OverflowBuff);
                 break;
             case MaliciousGolems:
-                Reduce(player, WarGolem, 1000);
+                Reduce(player, WarGolem, std::abs(Amount(GolemVigilCdr))); // $707333S1, -500 ms
                 break;
             case HollowSpirit:
                 Cast(owner, target, HollowDebuff);
@@ -227,21 +235,11 @@ class aura_ascension_witch_doctor_event : public AuraScript
                 break;
             }
             case GrowingMalice:
-            {
-                Aura* hex = OwnedHex(player, target);
-                AuraEffect* dot = hex ? hex->GetEffect(EFFECT_0) : nullptr;
-                if (!dot)
-                    break;
-                Aura* growth = target->GetAura(GrowingDebuff, player->GetGUID());
-                uint32 stacks = growth ? growth->GetStackAmount() : 0;
-                uint32 percent = Amount(GrowingDebuff);
+                // 582257 is a native SPELL_AURA_MOD_DAMAGE_FROM_CASTER on Hex's class mask, 3% per stack, that
+                // Unit::SpellDamageBonusTaken already applies to every tick. Growing the DoT's amount as well
+                // counted the bonus twice (x1.69 at 10 stacks instead of x1.30), and SpreadHex copied it.
                 Cast(player, target, GrowingDebuff);
-                growth = target->GetAura(GrowingDebuff, player->GetGUID());
-                if (growth)
-                    dot->ChangeAmount(int64(dot->GetAmount()) * (100 + percent * growth->GetStackAmount()) /
-                                      (100 + percent * stacks));
                 break;
-            }
             case HexfireMass:
                 Summon(player, SerpentMass, target, target->GetPosition());
                 break;

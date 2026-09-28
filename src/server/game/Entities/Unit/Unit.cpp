@@ -4672,6 +4672,22 @@ bool Unit::CanCastDuringChannel(SpellInfo const* info) const
     if (IsPlayer() && getClass() == CLASS_NECROMANCER && info && info->Id == 500991)
         return true;
     Spell* channel = GetCurrentSpell(CURRENT_CHANNELED_SPELL);
+    // Stormflow 567555 (ranks 572861-572867): "Shock / Brine can be instantly cast while channeling";
+    // Storm Synergy 578300 adds Electrocute. Its aura 353 has no handler, and its raw mask also covers
+    // Gale and 806016, so every rank is named (none of these chains is trusted to spell_ranks).
+    if (IsPlayer() && getClass() == CLASS_STORMBRINGER && info && info->SpellFamilyName == 22 &&
+        !info->IsChanneled() && channel && channel->getState() != SPELL_STATE_FINISHED &&
+        channel->IsChannelActive())
+    {
+        uint32 const channelId = channel->GetSpellInfo()->Id;
+        uint32 const id = info->Id;
+        bool const stormflow = channelId == 567555 || (channelId >= 572861 && channelId <= 572867);
+        bool const shock = id == 804020 || (id >= 503326 && id <= 503332) || id == 504634;
+        bool const brine = id >= 807105 && id <= 807111;
+        bool const electrocute = (id == 801844 || (id >= 501421 && id <= 501432)) && HasAura(578300);
+        if (stormflow && (shock || brine || electrocute))
+            return true;
+    }
     if (IsPlayer() && getClass() == CLASS_DEMON_HUNTER && info && info->SpellFamilyName == 20 &&
         (info->SpellFamilyFlags[1] & 3) && channel && channel->getState() != SPELL_STATE_FINISHED &&
         channel->IsChannelActive() && channel->GetSpellInfo()->Id == 800355)
@@ -8838,7 +8854,12 @@ float Unit::SpellPctDamageModsDone(Unit* victim, SpellInfo const* spellProto, Da
     {
         if (aurEff->GetMiscValueB() == ASCENSION_CLASSMASK_AURASTATE_DAMAGE && !aurEff->IsAffectedOnSpell(spellProto))
             return false;
-        return victim->HasAuraState(AuraStateType(aurEff->GetMiscValue())) && spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, damagetype == DOT);
+        // Ascension state 28 (target above 80 % health, First Blood 560906, Invasion, Hellfire Embers) is
+        // never set in UNIT_FIELD_AURASTATE: evaluate it from current health.
+        int32 state = aurEff->GetMiscValue();
+        bool matches = state == ASCENSION_TARGET_HEALTH_ABOVE_80_PERCENT ?
+            victim->HasAscensionConditionalCombatState(state) : victim->HasAuraState(AuraStateType(state));
+        return matches && spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, damagetype == DOT);
     });
 
     // done scripted mod (take it from owner)
@@ -10774,7 +10795,11 @@ uint32 Unit::MeleeDamageBonusDone(Unit* victim, uint32 pdamage, WeaponAttackType
         if (aurEff->GetMiscValueB() == ASCENSION_CLASSMASK_AURASTATE_DAMAGE &&
             (!spellProto || !aurEff->IsAffectedOnSpell(spellProto)))
             return false;
-        return (victim->HasAuraState(AuraStateType(aurEff->GetMiscValue())) && (!spellProto || spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, false)));
+        // Ascension state 28 is never set in UNIT_FIELD_AURASTATE: see SpellPctDamageModsDone.
+        int32 state = aurEff->GetMiscValue();
+        bool matches = state == ASCENSION_TARGET_HEALTH_ABOVE_80_PERCENT ?
+            victim->HasAscensionConditionalCombatState(state) : victim->HasAuraState(AuraStateType(state));
+        return matches && (!spellProto || spellProto->ValidateAttribute6SpellDamageMods(this, aurEff, false));
     });
 
     // done scripted mod (take it from owner)

@@ -302,12 +302,17 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
             ++_ticks;
             player->CastCustomSpell(EclipseHit, SPELLVALUE_BASE_POINT0, effect->GetAmount(), GetTarget(), true, nullptr,
                                     effect);
+            // "within $802712a1 yds": 5 yd and at most 5 enemies on the explosion's record, which the contract
+            // retargets without touching its RadiusEntry.
+            SpellInfo const* explosion = sSpellMgr->GetSpellInfo(EclipseSplash);
+            float radius = explosion ? explosion->Effects[EFFECT_0].CalcRadius(player) : 0.0f;
+            uint32 cap = explosion && explosion->MaxAffectedTargets ? explosion->MaxAffectedTargets : 5;
             uint32 hits = 0;
-            for (Unit* enemy : Nearby(GetTarget(), 10.0f))
+            for (Unit* enemy : Nearby(GetTarget(), radius > 0.0f ? radius : 10.0f))
                 if (enemy != GetTarget() && player->IsValidAttackTarget(enemy))
                 {
                     Copy(player, enemy, EclipseSplash, _splash);
-                    if (++hits == 5)
+                    if (++hits >= cap)
                         break;
                 }
         }
@@ -361,6 +366,19 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
                     Reduce(player, Glaive, int32(std::min<uint64>(removed, uint64(INT32_MAX) - 1)));
             }
         }
+        // Lesser Shadow Avatar (Residual Energy): effect 1 triggers 706803 every second, an effect 192 the core
+        // leaves to Spell::EffectNULL. Its tooltip promises the Avatar rider unconditionally: remove the same
+        // share of Spirit Glaive's remaining cooldown here. Needs 706544 in spell_script_names (same SQL file
+        // as the Umbral proc chance). Effect 0 is a non-periodic dummy, hence the explicit index.
+        if (id == LesserAvatar && effect->GetEffIndex() == EFFECT_1)
+        {
+            PreventDefaultAction();
+            uint32 glaive = KnownRank(player, Glaive);
+            int32 percent = std::clamp(Amount(AvatarCdr), 0, 100);
+            uint64 removed = uint64(player->GetSpellCooldownDelay(glaive)) * uint64(percent) / 100;
+            if (removed)
+                Reduce(player, Glaive, int32(std::min<uint64>(removed, uint64(INT32_MAX) - 1)));
+        }
     }
     void Absorb(AuraEffect* /*effect*/, DamageInfo& damage, uint32& absorb)
     {
@@ -406,6 +424,9 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
         {
             for (uint32 helper : {SpiritStats, SpiritCast, SpiritChance, SpiritSpeed})
                 player->RemoveAurasDueToSpell(helper);
+            // Juju Spirits is "+5% per Spirit": no Spirit left, no bonus (SyncSpirits is not safe mid-removal).
+            if (AuraEffect* juju = player->GetAuraEffect(JujuSpirits, EFFECT_0); juju && juju->GetAmount())
+                juju->ChangeAmount(0);
         }
         if (IsHex(GetSpellInfo()))
             GetTarget()->RemoveAurasDueToSpell(GrowingDebuff, player->GetGUID());
@@ -422,7 +443,10 @@ class aura_ascension_witch_doctor_lifecycle : public AuraScript
             if (Family(GetSpellInfo(), 0, 33554432) && player->HasAura(Godslayer))
             {
                 Cast(player, GetTarget(), GlaiveExplosion);
-                for (Unit* enemy : Nearby(GetTarget(), 10.0f))
+                // "all enemies within $806616a1 yds": 8 yd on the explosion's record (contract keeps RadiusEntry).
+                SpellInfo const* explosion = sSpellMgr->GetSpellInfo(GlaiveExplosion);
+                float radius = explosion ? explosion->Effects[EFFECT_0].CalcRadius(player) : 0.0f;
+                for (Unit* enemy : Nearby(GetTarget(), radius > 0.0f ? radius : 10.0f))
                     if (enemy != GetTarget() && player->IsValidAttackTarget(enemy))
                         Cast(player, enemy, GlaiveExplosion);
             }
@@ -491,6 +515,21 @@ class witch_doctor_update : public UnitScript
         }
         if (player->HasAura(BeamCost) && !player->GetCurrentSpell(CURRENT_CHANNELED_SPELL))
             player->RemoveAurasDueToSpell(BeamCost);
+        // Juju Spirits' amount only moved on a Spirit gain or spend: it kept +5% per Spirit after they expired
+        // or died, and applied at login with none. Resynchronise it on this 500 ms tick.
+        if (AuraEffect* juju = player->GetAuraEffect(JujuSpirits, EFFECT_0))
+            if (int32 want = Amount(JujuSpirits) * Spirits(player); juju->GetAmount() != want)
+                juju->ChangeAmount(want);
+        // "Periodic damage dealt by this effect can critically strike": the core only lets a DoT crit through
+        // a SPELL_AURA_ABILITY_PERIODIC_CRIT covering it, and HexCrit, the one such aura, is granted by
+        // nothing. A hidden passive aura, not a learned spell: the spellbook is untouched, it survives death,
+        // and this tick restores it after login and drops it when no Hex rank is held in the active spec.
+        bool const knowsHex = player->HasSpell(Hex) || player->HasSpell(KnownRank(player, Hex));
+        bool const hasCrit = player->HasAura(HexCrit);
+        if (knowsHex && !hasCrit)
+            player->AddAura(HexCrit, player);
+        else if (!knowsHex && hasCrit)
+            player->RemoveAurasDueToSpell(HexCrit);
     }
 };
 } // namespace

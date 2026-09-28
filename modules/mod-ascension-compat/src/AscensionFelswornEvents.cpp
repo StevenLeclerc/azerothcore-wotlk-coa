@@ -67,7 +67,9 @@ class aura_ascension_felsworn_event : public AuraScript
         case 681376:
             return Chance(player, id);
         case 685321:
-            return Twin(info) && !periodic;
+            // "Twin Slice now deals an additional ... Physical damage": once per Twin Slice, on the
+            // main-hand strike; the off-hand strikes (520243, 808304, 808306) are separate events.
+            return Twin(info) && !periodic && info->Id != 520243 && info->Id != 808304 && info->Id != 808306;
         case 300474:
             return info && !periodic && info->DmgClass == SPELL_DAMAGE_CLASS_MAGIC &&
                    (info->SchoolMask & (SPELL_SCHOOL_MASK_FIRE | SPELL_SCHOOL_MASK_SHADOW));
@@ -142,7 +144,12 @@ class aura_ascension_felsworn_event : public AuraScript
         {
         case 92087: {
             uint32 count = 0;
-            for (Unit* enemy : Nearby(player, 8.0f))
+            // 800598's own radius (RadiusIndex 193, 6 yd); the contract keeps its RadiusEntry.
+            SpellInfo const* blades = sSpellMgr->GetSpellInfo(800598);
+            float radius = blades ? blades->Effects[EFFECT_0].CalcRadius(player) : 0.0f;
+            if (radius <= 0.0f)
+                radius = 6.0f;
+            for (Unit* enemy : Nearby(player, radius))
                 if (player->IsValidAttackTarget(enemy) && player->IsWithinLOSInMap(enemy))
                 {
                     Cast(player, enemy, 800598);

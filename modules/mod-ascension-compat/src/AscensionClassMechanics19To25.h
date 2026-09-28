@@ -13,7 +13,9 @@ class Unit;
 // ResourceGainRules, NativePowerGainRules, and their event hooks remain owned
 // by AscensionResourceService and must not be duplicated here.
 void ApplyAscensionClassMechanics19To25(SpellInfo* spellInfo);
-[[nodiscard]] bool CanPrepareAscensionClassMechanics19To25(Spell* spell);
+// Called from OnSpellCheckCast, never from CanPrepare: a CanPrepare refusal returns from
+// Spell::prepare before the SpellEvent exists, and the Spell allocated by Unit::CastSpell leaks.
+[[nodiscard]] bool CanCastAscensionClassMechanics19To25(Spell* spell);
 void HandleAscensionClassMechanics19To25Hit(Spell* spell, Player* player,
     Unit* target, std::uint8_t missInfo, std::uint32_t damage);
 

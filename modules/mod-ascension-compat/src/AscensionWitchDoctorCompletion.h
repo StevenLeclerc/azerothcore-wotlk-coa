@@ -49,6 +49,9 @@ enum DoctorSpells : uint32
     UmbralTalent = 681242,
     UmbralReady = 504588,
     Hex = 801693,
+    // "Hex of Malice [Passive]": the only family 19 SPELL_AURA_ABILITY_PERIODIC_CRIT whose class mask
+    // (0, 33554432, 0) covers Hex. Nothing grants it; the update tick below keeps it on Hex owners.
+    HexCrit = 574358,
     Wrath = 807037,
     Arrow = 801674,
     Hexfire = 807042,
@@ -108,7 +111,9 @@ enum DoctorSpells : uint32
     MojoMadness = 705871,
     MojoFree = 503693,
     Unleashed = 705901,
+    UnleashedCdr = 504607, // Voodoo Unleashed's tooltip reads the Shadow Puppets reduction as $504607S1 (-3000 ms)
     MaliciousGolems = 705912,
+    GolemVigilCdr = 707333, // Malicious Golems' tooltip reads the War Golem reduction as $707333S1 (-500 ms)
     GolemHaste = 705913,
     HollowSpirit = 705917,
     HollowDebuff = 503706,
@@ -191,6 +196,9 @@ enum DoctorSpells : uint32
     JungleThistle = 500508,
     FrogShrooms = 500509,
     FishBones = 500594,
+    JungleBooms = 705859,
+    PotentMixesOne = 503748,
+    PotentMixesTwo = 504888,
     MasterConcoctions = 801690,
     ConcoctionsBuff = 570064,
     ConcoctionsHeal = 570185,

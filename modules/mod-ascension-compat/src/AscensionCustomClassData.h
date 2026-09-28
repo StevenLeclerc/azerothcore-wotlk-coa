@@ -1193,7 +1193,8 @@ inline constexpr std::array<ClassSpell, 50> ObsoleteClassSpells =
     {32, 31, 805726},
 }};
 
-inline constexpr std::array<ClassSpell, 142> UnresolvedTrainerSpells =
+// 707906 Storm Alert rank 3 left this list on 2026-09-28: AscensionProgression::Ranks now teaches it at 56.
+inline constexpr std::array<ClassSpell, 141> UnresolvedTrainerSpells =
 {{
     {16, 0, 501450},
     {16, 0, 501451},
@@ -1215,7 +1216,6 @@ inline constexpr std::array<ClassSpell, 142> UnresolvedTrainerSpells =
     {16, 0, 570164},
     {16, 0, 570165},
     {16, 0, 570166},
-    {16, 0, 707906},
     {16, 0, 807106},
     {16, 0, 807107},
     {16, 0, 807108},

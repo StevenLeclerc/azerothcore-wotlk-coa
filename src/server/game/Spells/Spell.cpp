@@ -8589,7 +8589,15 @@ SpellCastResult Spell::CanOpenLock(uint32 effIndex, uint32 lockId, SkillType& sk
                         if ((m_spellInfo->Effects[effIndex].TargetA.GetTarget() == TARGET_GAMEOBJECT_ITEM_TARGET || m_spellInfo->Effects[effIndex].TargetB.GetTarget() == TARGET_GAMEOBJECT_ITEM_TARGET)
                             && !m_spellInfo->IsAbilityOfSkillType(SKILL_LOCKPICKING))
                         {
-                            skillValue += m_spellInfo->Effects[effIndex].CalcValue();
+                            // CoA: pass the caster so RealPointsPerLevel applies (Smash Lock 570122, 804154, 804662:
+                            // +5 per level in Spell.dbc); without it SpellEffectInfo::CalcValue ignores the level.
+                            // Below max(BaseLevel, SpellLevel) the level term is negative (SpellInfo.cpp:473-481):
+                            // keep the old caster-less value there, so the bonus never drops under +base.
+                            // One CalcValue call either way (DieSides is rolled once).
+                            bool const belowSpellLevel = int32(m_caster->GetLevel()) <
+                                int32(std::max(m_spellInfo->BaseLevel, m_spellInfo->SpellLevel));
+                            skillValue += belowSpellLevel ? m_spellInfo->Effects[effIndex].CalcValue()
+                                                          : m_spellInfo->Effects[effIndex].CalcValue(m_caster);
                         }
 
                         if (skillValue < reqSkillValue)

@@ -31,9 +31,11 @@ class spell_ascension_witch_hunter_torchlight_mark : public AuraScript
 
     bool Load() override
     {
+        // GetTarget() is null in Load() and would drop the script (P-094).
         Unit* caster = GetCaster();
+        Unit* owner = GetUnitOwner();
         return caster && caster->IsPlayer() && caster->getClass() == CLASS_WITCH_HUNTER &&
-            GetTarget() && GetTarget() != caster;
+            owner && owner != caster;
     }
 
     bool CheckProc(ProcEventInfo& eventInfo)

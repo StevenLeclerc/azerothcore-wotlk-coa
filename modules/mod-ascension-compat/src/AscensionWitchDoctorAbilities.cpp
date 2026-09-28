@@ -22,6 +22,33 @@ void RefreshOwnedHex(Player* player, Unit* target)
     if (Aura* hex = OwnedHex(player, target))
         hex->RefreshDuration();
 }
+// Records which "next spell" buffs the caster holds when the cast begins; OnSpellCast consumes only those.
+// An instant spell runs Spell::prepare -> cast(true) -> _cast -> OnSpellCast BEFORE sScriptMgr->OnSpellPrepare
+// (Spell.cpp:3732-3739), so a snapshot taken in OnSpellPrepare alone came too late: Umbral Glaive never
+// consumed Umbral Ready, nor any instant spell Mojo Madness' free cast, the potion Mojo or a Concoctions
+// charge. The strict CheckCast of prepare (Spell.cpp:3559) runs before cast(true) for every spell. Only
+// sets values, never clears them, so running it from both hooks is idempotent.
+void Snapshot(Spell* spell, Unit* caster)
+{
+    if (!caster || spell->IsTriggered())
+        return;
+    // The twelve "next spell" buffs are read only for a Witch Doctor casting himself (OnSpellCast and
+    // OnSpellHitResult return otherwise): skip their lookups for every other unit. Concoctions stays open
+    // to any caster, since the doctor puts it on allies.
+    if (Player* player = Owner(caster); player == caster)
+    {
+        spell->SetScriptValue(IngredientMarker, IngredientMask(player));
+        for (uint32 id : {MojoFree, SenjinBuff, PriceReady, DambalaReady, TrueSpiritReady, OverflowBuff, VolleyReady,
+                          UmbralReady, HexfireReady, MojoThistle, MojoFish, MojoShrooms})
+            if (caster->HasAura(id))
+                spell->SetScriptValue(id, 1);
+    }
+    if (AuraEffect* effect = caster->GetAuraEffect(ConcoctionsBuff, EFFECT_0))
+    {
+        spell->SetScriptValue(ConcoctionsBuff, std::max(0, effect->GetAmount()));
+        spell->SetScriptValue(ConcoctionsHeal, effect->GetCasterGUID().GetRawValue());
+    }
+}
 
 class witch_doctor_casts : public AllSpellScript
 {
@@ -36,23 +63,15 @@ class witch_doctor_casts : public AllSpellScript
 
     void OnSpellPrepare(Spell* spell, Unit* caster, SpellInfo const* /*info*/) override
     {
-        if (spell->IsTriggered())
-            return;
-        if (Player* player = Owner(caster); player == caster)
-            spell->SetScriptValue(IngredientMarker, IngredientMask(player));
-        for (uint32 id : {MojoFree, SenjinBuff, PriceReady, DambalaReady, TrueSpiritReady, OverflowBuff, VolleyReady,
-                          UmbralReady, HexfireReady, MojoThistle, MojoFish, MojoShrooms})
-            if (caster->HasAura(id))
-                spell->SetScriptValue(id, 1);
-        if (AuraEffect* effect = caster->GetAuraEffect(ConcoctionsBuff, EFFECT_0))
-        {
-            spell->SetScriptValue(ConcoctionsBuff, std::max(0, effect->GetAmount()));
-            spell->SetScriptValue(ConcoctionsHeal, effect->GetCasterGUID().GetRawValue());
-        }
+        Snapshot(spell, caster);
     }
 
-    void OnSpellCheckCast(Spell* spell, bool /*strict*/, SpellCastResult& result) override
+    void OnSpellCheckCast(Spell* spell, bool strict, SpellCastResult& result) override
     {
+        // Only the strict pass of prepare: the non-strict one at the end of a cast time (Spell.cpp:3892)
+        // would catch a buff gained during the cast, whose cost and effects were already settled.
+        if (strict)
+            Snapshot(spell, spell->GetCaster());
         Player* player = Owner(spell->GetCaster());
         if (!player || spell->GetCaster() != player || spell->IsTriggered() || result != SPELL_CAST_OK)
             return;
@@ -93,16 +112,19 @@ class witch_doctor_casts : public AllSpellScript
         if (IsBottle(info) && player->HasAura(OutOfBottle) && player->CanCastDuringChannel(info))
             if (Unit* target = spell->m_targets.GetUnitTarget())
             {
+                // "${$m2-1} additional allies": 301175 effect 1 reads 4, so three, not the two once written here.
+                uint32 extra = uint32(std::max(0, Amount(OutOfBottle, EFFECT_1) - 1));
                 auto allies = Allies(player, target, 15.0f);
                 allies.remove(target);
                 uint32 added = 0;
-                for (Unit* ally : allies)
-                    if (player->IsWithinDistInMap(ally, 40.0f))
-                    {
-                        spell->AddUnitTargetForScript(ally, 1 << EFFECT_0);
-                        if (++added == 2)
-                            break;
-                    }
+                if (extra)
+                    for (Unit* ally : allies)
+                        if (player->IsWithinDistInMap(ally, 40.0f))
+                        {
+                            spell->AddUnitTargetForScript(ally, 1 << EFFECT_0);
+                            if (++added >= extra)
+                                break;
+                        }
             }
         if (info->Id == HexfireWrath || info->Id == Umbral)
             if (Unit* target = spell->m_targets.GetUnitTarget())
@@ -133,9 +155,31 @@ class witch_doctor_casts : public AllSpellScript
 
     void OnCalcMaxDuration(Aura const* aura, int32& duration) override
     {
+        // Graven Effigy's field carries +25 SPELL_AURA_MECHANIC_DURATION_MOD for roots, snares and disorients,
+        // but Unit::ModSpellDuration only keeps the most negative value of that aura, so a bonus never landed.
+        // Any caster's control can be lengthened, hence before the owner test. Called from Aura::Aura before
+        // m_effects exist (SpellAuras.cpp:364): read the spell's mechanics, not the aura's effect mask.
+        if (duration > 0 && aura->GetId() != GravenField)
+            if (Unit* victim = aura->GetOwner() ? aura->GetOwner()->ToUnit() : nullptr)
+                if (victim->HasAuraType(SPELL_AURA_MECHANIC_DURATION_MOD) && !aura->GetSpellInfo()->IsPositive())
+                {
+                    uint64 const mechanics = aura->GetSpellInfo()->GetAllEffectsMechanicMask();
+                    int32 bonus = 0;
+                    for (AuraEffect const* effect : victim->GetAuraEffectsByType(SPELL_AURA_MECHANIC_DURATION_MOD))
+                        if (effect->GetId() == GravenField && effect->GetAmount() > 0 && effect->GetMiscValue() > 0 &&
+                            effect->GetMiscValue() < 64 && (mechanics & (1ULL << effect->GetMiscValue())))
+                            bonus = std::max(bonus, effect->GetAmount());
+                    if (bonus)
+                        AddPct(duration, bonus);
+                }
         Player* player = Owner(aura->GetCaster());
         if (!player)
             return;
+        // Hexed: "(8 sec vs players)" in 504762's own tooltip; the record lasts 40 s for everyone.
+        if (aura->GetId() == Hexed && duration > 0)
+            if (Unit* victim = aura->GetOwner() ? aura->GetOwner()->ToUnit() : nullptr)
+                if (victim->GetCharmerOrOwnerPlayerOrPlayerItself())
+                    duration = std::min<int32>(duration, 8 * IN_MILLISECONDS);
         if (Family(aura->GetSpellInfo(), 0, 536870912))
             duration = 250 * Spirits(player);
         if (aura->GetId() == Frenzy)
@@ -223,7 +267,12 @@ class witch_doctor_casts : public AllSpellScript
             if (Aura* unstable = target->GetAura(UnstableDebuff, player->GetGUID()))
             {
                 unstable->Remove();
-                for (Unit* ally : Allies(player, target, 10.0f, 5))
+                // "allies within $802489a1 yds": 20 yd on the heal's record, which the contract retargets
+                // without touching its RadiusEntry; its MaxAffectedTargets (5) stays the cap.
+                SpellInfo const* heal = sSpellMgr->GetSpellInfo(UnstableHeal);
+                float radius = heal ? heal->Effects[EFFECT_0].CalcRadius(player) : 0.0f;
+                uint32 cap = AscensionSpellSafe::MaxAffectedTargets(UnstableHeal, 5);
+                for (Unit* ally : Allies(player, target, radius > 0.0f ? radius : 10.0f, cap ? cap : 5))
                     Cast(player, ally, UnstableHeal);
             }
         if ((healing || target->IsAlive()) && (IsPotion(info) || IsSplash(info)))
@@ -249,7 +298,8 @@ class witch_doctor_casts : public AllSpellScript
             if (hexed)
                 Cast(player, target, MarkOfMalice);
             if (player->HasAura(Strings) && target->HasAura(Threads, player->GetGUID()))
-                Copy(player, target, StringsDamage, uint64(damage) * 30 / 100);
+                // 706898 ticks three times: its base point is the per-tick share, 705910 s1 = 10%, not the 30% total.
+                Copy(player, target, StringsDamage, uint64(damage) * uint32(std::max(0, Amount(Strings, EFFECT_0))) / 100);
         }
         if (damage && Family(info, 1, 262144) && player->HasAura(VoodooSpirits))
             if (Aura* threads = target->GetAura(Threads, player->GetGUID()))
@@ -302,8 +352,10 @@ class witch_doctor_casts : public AllSpellScript
             for (auto const& [guid, id] : jinxes)
             {
                 caster->RemoveAurasDueToSpell(id, guid);
-                if (Unit* doctor = ObjectAccessor::GetUnit(*caster, guid))
-                    Cast(doctor, caster, JinxSilence);
+                // 803732 targets TARGET_UNIT_CASTER: cast by the doctor it silenced the doctor. The cursed
+                // unit casts it on itself, the doctor staying original caster (duration mods, credit, DR).
+                if (ObjectAccessor::GetUnit(*caster, guid) && caster->IsAlive())
+                    caster->CastSpell(caster, JinxSilence, true, nullptr, nullptr, guid);
             }
         }
         Player* player = Owner(caster);
@@ -368,7 +420,7 @@ class witch_doctor_casts : public AllSpellScript
         if (id == HexfireWrath && target)
             Summon(player, WrathWard, target, target->GetPosition());
         if (IsJuju(info) && player->HasAura(Unleashed))
-            Reduce(player, Puppets, 5000);
+            Reduce(player, Puppets, std::abs(Amount(UnleashedCdr))); // $504607S1, -3000 ms
         if (IsBeam(info) && player->HasAura(Wave))
             for (Unit* ally : Allies(player, player, 40.0f, 10))
                 Cast(player, ally, Replenishment);

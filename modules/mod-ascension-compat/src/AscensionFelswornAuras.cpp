@@ -263,7 +263,7 @@ class aura_ascension_felsworn_lifecycle : public AuraScript
             State(player).carveSteps = 0;
             State(player).spenderCrit = oldCrit;
             if (full && player->HasAura(520831))
-                Gain(player, 2);
+                Gain(player, 1); // "Fully channeling Carve now refunds 1 Felfury"
             if (player->HasAura(707444))
             {
                 Cast(player, player, 807424);

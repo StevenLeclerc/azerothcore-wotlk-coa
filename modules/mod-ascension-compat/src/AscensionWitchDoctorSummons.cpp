@@ -321,6 +321,14 @@ class npc_ascension_witch_doctor : public ScriptedAI
         if (Aura* aura = target->GetAura(spell, _owner))
             aura->SetDuration(2200);
     }
+    // Radius of a field spell the contract retargeted to a single unit: its RadiusEntry is left intact,
+    // so the record still says how far the effect reaches. Falls back when the spell or the radius is missing.
+    static float FieldRadius(Player* player, uint32 spell, uint8 effect, float fallback)
+    {
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(spell);
+        float radius = info ? info->Effects[effect].CalcRadius(player) : 0.0f;
+        return radius > 0.0f ? radius : fallback;
+    }
     void Link(Player* player)
     {
         auto allies = Allies(player, me, 10.0f);
@@ -466,7 +474,13 @@ class npc_ascension_witch_doctor : public ScriptedAI
                     if (Aura* reveal = player->AddAura(SentryRevealSpell, enemy))
                         reveal->SetDuration(2200);
         if (entry == NpcShadow || entry == NpcGraven || entry == NpcCursed)
-            for (Unit* enemy : Nearby(me, 10.0f))
+        {
+            // Shadow "within $504761a1 yds" (30) and Cursed "within $506820a1 yds" (15) read their field's
+            // record. Graven keeps the 10 yd it always had: its tooltip cites $504761s1 (20), left to the sponsor.
+            float range = entry == NpcShadow   ? FieldRadius(player, ShadowField, EFFECT_0, 10.0f)
+                          : entry == NpcCursed ? FieldRadius(player, CursedField, EFFECT_0, 10.0f)
+                                               : 10.0f;
+            for (Unit* enemy : Nearby(me, range))
                 if (player->IsValidAttackTarget(enemy))
                 {
                     Field(enemy, entry == NpcShadow   ? ShadowField
@@ -476,6 +490,7 @@ class npc_ascension_witch_doctor : public ScriptedAI
                     if (entry == NpcShadow)
                         Field(enemy, ShadowSlow);
                 }
+        }
         if (entry == NpcStasis && _age >= 2000)
         {
             me->CastSpell(me, Stasis, true, nullptr, nullptr, _owner);
@@ -489,7 +504,8 @@ class npc_ascension_witch_doctor : public ScriptedAI
         }
         if (entry == NpcCauldron)
         {
-            for (Unit* ally : Allies(player, me, 10.0f))
+            // "Allies within $a3 yds" of 804684: 15 yd, the same radius as the buff 504419 it applies.
+            for (Unit* ally : Allies(player, me, FieldRadius(player, CauldronBuff, EFFECT_0, 10.0f)))
             {
                 Field(ally, CauldronBuff);
                 Copy(player, ally, LoaEchoHeal, Amount(VoodooCauldron, EFFECT_2, player));
@@ -498,14 +514,26 @@ class npc_ascension_witch_doctor : public ScriptedAI
         }
         if (entry == NpcBwonsamdi)
         {
-            if (player->IsWithinDistInMap(me, 10.0f))
+            // "within $802718a1 yds" and "within $a2 yds": 15 yd on both records, which the contracts zero or
+            // retarget without touching their RadiusEntry.
+            if (player->IsWithinDistInMap(me, FieldRadius(player, BigVoodooField, EFFECT_0, 10.0f)))
             {
                 Field(player, BigVoodooField);
                 Cast(player, player, BigVoodooLock);
             }
-            for (Unit* ally : Allies(player, me, 10.0f))
+            // 504921 carries a fixed -20% and no class flags, so One Armed Waltz' extra -5% (a SPELLMOD_EFFECT2 on
+            // 802719) never reached it. Read the reduction from 802719 effect 1 with the doctor's modifiers:
+            // -20, or -25 with the talent. The contract only zeroes that effect's type, its points stay.
+            int32 taken = Amount(BigVoodoo, EFFECT_1, player);
+            for (Unit* ally : Allies(player, me, FieldRadius(player, BigVoodoo, EFFECT_1, 10.0f)))
                 if (ally != player)
+                {
                     Field(ally, VoodooProtectionSpell);
+                    if (taken < 0)
+                        if (Aura* protection = ally->GetAura(VoodooProtectionSpell, _owner))
+                            if (AuraEffect* effect = protection->GetEffect(EFFECT_0); effect && effect->GetAmount() != taken)
+                                effect->ChangeAmount(taken);
+                }
         }
         if (entry == NpcMarionette)
         {

@@ -23,7 +23,12 @@ enum AirElementalSpells : uint32
     SPELL_AURAT_GALE = 500019,
     SPELL_FLURRY_READY = 807465,
     SPELL_FLURRY_DOT = 807555,
-    SPELL_FLURRY_DEBUFF = 807464
+    SPELL_FLURRY_DEBUFF = 807464,
+    // 804830 Skyfall force-casts 807134 on the pet: "The next instance of damage will unleash
+    // an Aether Strike" (807133). 807134 is an aura 42 with ProcFlags 0 and no spell_proc
+    // row, so SpellMgr skips it (P-045); the pet's damage proc below supplies the event.
+    SPELL_SKYFALL_READY = 807134,
+    SPELL_SKYFALL_STRIKE = 807133
 };
 
 enum AirElementalEntries : uint32
@@ -86,7 +91,7 @@ class aura_ascension_air_invigoration : public AuraScript
     bool Validate(SpellInfo const*) override
     {
         return ValidateSpellInfo({SPELL_GENERATE_INVIGORATION, SPELL_AURAT_SCRIPTS_PROC, SPELL_AURAT_GALE,
-            SPELL_FLURRY_READY, SPELL_FLURRY_DOT});
+            SPELL_FLURRY_READY, SPELL_FLURRY_DOT, SPELL_SKYFALL_READY, SPELL_SKYFALL_STRIKE});
     }
 
     bool CheckProc(ProcEventInfo& event)
@@ -117,10 +122,30 @@ class aura_ascension_air_invigoration : public AuraScript
             GetTarget()->CastCustomSpell(SPELL_FLURRY_DOT, SPELLVALUE_BASE_POINT0, amount,
                 event.GetActionTarget(), true);
         }
+        if (owner && GetTarget()->HasAura(SPELL_SKYFALL_READY, GetTarget()->GetGUID()))
+        {
+            // Removed first: the strike's own hit comes back here and must not consume again.
+            GetTarget()->RemoveAurasDueToSpell(SPELL_SKYFALL_READY, GetTarget()->GetGUID());
+            // "${$807133m1+$807133ppl1+$spa*1}": the owner's spell power is snapshot (coefficient 1,
+            // the tooltip's), as for Flurry. 807133 carries no coefficient of its own, so the
+            // pet's spell power is not added a second time. The triggered cast ignores its
+            // CasterAuraSpell 573249, which the pet does not have.
+            // CalcValue(nullptr): the per-level part (ppl 15 above BaseLevel 59) is added once,
+            // by the pet's own cast (SpellInfo.cpp:463-482 applies it even to a custom base).
+            SpellInfo const* strike = sSpellMgr->GetSpellInfo(SPELL_SKYFALL_STRIKE);
+            int32 amount = strike->Effects[EFFECT_0].CalcValue(nullptr) +
+                int32(owner->SpellBaseDamageBonusDone(strike->GetSchoolMask()) * 1.0f);
+            GetTarget()->CastCustomSpell(SPELL_SKYFALL_STRIKE, SPELLVALUE_BASE_POINT0, amount,
+                event.GetActionTarget(), true);
+        }
         if (owner && owner->HasActiveSpell(SPELL_AURAT_SCRIPTS) &&
             roll_chance_i(sSpellMgr->GetSpellInfo(SPELL_AURAT_SCRIPTS_PROC)->ProcChance))
         {
-            owner->CastSpell(owner, SPELL_AURAT_GALE, true);
+            // 500019's only target is TARGET_UNIT_MASTER (27), resolved through
+            // m_caster->GetCharmerOrOwner(): cast by the player himself it found no target and
+            // the empowerment never existed (same trap as Xoroth 500605/803254). AddAura skips
+            // target selection and places it on the player with the player as caster.
+            owner->AddAura(SPELL_AURAT_GALE, owner);
             if (Aura* empowerment = owner->GetAura(SPELL_AURAT_GALE, owner->GetGUID()))
                 empowerment->SetCharges(1); // Native spell modifiers consume one charge for the whole Gale cast.
         }

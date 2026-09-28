@@ -181,7 +181,8 @@ class aura_ascension_barbarian_event : public AuraScript
             case 804141: return outgoing && info && Ranged(event) && sid != 520518 &&
                 !(event.GetTypeMask() & PROC_FLAG_DONE_RANGED_AUTO_ATTACK) && event.GetProcSpell() &&
                 event.GetProcSpell()->TryMarkScriptEventHandled(27);
-            case 712468: return outgoing && (event.GetTypeMask() & PROC_FLAG_KILL);
+            case 712468:
+            case 803814: return outgoing && (event.GetTypeMask() & PROC_FLAG_KILL);
             default: return false;
         }
     }
@@ -207,7 +208,8 @@ class aura_ascension_barbarian_event : public AuraScript
             case 707389:
             case 801549:
             case 800943:
-            case 712468: cast(560521); break;
+            case 712468:
+            case 803814: cast(560521); break;
             case 800131: cast(802760); break;
             case 560880:
                 cast(561019, false);
@@ -248,7 +250,17 @@ class aura_ascension_barbarian_event : public AuraScript
                 }
                 break;
             case 805811: cast(583020, false); break;
-            case 805804: ExtendLimited(2000, AscensionSpellSafe::Duration(805807, 15000)); break;
+            case 805804:
+            {
+                // Fury of the North raises the cap with SPELLMOD_DURATION on 805807; only the
+                // Barbarian who cast this party aura has the talent.
+                int32 cap = AscensionSpellSafe::Duration(805807, 15000);
+                if (Unit* caster = GetCaster())
+                    if (Player* modOwner = caster->GetSpellModOwner())
+                        modOwner->ApplySpellMod(805807, SPELLMOD_DURATION, cap);
+                ExtendLimited(2000, cap);
+                break;
+            }
             case 706354: cast(562323); break;
             case 801782:
                 cast(801783, false);
@@ -315,7 +327,25 @@ class aura_ascension_barbarian_event : public AuraScript
                         int32(uint64(event.GetHealInfo()->GetEffectiveHeal()) * 30 / 100), pet, TRIGGERED_FULL_MASK);
                 break;
             case 801759:
-            case 803499: ExtendLimited(1000, owner->HasAura(300497) ? 20000 : 10000); break;
+            case 803499:
+            {
+                // The extension is 560016's own amount (1 s), which Bloodthirsty doubles for 801759.
+                int32 extension = 1000;
+                if (SpellInfo const* increase = AscensionSpellSafe::Get(560016))
+                    extension = increase->Effects[id == 801759 ? EFFECT_0 : EFFECT_1].CalcValue(owner);
+                int32 cap = owner->HasAura(300497) ? 20000 : 10000;
+                if (id == 801759)
+                {
+                    // "up to a maximum of 10 [20] sec": a cap on the remaining duration.
+                    // Extend() clamps to the cap, so never let it shorten a longer aura.
+                    Aura* outrage = GetAura();
+                    if (outrage && outrage->GetDuration() < cap)
+                        Extend(owner, id, std::max(0, extension), cap);
+                }
+                else
+                    ExtendLimited(std::max(0, extension), cap);
+                break;
+            }
             case 804141:
             {
                 float chance = 20.0f;
@@ -352,12 +382,45 @@ class aura_ascension_barbarian_event : public AuraScript
         _executing = false;
     }
 
+    // Full Tankard (805814) is the CasterAuraSpell of Ale of the God-King and nothing in the
+    // DBC applies it. The Fill Level passive (500061) survives death and ticks every 2 s:
+    // restore the marker if anything removed it. The tick still grants Fill Level.
+    void KeepFullTankard(AuraEffect const* /*effect*/)
+    {
+        Unit* target = GetTarget();
+        if (target->IsAlive() && Owner(target) && !target->HasAura(805814))
+            target->AddAura(805814, target);
+    }
+
     void Register() override
     {
         DoCheckProc += AuraCheckProcFn(aura_ascension_barbarian_event::Check);
         OnProc += AuraProcFn(aura_ascension_barbarian_event::Proc);
         AfterEffectApply += AuraEffectApplyFn(aura_ascension_barbarian_event::ResetExtension,
             EFFECT_ALL, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK);
+        if (m_scriptSpellId == 500061)
+            OnEffectPeriodic += AuraEffectPeriodicFn(aura_ascension_barbarian_event::KeepFullTankard,
+                EFFECT_0, SPELL_AURA_PERIODIC_TRIGGER_SPELL);
+    }
+};
+
+// Clanlord's Totem: allies in 560530 deal ${$AP*0.35} Frost on direct damage. The DBC
+// value is 0; take the Barbarian's attack power when the aura is applied.
+class aura_ascension_barbarian_clanlord : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_barbarian_clanlord);
+
+    void Amount(AuraEffect const* /*effect*/, int32& amount, bool& canBeRecalculated)
+    {
+        canBeRecalculated = false;
+        Unit* caster = GetCaster();
+        amount = caster ? int32(std::max(0.0f, caster->GetTotalAttackPowerValue(BASE_ATTACK) * 0.35f)) : 0;
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_barbarian_clanlord::Amount,
+            EFFECT_0, SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE);
     }
 };
 
@@ -400,6 +463,7 @@ class aura_ascension_barbarian_bleed : public AuraScript
 void AddAscensionBarbarianEventScripts()
 {
     RegisterSpellScript(aura_ascension_barbarian_event);
+    RegisterSpellScript(aura_ascension_barbarian_clanlord);
     RegisterSpellScript(spell_ascension_barbarian_conversion);
     RegisterSpellScript(aura_ascension_barbarian_bleed);
 }
