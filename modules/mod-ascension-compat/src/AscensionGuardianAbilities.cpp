@@ -248,10 +248,64 @@ class aura_ascension_guardian_advance : public AuraScript
             EFFECT_1, SPELL_AURA_FORCE_MOVE_FORWARD, AURA_EFFECT_HANDLE_REAL);
     }
 };
+
+// Hold the Line (803830) promises immunity to incapacitate, disorient, knockback and grip, but its
+// three effects only carry mechanics 6 (grip) and 2 (disorient) and the knockback effect. The
+// unused "Hold the Line | SLS" twin 803939 shows the missing part: mechanics 14 and 30.
+class aura_ascension_guardian_hold_the_line : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_guardian_hold_the_line);
+
+    void Apply(AuraEffect const* /*effect*/, AuraEffectHandleModes /*mode*/)
+    {
+        Unit* target = GetTarget();
+        target->ApplySpellImmune(GetId(), IMMUNITY_MECHANIC, MECHANIC_KNOCKOUT, true);
+        target->ApplySpellImmune(GetId(), IMMUNITY_MECHANIC, MECHANIC_SAPPED, true);
+        if (GetSpellInfo()->HasAttribute(SPELL_ATTR1_IMMUNITY_PURGES_EFFECT))
+            target->RemoveAurasWithMechanic((1ULL << MECHANIC_KNOCKOUT) | (1ULL << MECHANIC_SAPPED),
+                AURA_REMOVE_BY_DEFAULT, GetId());
+    }
+
+    // Apply and Removed both hang on the LAST effect (symmetric: same HasEffect mask).
+    // Unit::_UnapplyAura removes effects 0..2 in order, so the core handlers of all three
+    // effects have already run when Removed is called.
+    void Removed(AuraEffect const* /*effect*/, AuraEffectHandleModes /*mode*/)
+    {
+        Unit* target = GetTarget();
+        // ApplySpellImmune(false) erases every entry of this spell id, including those of another
+        // Guardian's Hold the Line still covering the target (this application is already out of
+        // the applied list here). Keep ours, and give back the native DBC immunities that the core
+        // handlers (ApplyAllSpellImmunitiesTo, HandleAuraModEffectImmunity) have just erased.
+        if (target->HasAura(GetId()))
+        {
+            for (SpellEffectInfo const& eff : GetSpellInfo()->Effects)
+            {
+                if (!eff.IsAura())
+                    continue;
+                if (eff.ApplyAuraName == SPELL_AURA_MECHANIC_IMMUNITY && eff.MiscValue > 0 && eff.MiscValue < MAX_MECHANIC)
+                    target->ApplySpellImmune(GetId(), IMMUNITY_MECHANIC, uint32(eff.MiscValue), true);
+                else if (eff.ApplyAuraName == SPELL_AURA_EFFECT_IMMUNITY && eff.MiscValue > 0)
+                    target->ApplySpellImmune(GetId(), IMMUNITY_EFFECT, uint32(eff.MiscValue), true);
+            }
+            return;
+        }
+        target->ApplySpellImmune(GetId(), IMMUNITY_MECHANIC, MECHANIC_KNOCKOUT, false);
+        target->ApplySpellImmune(GetId(), IMMUNITY_MECHANIC, MECHANIC_SAPPED, false);
+    }
+
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(aura_ascension_guardian_hold_the_line::Apply,
+            EFFECT_2, SPELL_AURA_MECHANIC_IMMUNITY, AURA_EFFECT_HANDLE_REAL);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_guardian_hold_the_line::Removed,
+            EFFECT_2, SPELL_AURA_MECHANIC_IMMUNITY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
 }
 
 void AddAscensionGuardianAbilityScripts()
 {
     RegisterSpellScript(spell_ascension_guardian_ability);
     RegisterSpellScript(aura_ascension_guardian_advance);
+    RegisterSpellScript(aura_ascension_guardian_hold_the_line);
 }

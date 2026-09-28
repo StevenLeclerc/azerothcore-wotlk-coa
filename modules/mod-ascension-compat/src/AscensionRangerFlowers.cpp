@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "Creature.h"
 #include "EventMap.h"
+#include "Log.h"
 #include "MotionMaster.h"
 #include "Player.h"
 #include "Random.h"
@@ -28,7 +29,8 @@ enum RangerFlowerSpells : uint32
     SPELL_HIGHLANDER_STACKS = 707539,
     SPELL_HIGHLANDER_READY = 712427,
     SPELL_HIGHLANDER_REDUCTION = 712428,
-    SPELL_ADVANTAGE = 804329
+    SPELL_ADVANTAGE = 804329,
+    SPELL_FALCONS_CALL = 804715
 };
 
 enum RangerFlowerEntries : uint32
@@ -37,6 +39,9 @@ enum RangerFlowerEntries : uint32
     NPC_RED_FLOWER = 454240,
     EVENT_FLOWER_OWNER_CHECK = 1
 };
+
+// Records whose effect 1 reset Falcon's Call (see ranger_flower_metadata).
+constexpr uint32 FalconsCallResetters[] = {561005, 800246, 800251, 520588, 803507, 803508, 803510, 803720};
 
 Player* FlowerOwner(Creature* flower)
 {
@@ -277,6 +282,24 @@ public:
             info->Effects[EFFECT_2].Effect = 0; // Award only after a successful summon and with the talent.
         if (info->Id == SPELL_HIGHLANDER_REDUCTION)
             info->StackAmount = 1; // The active talent promises one 40% reduction, not four stacking copies.
+
+        // The flowers and the falcons (561005, 800246, 803507, 803508, 803510, 803720, 520588) and
+        // Falcon's Call's own summon 800251 carry an effect 165 on Falcon's Call 804715 worth 0
+        // (bp -1, dice 1), which ModifyAscensionCooldown reads as "reset": each one cleared the
+        // 90 s cooldown. No spellmod gives these effects a value. The real reductions (Falcon
+        // Caller 560941, Razorquills 705073, bp -2001) are not touched by this match.
+        bool neutralized = false;
+        for (SpellEffectInfo& effect : info->Effects)
+            if (effect.Effect == SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN && effect.MiscValue == int32(SPELL_FALCONS_CALL) &&
+                effect.BasePoints == -1 && effect.DieSides == 1 && effect.RealPointsPerLevel == 0.0f)
+            {
+                effect.Effect = 0;
+                neutralized = true;
+            }
+        if (!neutralized)
+            for (uint32 id : FalconsCallResetters)
+                if (info->Id == id)
+                    LOG_ERROR("module.ascension_compat", "Skipped unexpected Falcon's Call reset record {}", info->Id);
     }
 };
 

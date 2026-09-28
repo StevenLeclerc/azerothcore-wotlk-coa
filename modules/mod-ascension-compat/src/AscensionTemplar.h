@@ -22,6 +22,7 @@ struct TemplarState
     bool event = false;
     bool oath = false;
     bool retribution = false;
+    uint32 mending = 0; // Mending Ward stacks being consumed by the single 806352 heal
 };
 Player* Owner(Unit const* unit);
 TemplarState& State(Player* player);

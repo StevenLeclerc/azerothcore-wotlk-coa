@@ -26,8 +26,12 @@ enum RippleSpells : uint32
     Oblivion = 560388,
     Protection = 560394,
     Resilience = 560396,
-    StaggerDebt = 806733
+    StaggerDebt = 806733,
+    Babify = 520499,
+    MassBabify = 520855
 };
+
+constexpr int32 BabifyPlayerDuration = 8 * IN_MILLISECONDS; // text only: "(8 sec vs players)"
 
 bool IsRippleHelper(uint32 id)
 {
@@ -277,6 +281,14 @@ public:
             if (Unit* caster = aura->GetCaster(); IsChannelActive(caster))
                 if (Aura* channel = caster->GetAura(Ripple, caster->GetGUID()))
                     duration = channel->GetDuration();
+        // Babify and Mass Babify: "40 sec (8 sec vs players)", players' pets included. The core's
+        // generic 10 s limit and diminishing returns still apply afterwards.
+        if ((aura->GetId() == Babify || aura->GetId() == MassBabify) && aura->GetType() == UNIT_AURA_TYPE &&
+            duration > 0)
+            if (Unit const* caster = aura->GetCaster(); caster && caster->IsPlayer() &&
+                caster->getClass() == CLASS_CHRONOMANCER)
+                if (Unit const* victim = aura->GetUnitOwner(); victim && victim->GetCharmerOrOwnerPlayerOrPlayerItself())
+                    duration = std::min(duration, BabifyPlayerDuration);
     }
 };
 

@@ -1,0 +1,23 @@
+-- =====================================================================================
+-- mod-ascension-compat — Guardian : coefficient de puissance d'attaque de Pulverize et Ram.
+--
+-- L'infobulle (Spell.dbc, champ 170, lue sur les 17 rangs) annonce ${$m1+0+$AP*0.355}
+-- pour Pulverize et ${$m1+0+$AP*0.385} pour Ram. La migration
+-- data/sql/updates/pending_db_world/rev_20260831_02_local_coa_changelog.sql
+-- (« CoA changelog 69620/69621 ») avait pose 0.4 et 0.42 dans spell_bonus_data : la part
+-- AP frappait ~12,7 % (Pulverize) et ~9,1 % (Ram) plus fort que l'affichage.
+-- DECISION EN ATTENTE DU COMMANDITAIRE (revue adverse du 28/09) : ce fichier est INERTE,
+-- VOLONTAIREMENT (option B par defaut, bilan final Guardian du 28/09) : aucune ligne active.
+-- 0.4 / 0.42 viennent d'un outil qui recopie les notes de version officielles CoA ; dans la
+-- meme migration, Spear Throw (0.665) egale son infobulle : il est possible que ce soient les
+-- deux infobulles qui soient en retard sur un renforcement voulu. Ecart consigne en
+-- signale_non_corrige. Option A (serveur aligne sur l'infobulle, -11 % / -8 % sur la part AP) :
+-- decommenter les deux UPDATE ci-dessous, puis « reload spell_bonus_data » par RA, sans compiler.
+-- Option B (garder 0.4 / 0.42) : ne rien faire ; seul un patch DBC client corrigerait l'infobulle.
+-- Retour arriere de l'option A : ap_bonus 0.4 (Pulverize) et 0.42 (Ram) sur les memes entrees.
+-- =====================================================================================
+-- UPDATE `spell_bonus_data` SET `ap_bonus` = 0.355, `comments` = 'Guardian Pulverize - tooltip AP*0.355'
+-- WHERE `entry` IN (800311, 802439, 802440, 802441, 802442, 802443, 573286, 573292);
+--
+-- UPDATE `spell_bonus_data` SET `ap_bonus` = 0.385, `comments` = 'Guardian Ram - tooltip AP*0.385'
+-- WHERE `entry` IN (802284, 573204, 573205, 573206, 573207, 573208, 573209, 573210, 573211);

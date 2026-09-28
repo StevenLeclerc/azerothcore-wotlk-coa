@@ -654,6 +654,8 @@ public:
     [[nodiscard]] TriggerCastFlags GetTriggeredCastFlags() const { return _triggeredCastFlags; }
 
     [[nodiscard]] SpellSchoolMask GetSpellSchoolMask() const { return m_spellSchoolMask; }
+    // CoA: lets a script change the school of the whole cast before its effects run (OnSpellBeforeEffects).
+    void SetSpellSchoolMask(SpellSchoolMask mask) { m_spellSchoolMask = mask; }
 
  protected:
     bool HasGlobalCooldown() const;

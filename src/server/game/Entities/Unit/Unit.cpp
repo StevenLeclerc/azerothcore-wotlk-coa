@@ -10227,7 +10227,15 @@ uint32 Unit::SpellHealingBonusTaken(Unit* caster, SpellInfo const* spellProto, u
     if (maxval)
         AddPct(TakenTotalMod, maxval);
 
-    TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_HEALING_RECEIVED_PCT);
+    // MiscValue is a school mask: 0 or all schools means any heal (27 of the 28 DBC records);
+    // Vital Shield 504849 (misc 40) only raises Shadow and Nature healing, as its tooltip says.
+    TakenTotalMod *= GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_HEALING_RECEIVED_PCT,
+        [spellProto](AuraEffect const* aurEff)
+        {
+            uint32 const mask = uint32(aurEff->GetMiscValue()) & SPELL_SCHOOL_MASK_ALL;
+            return !mask || mask == SPELL_SCHOOL_MASK_ALL || !spellProto ||
+                (mask & spellProto->GetSchoolMask()) != 0;
+        });
 
     // Tenacity increase healing % taken
     if (AuraEffect const* Tenacity = GetAuraEffect(58549, 0))

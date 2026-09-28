@@ -17,7 +17,7 @@ struct ClassSpell
     std::uint32_t SpellId;
 };
 
-inline constexpr std::array<ClassSpell, 844> ClassSpells =
+inline constexpr std::array<ClassSpell, 846> ClassSpells =
 {{
     {12, 1, 81},
     {12, 1, 107},
@@ -347,6 +347,7 @@ inline constexpr std::array<ClassSpell, 844> ClassSpells =
     {20, 1, 500125},
     {20, 1, 552011},
     {20, 1, 802310},
+    {20, 2, 582767}, // Taldaram's Torment Rage: 3 Rage per Torment tick (spell_proc 2026_09_28_26), CoA 2026-09-28
     {20, 2, 800772},
     {20, 4, 504296},
     {20, 4, 573299},
@@ -420,6 +421,7 @@ inline constexpr std::array<ClassSpell, 844> ClassSpells =
     {22, 1, 5019},
     {22, 1, 6603},
     {22, 1, 552011},
+    {22, 1, 572391}, // Nozdormu's Wisdom rank 1: ranks 2-5 upgrade only an owned root, CoA 2026-09-28
     {22, 1, 801303},
     {22, 1, 804418},
     {22, 2, 680389},
@@ -865,7 +867,7 @@ inline constexpr std::array<ClassSpell, 844> ClassSpells =
     {32, 60, 561265},
 }};
 
-inline constexpr std::array<ClassSpell, 270> LegacyGeneratedClassSpells =
+inline constexpr std::array<ClassSpell, 269> LegacyGeneratedClassSpells =
 {{
     {12, 1, 15590},
     {12, 2, 500915},
@@ -1010,7 +1012,6 @@ inline constexpr std::array<ClassSpell, 270> LegacyGeneratedClassSpells =
     {22, 0, 800852},
     {22, 4, 800856},
     {22, 6, 800857},
-    {22, 15, 801294},
     {22, 8, 801303},
     {22, 1, 804280},
     {22, 0, 804464},

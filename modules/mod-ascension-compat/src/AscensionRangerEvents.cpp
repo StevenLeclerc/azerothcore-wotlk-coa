@@ -8,6 +8,7 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <algorithm>
+#include <limits>
 
 namespace
 {
@@ -46,16 +47,22 @@ enum RangerEventSpells : uint32
     // "You have a War Falcon active! Generating 1 Focus per second.$?s705098[ Reduces
     // damage taken by ${$w3}%.][]" -- that Focus line is effect 1, value 1 per second.
     SPELL_WAR_FALCON_COUNT = 680278,
-    // Dead branch today, and deliberately kept. The only Ranger SPELL_EFFECT_SUMMON
-    // aimed at a "Dragonhawk" is 573058 "Dragonhawk Tamer", EffectMiscValue 52393, and
-    // creature_template has no 52393 (50264 and 50393 both exist, both named "War
-    // Falcon"). No creature can carry 681394, so this counter is always absent. The
-    // call below costs one failed lookup and becomes right the day the creature exists.
+    // The only Ranger SPELL_EFFECT_SUMMON aimed at a "Dragonhawk" is 573058 "Dragonhawk
+    // Tamer", EffectMiscValue 52393. creature_template had no 52393: the SQL
+    // 2026_09_28_58_ascension_ranger_complements.sql creates it (a copy of War Falcon
+    // 50393) with 681394 in creature_template_addon, and gives 573056 its spell_proc.
+    // Until that SQL is applied, this counter is always absent.
     SPELL_DRAGONHAWK_COUNT = 681394,
     // Resource and payloads.
     SPELL_ADVANTAGE = 804329,
     SPELL_PHOENIX_PLUMES_PROC = 520558,
-    SPELL_PRECISION_SHOT_WEAKNESS = 800578
+    SPELL_PRECISION_SHOT_WEAKNESS = 800578,
+    // Nettoyage du 2026-09-28.
+    SPELL_GUIDANCE = 532261,
+    SPELL_GUIDANCE_SHARE = 632512,
+    SPELL_ADVANTAGE_FARSTRIDER = 520614,
+    SPELL_HORN_CD_REDUCTION = 807001,
+    SPELL_HORN_CD_REDUCTION_2 = 520640
 };
 
 // 804329 carries StackAmount 5 in the client DBC, and the Phoenix Plumes text says
@@ -90,6 +97,18 @@ int32 RangerWingmanAmount(Unit const* master)
     return int32(std::clamp<int64>(amount, -100, 100));
 }
 
+// 532261 Guidance: "Increases your Physical and Nature damage dealt by $632512s1% for each War
+// Falcon or Dragonhawk you have active." Effect 0 (MOD_DAMAGE_PERCENT_DONE, misc 9) holds 0 in the
+// DBC and 632512, the per-companion share, is cast by nothing. Counted like Wingman, one
+// application of 680278 / 681394 per live companion; 632512 itself is not cast, since two falcons
+// would give it a single application.
+int32 RangerGuidanceAmount(Unit const* master)
+{
+    SpellInfo const* share = sSpellMgr->GetSpellInfo(SPELL_GUIDANCE_SHARE);
+    int64 companions = int64(master->GetAuraCount(SPELL_WAR_FALCON_COUNT)) + int64(master->GetAuraCount(SPELL_DRAGONHAWK_COUNT));
+    return share ? int32(std::clamp<int64>(companions * share->Effects[EFFECT_0].CalcValue(), 0, 100)) : 0;
+}
+
 void RefreshRangerWingman(Unit* unit)
 {
     Player* master = unit ? unit->ToPlayer() : nullptr;
@@ -97,7 +116,33 @@ void RefreshRangerWingman(Unit* unit)
         return;
     if (AuraEffect* wingman = master->GetAuraEffect(SPELL_WINGMAN, EFFECT_2))
         wingman->RecalculateAmount();
+    if (AuraEffect* guidance = master->GetAuraEffect(SPELL_GUIDANCE, EFFECT_0))
+        guidance->RecalculateAmount();
 }
+
+class aura_ascension_ranger_guidance : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_ranger_guidance);
+
+    bool Validate(SpellInfo const*) override
+    {
+        return ValidateSpellInfo({SPELL_WAR_FALCON_COUNT, SPELL_DRAGONHAWK_COUNT, SPELL_GUIDANCE_SHARE});
+    }
+
+    void CalcAmount(AuraEffect const*, int32& amount, bool& canBeRecalculated)
+    {
+        // Kept recalculable, for RefreshRangerWingman.
+        canBeRecalculated = true;
+        Unit* master = GetUnitOwner();
+        amount = master && master->IsPlayer() && master->getClass() == CLASS_RANGER ? RangerGuidanceAmount(master) : 0;
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_ranger_guidance::CalcAmount,
+            EFFECT_0, SPELL_AURA_MOD_DAMAGE_PERCENT_DONE);
+    }
+};
 
 // 705098 "Wingman": "Reduces all damage taken by $680278s3% for each War Falcon or
 // Dragonhawk you have active." Its effect 2 is the empty container the client reads:
@@ -133,7 +178,7 @@ class aura_ascension_ranger_wingman : public AuraScript
 // (the companion only carries effect 2, which is not an area aura effect).
 // Unit::_UnapplyAura erases the application from m_appliedAuras before unapplying its
 // effects, so GetAuraCount already excludes the departing companion at removal time.
-// Only the 680278 line can fire today: nothing can carry 681394, see its enum note.
+// 681394 is carried by the Dragonhawk 52393 once its SQL is applied, see its enum note.
 class aura_ascension_ranger_companion_count : public AuraScript
 {
     PrepareAuraScript(aura_ascension_ranger_companion_count);
@@ -259,10 +304,70 @@ class spell_ascension_ranger_swiftshot : public SpellScript
         OnHit += SpellHitFn(spell_ascension_ranger_swiftshot::Weaken);
     }
 };
+
+// 806368 Woodland Arrow (all seven ranks): "reducing the cooldown of active Horn spells by
+// $/1000;520614s2 sec. [...] increased for each stack of Advantage". Effects 1 and 2 trigger
+// 807001 / 520640 (SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN on the four Horns), whose value is 0:
+// only 520614 "Advantage Farstrider Hidden" (e1, ALL_EFFECTS -2000 on their FF2 0x1000) gave them
+// one, and nothing casts 520614 (companion of the retired Farstrider spec). A zero delta is the
+// core's RESET sentinel (SpellEffects.cpp:303-313): every arrow cleared the Horns' 60 s cooldown.
+// 520614 is not added to the Advantage companions: its effect 0 (EFFECT1 -1000 on FF0 0x4) would
+// also hit Rusty Shiv 681459 and Deepwood Poison 802800.
+// 807001 does not need a unit target, so EffectTriggerSpell casts it in LAUNCH mode, once per cast
+// (SpellEffects.cpp:1217-1228): the hook is OnEffectLaunch, and the Advantage pile is still whole
+// there (HandleLaunchPhase, Spell.cpp:3993, before the decrement in OnSpellCast).
+class spell_ascension_ranger_woodland_arrow : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_ranger_woodland_arrow);
+
+    bool Validate(SpellInfo const*) override
+    {
+        return ValidateSpellInfo({SPELL_ADVANTAGE, SPELL_ADVANTAGE_FARSTRIDER, SPELL_HORN_CD_REDUCTION, SPELL_HORN_CD_REDUCTION_2});
+    }
+
+    bool Load() override
+    {
+        Unit* caster = GetCaster();
+        return caster && caster->IsPlayer() && caster->getClass() == CLASS_RANGER;
+    }
+
+    void Reduce(SpellEffIndex index)
+    {
+        // Never the native trigger: at 0 it resets the Horns.
+        PreventHitDefaultEffect(index);
+        Unit* caster = GetCaster();
+        SpellInfo const* trigger = sSpellMgr->GetSpellInfo(GetSpellInfo()->Effects[index].TriggerSpell);
+        SpellInfo const* share = sSpellMgr->GetSpellInfo(SPELL_ADVANTAGE_FARSTRIDER);
+        Aura const* advantage = caster->GetAura(SPELL_ADVANTAGE, caster->GetGUID());
+        if (!trigger || !share || !advantage || !advantage->GetStackAmount() ||
+            (trigger->Id != SPELL_HORN_CD_REDUCTION && trigger->Id != SPELL_HORN_CD_REDUCTION_2))
+            return;
+        int64 const delta = int64(advantage->GetStackAmount()) * share->Effects[EFFECT_1].CalcValue();
+        if (delta >= 0)
+            return;
+        CustomSpellValues values;
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+            if (trigger->Effects[i].Effect == SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN)
+                // Passed as is: SetSpellValue removes the die side CalcValue adds back.
+                values.AddSpellMod(SpellValueMod(SPELLVALUE_BASE_POINT0 + i),
+                    int32(std::max<int64>(delta, std::numeric_limits<int32>::min())));
+        SpellCastTargets targets;
+        targets.SetUnitTarget(caster);
+        caster->CastSpell(targets, trigger, &values, TRIGGERED_FULL_MASK);
+    }
+
+    void Register() override
+    {
+        OnEffectLaunch += SpellEffectFn(spell_ascension_ranger_woodland_arrow::Reduce, EFFECT_1, SPELL_EFFECT_TRIGGER_SPELL);
+        OnEffectLaunch += SpellEffectFn(spell_ascension_ranger_woodland_arrow::Reduce, EFFECT_2, SPELL_EFFECT_TRIGGER_SPELL);
+    }
+};
 }
 
 void AddSC_AscensionRangerEvents()
 {
+    RegisterSpellScript(aura_ascension_ranger_guidance);
+    RegisterSpellScript(spell_ascension_ranger_woodland_arrow);
     RegisterSpellScript(aura_ascension_ranger_wingman);
     RegisterSpellScript(aura_ascension_ranger_companion_count);
     RegisterSpellScript(spell_ascension_ranger_phoenix_plumes);

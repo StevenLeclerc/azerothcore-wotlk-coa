@@ -32,8 +32,25 @@ enum ChronomancerEventSpells : uint32
     UnmakerOfRealities  = 706107, // "Unmaker of Realities"       passive DUMMY on the Chronomancer
     Hasten              = 801304, // "Hasten"                     speed / melee haste / spell haste on an ally
     HastenScaling       = 803382, // "Hasten" / SLS               ProcChance 25, effect 0 amount 30, trigger 803706
-    HastyStrike         = 803706  // "Hasty Strike" / Damage      effect 0 = SCHOOL_DAMAGE, target 6 ENEMY
+    HastyStrike         = 803706, // "Hasty Strike" / Damage      effect 0 = SCHOOL_DAMAGE, target 6 ENEMY
+    TemporalAnomaly     = 806315, // "Temporal Anomaly"           effect 0 = aura 69, 50, miscB 50, 10 s
+    TemporalAnomalyHeal = 807799, // "Temporal Anomaly"           effect 0 = HEAL, target 1
+    BlackHole           = 707557, // "Black Hole"                 effect 0 = aura 112 misc 20007 (inert), 15
+    MindMelt            = 572851, // "Mind Melt"                  effect 0 = aura 214 (no handler), 5 stacks
+    BorrowedTime        = 680373, // "Borrowed Time"              effect 0 = aura 354, 10, trigger 680374
+    BorrowedTimeHeal    = 680374, // "Borrowed Time" / Proc       effect 0 = HEAL, target 1
+    Overcorrection      = 707657, // "Overcorrection"             effect 0 = aura 354, 6 per tick
+    OvercorrectionHot   = 561231, // "Overcorrection"             effect 0 = aura 8, 1 s, 5 s
+    InfiniteShield      = 520457, // "Infinite Shield"            effect 0 = aura 42 -> 520458, on an ally
+    InfiniteShieldHeal  = 520458, // "Infinite Shield"            effect 0 = HEAL, target 21
+    PureChaos           = 807569, // "Pure Chaos"                 effect 0 = aura 42 -> 807571, ProcChance 10
+    IncarnationOfChaos  = 570067
 };
+
+// Chronomancer family 28 flags named by Black Hole's tooltip: Unmake and Melt Reality (flags1,
+// the DBC mask of the talent) and Chromatic Shard (flags2 0x2000000, missing from that mask).
+constexpr uint32 BlackHoleFlags1 = 0x2000000 | 0x200;
+constexpr uint32 BlackHoleFlags2 = 0x2000000;
 
 // Client SpellModOp carried by Rapid Acceleration's first effect. MAX_SPELLMOD is 32,
 // so AuraEffect::CalculateSpellMod drops it with a debug line and the effect is inert.
@@ -442,10 +459,213 @@ class aura_ascension_hasten_strikes : public AuraScript
     }
 };
 
+// Temporal Anomaly: "causing 50% of the damage taken to be stored and converted into healing at the
+// end of the duration". Read as a delayed heal: the damage is still taken (the text promises no
+// reduction), 50% of it is banked and paid back on expiry. The core would otherwise treat aura 69 as a
+// 50-point shield that vanishes on the first hit.
+class aura_ascension_temporal_anomaly : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_temporal_anomaly);
+
+    uint64 _stored = 0;
+    int32 _percent = 0;
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({TemporalAnomalyHeal}); }
+
+    void Unlimited(AuraEffect const*, int32& amount, bool& recalculate)
+    {
+        recalculate = false;
+        _percent = std::clamp(amount, 0, 100); // 50, after the caster's modifiers
+        amount = -1;
+    }
+
+    void Store(AuraEffect*, DamageInfo& damage, uint32& absorb)
+    {
+        absorb = 0;
+        if (damage.GetDamage() && _percent > 0)
+            _stored = std::min<uint64>(_stored + ScaleDown(damage.GetDamage(), uint32(_percent)),
+                uint64(std::numeric_limits<int32>::max()));
+    }
+
+    void Release(AuraEffect const*, AuraEffectHandleModes)
+    {
+        Unit* target = GetTarget();
+        if (GetTargetApplication()->GetRemoveMode() != AURA_REMOVE_BY_EXPIRE || !_stored ||
+            !target->IsAlive() || !target->IsInWorld())
+            return;
+        SpellInfo const* heal = sSpellMgr->GetSpellInfo(TemporalAnomalyHeal);
+        // Not a CastCustomSpell: the banked amount must not receive spell power again.
+        HealInfo healing(target, target, uint32(_stored), heal, heal->GetSchoolMask());
+        target->HealBySpell(healing);
+        _stored = 0;
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_temporal_anomaly::Unlimited,
+            EFFECT_0, SPELL_AURA_SCHOOL_ABSORB);
+        OnEffectAbsorb += AuraEffectAbsorbFn(aura_ascension_temporal_anomaly::Store, EFFECT_0);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_temporal_anomaly::Release,
+            EFFECT_0, SPELL_AURA_SCHOOL_ABSORB, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+// Black Hole: "+$s1% damage of Chromatic Shard, Melt Reality and Unmake against slowed enemies"
+// (aura 112 misc 20007 is read by nothing for this class). End of Time: "Mind Melt now also
+// increases the target's periodic damage taken from you by $s1% per stack" (aura 214, no handler);
+// the talent raises Mind Melt effect 0, already multiplied by the stacks (SpellAuraEffects.cpp:652).
+class chronomancer_damage_taken : public UnitScript
+{
+public:
+    chronomancer_damage_taken() : UnitScript("chronomancer_damage_taken", true,
+        {UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN, UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK}) { }
+
+    static bool BlackHoleSpell(SpellInfo const* info)
+    {
+        return info->SpellFamilyName == 28 &&
+            ((info->SpellFamilyFlags[1] & BlackHoleFlags1) || (info->SpellFamilyFlags[2] & BlackHoleFlags2));
+    }
+
+    static uint64 ApplyBlackHole(Unit* target, Player* player, SpellInfo const* info, uint64 damage)
+    {
+        if (!BlackHoleSpell(info) || !target->HasAuraType(SPELL_AURA_MOD_DECREASE_SPEED))
+            return damage;
+        AuraEffect const* talent = player->GetAuraEffect(BlackHole, EFFECT_0);
+        if (!talent || talent->GetAmount() <= 0)
+            return damage;
+        return damage * uint64(100 + talent->GetAmount()) / 100;
+    }
+
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* info) override
+    {
+        Player* player = EventChronomancer(attacker);
+        if (!player || !target || !info || damage <= 0 || info->HasAttribute(SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS))
+            return;
+        damage = ClampToInt32(ApplyBlackHole(target, player, info, uint64(damage)));
+    }
+
+    void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const* info) override
+    {
+        Player* player = EventChronomancer(attacker);
+        // The hook is also called for periodic heals (SpellAuraEffects.cpp:6827).
+        if (!player || !target || !info || !damage || info->HasAttribute(SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS) ||
+            !(info->HasAura(SPELL_AURA_PERIODIC_DAMAGE) || info->HasAura(SPELL_AURA_PERIODIC_LEECH)))
+            return;
+        uint64 result = ApplyBlackHole(target, player, info, damage);
+        if (AuraEffect const* melt = target->GetAuraEffect(MindMelt, EFFECT_0, player->GetGUID());
+            melt && melt->GetAmount() > 0)
+            result = result * uint64(100 + melt->GetAmount()) / 100;
+        damage = uint32(ClampToInt32(result));
+    }
+};
+
+// Borrowed Time: "Taking Physical damage now heals you equal to $s1% of the damage dealt. Can only
+// occur once per sec." The once-per-second is the spell_proc Cooldown.
+class aura_ascension_borrowed_time : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_borrowed_time);
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({BorrowedTimeHeal}); }
+
+    void Heal(AuraEffect const* effect, ProcEventInfo& event)
+    {
+        PreventDefaultAction();
+        Unit* target = GetTarget();
+        DamageInfo* damage = event.GetDamageInfo();
+        if (!damage || !damage->GetDamage() || !target->IsAlive() || effect->GetAmount() <= 0)
+            return;
+        uint64 amount = ScaleDown(damage->GetDamage(), uint32(std::min(effect->GetAmount(), 100)));
+        if (!amount)
+            return;
+        // Exactly the announced share: no spell power on top.
+        HealInfo healing(target, target, uint32(ClampToInt32(amount)), sSpellMgr->GetSpellInfo(BorrowedTimeHeal),
+            SPELL_SCHOOL_MASK_NORMAL);
+        target->HealBySpell(healing);
+    }
+
+    void Register() override
+    {
+        OnEffectProc += AuraEffectProcFn(aura_ascension_borrowed_time::Heal, EFFECT_0, SPELL_AURA_ANY);
+    }
+};
+
+// Overcorrection: "Overhealing done by Correct the Mistake now applies a heal over time effect to the
+// ally equal to 30% of the healing done over $561231d." 707657 carries 6 per tick (5 ticks).
+class aura_ascension_overcorrection : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_overcorrection);
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({OvercorrectionHot}); }
+
+    void Apply(AuraEffect const* effect, ProcEventInfo& event)
+    {
+        PreventDefaultAction();
+        HealInfo* heal = event.GetHealInfo();
+        Unit* ally = event.GetActionTarget();
+        if (!heal || !ally || !ally->IsAlive() || heal->GetHeal() <= heal->GetEffectiveHeal() || effect->GetAmount() <= 0)
+            return;
+        uint64 tick = ScaleDown(heal->GetHeal() - heal->GetEffectiveHeal(), uint32(std::min(effect->GetAmount(), 100)));
+        if (tick)
+            GetTarget()->CastCustomSpell(OvercorrectionHot, SPELLVALUE_BASE_POINT0, ClampToInt32(tick), ally, true,
+                nullptr, effect);
+    }
+
+    void Register() override
+    {
+        OnEffectProc += AuraEffectProcFn(aura_ascension_overcorrection::Apply, EFFECT_0, SPELL_AURA_ANY);
+    }
+};
+
+// Infinite Shield: "Each time they take damage, they will be healed ... and lose 1 charge". The heal
+// 520458 targets an ally (21); the native trigger would aim it at the attacker.
+class aura_ascension_infinite_shield : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_infinite_shield);
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({InfiniteShieldHeal}); }
+
+    void Heal(AuraEffect const* effect, ProcEventInfo&)
+    {
+        PreventDefaultAction();
+        Unit* bearer = GetTarget();
+        if (bearer->IsAlive())
+            // Cast by the bearer on itself, computed on the Chronomancer as original caster.
+            bearer->CastSpell(bearer, InfiniteShieldHeal, true, nullptr, effect, GetCasterGUID());
+    }
+
+    void Register() override
+    {
+        OnEffectProc += AuraEffectProcFn(aura_ascension_infinite_shield::Heal, EFFECT_0, SPELL_AURA_PROC_TRIGGER_SPELL);
+    }
+};
+
+// Pure Chaos: "While Incarnation of Chaos is active, all damage dealt now has a $h% chance ...".
+class aura_ascension_pure_chaos : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_pure_chaos);
+
+    bool Check(ProcEventInfo& event)
+    {
+        DamageInfo* damage = event.GetDamageInfo();
+        return damage && damage->GetDamage() && GetTarget()->HasAura(IncarnationOfChaos, GetTarget()->GetGUID());
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_pure_chaos::Check);
+    }
+};
+
 void ApplyChronomancerEventContracts(SpellInfo* info)
 {
     if (!info || info->SpellFamilyName != 28)
         return;
+    if (info->Id == OvercorrectionHot)
+    {
+        // The tick is a share of a heal that already carried the caster's bonuses.
+        info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+        info->Effects[EFFECT_0].BonusMultiplier = 0.0f;
+    }
     if (info->Id == RapidAcceleration)
     {
         // The client row asks for SpellModOp 40. MAX_SPELLMOD is 32, so
@@ -487,6 +707,12 @@ public:
 void AddSC_AscensionChronomancerEvents()
 {
     new chronomancer_event_contracts();
+    new chronomancer_damage_taken();
+    RegisterSpellScript(aura_ascension_temporal_anomaly);
+    RegisterSpellScript(aura_ascension_borrowed_time);
+    RegisterSpellScript(aura_ascension_overcorrection);
+    RegisterSpellScript(aura_ascension_infinite_shield);
+    RegisterSpellScript(aura_ascension_pure_chaos);
     RegisterSpellScript(aura_ascension_vast_infinite);
     RegisterSpellScript(aura_ascension_timeguard);
     RegisterSpellScript(aura_ascension_accelerated_recovery);

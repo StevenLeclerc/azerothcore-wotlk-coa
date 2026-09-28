@@ -239,9 +239,17 @@ void Zealotry(Player* player, Unit* target, bool repeat)
     if (!target || !player->IsValidAttackTarget(target))
         return;
     Cast(player, target, 801450);
-    if (!repeat && ((player->HasAura(572554) && roll_chance_i(10)) ||
-                    (!player->HasAura(572554) && player->HasAura(572548) && roll_chance_i(10))))
-        Zealotry(player, target, true);
+    if (repeat)
+        return;
+    // Blade Sermon: "$h% chance to trigger twice", the owned rank's own chance (5%, then 10%).
+    uint32 sermon = player->HasAura(572554) ? 572554 : player->HasAura(572548) ? 572548 : 0;
+    if (SpellInfo const* rank = sermon ? sSpellMgr->GetSpellInfo(sermon) : nullptr)
+    {
+        float chance = float(rank->ProcChance);
+        player->ApplySpellMod(sermon, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+        if (roll_chance_f(chance))
+            Zealotry(player, target, true);
+    }
 }
 uint32 HopeCount(Player* player)
 {
@@ -328,6 +336,10 @@ class templar_player : public PlayerScript
                 AscensionTemplar::Cast(player, player, 567572);
             else if (!player->HasAura(560096) && player->HasAura(567572, player->GetGUID()))
                 player->RemoveAurasDueToSpell(567572, player->GetGUID());
+            // Blade of Faith "can critically strike": its periodic damage only crits under an aura 286 naming it,
+            // which is this hidden passive, taught by nothing. Passive and not saved: kept on here, as HexCrit.
+            if (player->IsAlive() && player->IsInWorld() && !player->HasAura(500016))
+                player->AddAura(500016, player);
         }
     }
     void OnPlayerLogout(Player* player) override

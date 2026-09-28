@@ -108,19 +108,14 @@ class ranger_dirty_fighter_casts : public AllSpellScript
 {
 public:
     ranger_dirty_fighter_casts() : AllSpellScript("ranger_dirty_fighter_casts",
-        {ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_CAN_PREPARE, ALLSPELLHOOK_ON_SPELL_CHECK_CAST,
-            ALLSPELLHOOK_ON_BEFORE_EFFECTS}) { }
+        {ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_ON_SPELL_CHECK_CAST, ALLSPELLHOOK_ON_BEFORE_EFFECTS}) { }
 
     bool IsPunch(Spell* spell) const
     {
         return spell->GetSpellInfo()->Id == SPELL_SUCKER_PUNCH && spell->GetSpellInfo()->SpellFamilyName == 27;
     }
 
-    bool CanPrepare(Spell* spell, SpellCastTargets const*, AuraEffect const*) override
-    {
-        return !IsPunch(spell) || CanSuckerPunch(DirtyFighter(spell->GetCaster()));
-    }
-
+    // No CanPrepare: a refusal there ends the cast silently and leaks the Spell (Spell::prepare).
     void OnSpellCheckCast(Spell* spell, bool, SpellCastResult& result) override
     {
         if (IsPunch(spell) && !CanSuckerPunch(DirtyFighter(spell->GetCaster())))

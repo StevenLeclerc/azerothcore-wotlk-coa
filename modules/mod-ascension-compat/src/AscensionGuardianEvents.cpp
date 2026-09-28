@@ -81,7 +81,8 @@ class aura_ascension_guardian_event : public AuraScript
             case 653410:
                 return block && owner->HealthBelowPct(75);
             case 707137:
-                return block && owner->HasAura(800317);
+                // Resilient: "Blocking an attack while Raise Shield is active" (500168), not Tower Formation.
+                return block && owner->HasAura(500168);
             case 804383:
                 return block || (outgoing && Direct(event));
             case 300927:
@@ -248,6 +249,50 @@ class aura_ascension_guardian_converted_bleed : public AuraScript
     }
 };
 
+// Net Throw (802304, and its test copy 802309) effect 1 is SPELL_AURA_MOD_CRIT_CHANCE_FOR_CASTER
+// with Centurion Strike's class mask (0, 0, 2048); Clinch Brawler (707310) raises it to 100.
+// Unit::GetUnitCriticalChance and Unit::SpellTakenCritChance sum that aura without reading its
+// mask, so every white hit and every spell of the Guardian crit the netted target. The aura is
+// kept at 0 and the promised Centurion Strike crit is granted in OnSpellCalculatedTarget below.
+class aura_ascension_guardian_net_throw : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_guardian_net_throw);
+
+    void Amount(AuraEffect const* /*effect*/, int32& amount, bool& /*recalculate*/)
+    {
+        amount = 0;
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_guardian_net_throw::Amount,
+            EFFECT_1, SPELL_AURA_MOD_CRIT_CHANCE_FOR_CASTER);
+    }
+};
+
+void ClinchBrawlerCrit(Spell* spell, Unit* target, TargetInfo& hit)
+{
+    if (!spell || !target || hit.crit)
+        return;
+    // Same caster as Spell::DoAllEffectOnLaunchTarget: the original caster when there is one.
+    Unit* caster = spell->GetOriginalCaster() ? spell->GetOriginalCaster() : spell->GetCaster();
+    SpellInfo const* info = spell->GetSpellInfo();
+    if (!caster || !info)
+        return;
+    // Same selection as the DBC mask of Net Throw effect 1: family 24, flags[2] & 2048.
+    if (info->SpellFamilyName != 24 || !(info->SpellFamilyFlags[2] & 2048))
+        return;
+    // Same exclusions as Unit::SpellTakenCritChance, which returns 0 before adding the aura.
+    if (info->HasAttribute(SPELL_ATTR2_CANT_CRIT) || !info->IsCritCapable() ||
+        info->DmgClass == SPELL_DAMAGE_CLASS_NONE)
+        return;
+    // Set after the roll: the native aura added its +100 after resilience (SpellTakenCritChance),
+    // so a chance hook placed before it would fall short against a resilient player.
+    if (caster->HasAura(707310) &&
+        (target->HasAura(802304, caster->GetGUID()) || target->HasAura(802309, caster->GetGUID())))
+        hit.crit = true;
+}
+
 void CaptureGuardianEcho(Spell* spell)
 {
     if (!spell || spell->IsTriggered())
@@ -280,7 +325,8 @@ void ApplyGuardianEcho(Spell* spell, Unit* target, uint32 damage)
 class guardian_echo : public AllSpellScript
 {
 public:
-    guardian_echo() : AllSpellScript("guardian_echo", { ALLSPELLHOOK_ON_BEFORE_EFFECTS, ALLSPELLHOOK_ON_HIT_RESULT }) { }
+    guardian_echo() : AllSpellScript("guardian_echo", { ALLSPELLHOOK_ON_BEFORE_EFFECTS, ALLSPELLHOOK_ON_HIT_RESULT,
+        ALLSPELLHOOK_ON_CALCULATED_TARGET }) { }
 
     void OnSpellBeforeEffects(Spell* spell, Unit*, SpellInfo const*) override
     {
@@ -291,6 +337,11 @@ public:
     {
         ApplyGuardianEcho(spell, target, damage);
     }
+
+    void OnSpellCalculatedTarget(Spell* spell, Unit* target, TargetInfo& hit) override
+    {
+        ClinchBrawlerCrit(spell, target, hit);
+    }
 };
 }
 
@@ -299,5 +350,6 @@ void AddAscensionGuardianEventScripts()
     RegisterSpellScript(aura_ascension_guardian_event);
     RegisterSpellScript(spell_ascension_guardian_converted_damage);
     RegisterSpellScript(aura_ascension_guardian_converted_bleed);
+    RegisterSpellScript(aura_ascension_guardian_net_throw);
     new guardian_echo();
 }

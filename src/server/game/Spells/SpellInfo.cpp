@@ -387,6 +387,16 @@ uint32 SpellEffectInfo::GetItemArmorSubclassMask() const
         return EffectIndex == EFFECT_0 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
             MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 8 ? 8 : 0;
 
+    // Templar Blessed Padding (ranks 301311, 301360): "armor contribution from mail items" only.
+    if (_spellInfo && _spellInfo->SpellFamilyName == 25 &&
+        (_spellInfo->Id == 301311 || _spellInfo->Id == 301360))
+        return EffectIndex == EFFECT_0 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
+            MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 8 ? 8 : 0;
+    // Templar Aman'thul's Guidance (300527): "armor contribution from leather and mail items" (2|3).
+    if (_spellInfo && _spellInfo->SpellFamilyName == 25 && _spellInfo->Id == 300527)
+        return EffectIndex == EFFECT_0 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
+            MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 12 ? 12 : 0;
+
     if (_spellInfo && _spellInfo->Id == 800132 && _spellInfo->SpellFamilyName == 18)
         return EffectIndex == EFFECT_1 && IsAura(SPELL_AURA_MOD_BASE_RESISTANCE_PCT) &&
             MiscValue == SPELL_SCHOOL_MASK_NORMAL && MiscValueB == 64 ? 64 : 0;

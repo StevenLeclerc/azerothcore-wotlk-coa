@@ -16,6 +16,7 @@ enum ChronomancerMovement : uint32
     InfiniteClone = 50071,
     CloneAppearance = 45204,
     Rewind = 801294,
+    InfiniteClonePlayerAura = 704154,
     RewindSlow = 572883,
     Backtrack = 706973,
     Displacement = 806727
@@ -57,6 +58,13 @@ struct npc_ascension_infinite_clone : ScriptedAI
         for (Creature* clone : previous)
             if (clone != me)
                 clone->ToTempSummon()->UnSummon();
+
+        // Rewind requires CasterAuraSpell 704154, which nothing posed: the client greyed the button
+        // and CheckCast refused it. Cast by the clone, its effect 2 (APPLY_AREA_AURA_OWNER, 100 yd)
+        // puts it on the owner and it leaves with the clone; effects 0-1 (immunities) stay on the
+        // clone. Rewind's own effect 1 removes it from the player; whether the clone's area aura
+        // then lays it again before the clone leaves is not measured (to check in game).
+        me->CastSpell(me, InfiniteClonePlayerAura, true);
     }
 
     void UpdateAI(uint32) override { }

@@ -19,7 +19,7 @@ class aura_ascension_templar_event : public AuraScript
     PrepareAuraScript(aura_ascension_templar_event);
     bool Check(ProcEventInfo& event)
     {
-        Player* player = Owner(GetId() == 300513 ? GetCaster() : GetTarget());
+        Player* player = Owner(GetId() == 300513 || GetId() == 500752 ? GetCaster() : GetTarget());
         if (!player || !event.GetActionTarget())
             return false;
         SpellInfo const* info = event.GetSpellInfo();
@@ -92,6 +92,9 @@ class aura_ascension_templar_event : public AuraScript
             return heal && event.GetActionTarget() != player && player->IsInRaidWith(event.GetActionTarget());
         case 803158:
             return damage && melee && !periodic;
+        case 500752: // Scarlet Hammer's debuff, on the enemy: the Templar's auto attacks against it (spell_proc 500752)
+            return damage && (event.GetTypeMask() & PROC_FLAG_TAKEN_MELEE_AUTO_ATTACK) &&
+                   event.GetActionTarget() == GetTarget();
         case 706325:
             return damage && (Named(info, 804906) || Named(info, 801445) || Named(info, 803872)) &&
                    player->IsWithinMeleeRange(event.GetActionTarget()) && roll_chance_i(15);
@@ -107,7 +110,12 @@ class aura_ascension_templar_event : public AuraScript
         case 803892:
         case 803893:
         case 801463:
-        case 801466:
+        case 801466: {
+            // "causing damaging abilities to ...": one Libram proc per cast, not one per target hit (Proc marks the
+            // Spell). Each Righteous Tempest tick is its own Spell, so each tick still procs once.
+            Spell const* spell = event.GetProcSpell();
+            return damage && !periodic && Ability(info) && !(spell && spell->GetScriptValue(id));
+        }
         case 804932:
         case 806516:
             return damage && !periodic && Ability(info);
@@ -118,7 +126,7 @@ class aura_ascension_templar_event : public AuraScript
     void Proc(ProcEventInfo& event)
     {
         PreventDefaultAction();
-        Player* player = Owner(GetId() == 300513 ? GetCaster() : GetTarget());
+        Player* player = Owner(GetId() == 300513 || GetId() == 500752 ? GetCaster() : GetTarget());
         if (!player)
             return;
         bool processing = State(player).event;
@@ -183,6 +191,10 @@ class aura_ascension_templar_event : public AuraScript
         case 712346:
             ReduceDebt(player, 0, true);
             break;
+        case 500752:
+            // Scarlet Restoration heals the Templar (effect 0, caster); its effect 1 wants the enemy as target.
+            Cast(player, GetTarget(), 807182);
+            break;
         case 524620:
             player->CastSpell(player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(), 524619, true);
             break;
@@ -198,8 +210,11 @@ class aura_ascension_templar_event : public AuraScript
         case 806353: {
             uint32 stacks = GetStackAmount();
             GetAura()->Remove();
-            for (uint32 i = 0; i < stacks; ++i)
-                Cast(player, player, 806352);
+            // One heal worth every stack: 806352 wants its target below 35% health (TargetAuraState 13), so a
+            // second heal after the first lifted the Templar above it was refused and the stack lost.
+            State(player).mending = stacks;
+            Cast(player, player, 806352);
+            State(player).mending = 0;
             break;
         }
         case 801441:
@@ -207,17 +222,28 @@ class aura_ascension_templar_event : public AuraScript
         case 803891:
         case 803892:
         case 803893:
-            Cast(player, target, 804148);
-            break;
         case 801463:
-            Cast(player, player, 804150);
-            break;
         case 801466:
-            Reduce(player, 501562, std::abs(Amount(575328)));
+            if (Spell const* spell = event.GetProcSpell())
+                const_cast<Spell*>(spell)->SetScriptValue(id, 1);
+            if (id == 801463)
+                Cast(player, player, 804150);
+            else if (id == 801466)
+                Reduce(player, 501562, std::abs(Amount(575328)));
+            else
+                Cast(player, target, 804148);
             break;
         case 804932:
+            // "Casting ... grants you Unbroken Creed": one stack per cast, not one per target hit.
             if (!Breaker(info) && (!info || info->Id != 500689))
+            {
+                Spell const* spell = event.GetProcSpell();
+                if (spell && spell->GetScriptValue(804932))
+                    break;
+                if (spell)
+                    const_cast<Spell*>(spell)->SetScriptValue(804932, 1);
                 Cast(player, player, 807648);
+            }
             break;
         case 806516:
             if (!player->HasAura(806517))

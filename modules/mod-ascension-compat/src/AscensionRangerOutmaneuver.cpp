@@ -257,10 +257,10 @@ public:
     {
         if (spell->GetSpellInfo()->Id != SPELL_DECOY_STRIKE || spell->GetSpellInfo()->SpellFamilyName != 27)
             return true;
-        Unit* target = ManeuverTarget(ManeuverRanger(spell->GetCaster()));
-        if (!target)
-            return false;
-        spell->m_targets.SetUnitTarget(target);
+        // Never refuse here: a false return ends the cast in Spell::prepare with no cast result
+        // sent and the Spell never freed. OnSpellCheckCast refuses with BAD_TARGETS instead.
+        if (Unit* target = ManeuverTarget(ManeuverRanger(spell->GetCaster())))
+            spell->m_targets.SetUnitTarget(target);
         return true;
     }
 

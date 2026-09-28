@@ -67,6 +67,22 @@ void ReplaceStandard(Player* player, ObjectGuid replacement = ObjectGuid::Empty)
             }
 }
 
+// Valiance (800629 slow, 800335 damage) and Spellwarding (500548 enemy area aura) judge their
+// targets from the standard. A TempSummon without SetMinion lacks UNIT_FLAG_PLAYER_CONTROLLED, so
+// the creature-vs-creature rule skipped neutral monsters and the PvP checks never ran against
+// unflagged players. The friendly standards (Recovery, Rallying, Might, Supremacy) keep their
+// faction-only reaction.
+bool OffensiveStandard(uint32 entry)
+{
+    return entry == 50057 || (entry >= 60057 && entry <= 60064) || entry == 220871;
+}
+
+void SyncStandardPvp(Creature* standard, Player* owner)
+{
+    // Not in the owner's m_Controlled, so Player::UpdatePvPState does not follow it.
+    standard->SetByteValue(UNIT_FIELD_BYTES_2, 1, owner->GetByteValue(UNIT_FIELD_BYTES_2, 1));
+}
+
 Player* StandardOwner(Unit* caster)
 {
     if (!caster || !caster->IsCreature() || !FindStandard(caster->GetEntry(), true))
@@ -124,6 +140,12 @@ struct npc_ascension_guardian_standard : ScriptedAI
         ownerGuid = owner->GetGUID();
         me->SetOwnerGUID(ownerGuid);
         me->SetFaction(owner->GetFaction());
+        if (OffensiveStandard(me->GetEntry()))
+        {
+            me->m_ControlledByPlayer = true;
+            me->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
+            SyncStandardPvp(me, owner);
+        }
         me->SetLevel(owner->GetLevel());
         me->SetReactState(REACT_PASSIVE);
         // A Standard is a banner, not a combatant: enemies cannot attack it and keep to its Guardian.
@@ -160,6 +182,8 @@ struct npc_ascension_guardian_standard : ScriptedAI
                 me->DespawnOrUnsummon();
                 return;
             }
+            if (OffensiveStandard(me->GetEntry()))
+                SyncStandardPvp(me, owner);
             RefreshTalents(owner);
             events.ScheduleEvent(STANDARD_OWNER_CHECK, Milliseconds(STANDARD_OWNER_CHECK_MS));
         }

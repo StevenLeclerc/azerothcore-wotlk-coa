@@ -121,6 +121,32 @@ class aura_ascension_resource_talent_refresh : public AuraScript
     }
 };
 
+// Replenishment 1257670 (Reverse Engineering, Pious, Foresight, Sun's Gift, Mojo Wave, Rot Lich...,
+// cast by Chronomancer, Sun Cleric, Witch Doctor, Witch Hunter, Venomancer, Pyromancer code):
+// "Replenishes 5% of your maximum mana every $t1 sec." The record is a plain PERIODIC_ENERGIZE
+// of 5 (MiscValueB 1 marks a percentage for the client only), and the core pays m_amount as is
+// (SpellAuraEffects.cpp, HandlePeriodicEnergizeAuraTick): 5 mana a tick. Scope the percentage
+// to this one spell rather than reading MiscValueB 1 generically in the core.
+class aura_ascension_replenishment_pct : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_replenishment_pct);
+
+    void CalcAmount(AuraEffect const* /*effect*/, int32& amount, bool& /*canBeRecalculated*/)
+    {
+        Unit* owner = GetUnitOwner();
+        if (!owner || amount <= 0)
+            return;
+        // A unit without mana gets 0, exactly what the core paid it before (no mana pool to fill).
+        amount = int32(CalculatePct(owner->GetMaxPower(POWER_MANA), amount));
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_replenishment_pct::CalcAmount,
+            EFFECT_0, SPELL_AURA_PERIODIC_ENERGIZE);
+    }
+};
+
 // stormbringer_superconductor (a launch-damage multiplier on Arm of Thorim) was removed on 2026-09-28
 // together with the DUMMY contract above: with 707038 applied by the class code, keeping it would
 // count Superconductor twice.
@@ -131,4 +157,5 @@ void AddSC_AscensionResourceTalents()
     new resource_talent_contracts();
     RegisterSpellScript(aura_ascension_resource_talent);
     RegisterSpellScript(aura_ascension_resource_talent_refresh);
+    RegisterSpellScript(aura_ascension_replenishment_pct);
 }

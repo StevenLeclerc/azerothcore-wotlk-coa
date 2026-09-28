@@ -67,8 +67,17 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].Effect = info->Effects[1].Effect = 0;
     if (id == 92109 || id == 803149)
     {
+        // Keeping the Oath's third effect grants Recently Parried or Dodged (681170), the CasterAuraSpell of every
+        // Sacred Swing rank, which nothing else gives a Templar. Kept for 92109 only (803149's is an aura 107);
+        // spell_proc 92109 limits it to dodges and parries taken, its ProcFlags override the zero below.
+        bool avoided = id == 92109 && info->Effects[2].Effect == SPELL_EFFECT_APPLY_AURA &&
+                       info->Effects[2].ApplyAuraName == SPELL_AURA_PROC_TRIGGER_SPELL &&
+                       info->Effects[2].TriggerSpell == 681170 &&
+                       info->Effects[2].TargetA.GetTarget() == TARGET_UNIT_CASTER;
         for (auto& effect : info->Effects)
             effect.Effect = 0;
+        if (avoided)
+            info->Effects[2].Effect = SPELL_EFFECT_APPLY_AURA;
         auto& effect = info->Effects[0];
         effect.Effect = SPELL_EFFECT_APPLY_AURA;
         effect.ApplyAuraName = SPELL_AURA_SCHOOL_ABSORB;
@@ -96,10 +105,22 @@ void ApplyContracts(SpellInfo* info)
     if ((id == 560650 || id == 561346) && info->Effects[0].ApplyAuraName == SPELL_AURA_MOD_CRIT_PCT &&
         info->Effects[0].MiscValue == SPELLMOD_CRITICAL_CHANCE && info->Effects[0].SpellClassMask)
     {
-        // Aggramar's Rage: Holy critical strike chance for the masked Holy abilities (Chastise, Scarlet Hammer,
-        // Blade of Faith). This core's crit aura ignores the mask and raised every crit chance instead.
+        // Aggramar's Rage: Holy critical strike chance for the masked Holy abilities (Chastise, Scarlet Hammer).
+        // This core's crit aura ignores the mask and raised every crit chance instead.
         info->Effects[0].ApplyAuraName = SPELL_AURA_ADD_FLAT_MODIFIER;
+        // Blade of Faith, every rank (803872-803880, word 1 bit 2048): the client's word 1 bit 64 names only the
+        // unreachable 803155. Its periodic crit reads this modifier through 500016 (aura 286).
+        info->Effects[0].SpellClassMask[1] |= 2048;
     }
+    // Blessing of Aggramar only refreshes Blade of Faith; its unmentioned -100% cost on Righteous Upheaval
+    // (word 1 bit 128) made every rank free for good.
+    if (id == 300502 && info->Effects[1].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
+        info->Effects[1].MiscValue == SPELLMOD_COST)
+        info->Effects[1].Effect = 0;
+    // Scourge-Defense Training: "damage and critical strike chance ... by $s1%"; the crit effect carried 20.
+    if (id == 520608 && info->Effects[1].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[1].MiscValue == SPELLMOD_EFFECT3 && info->Effects[1].BasePoints == 19)
+        info->Effects[1].BasePoints = 49;
     if (id == 520034 && info->Effects[0].ApplyAuraName == SPELL_AURA_MOD_DAMAGE_DONE_VERSUS_AURASTATE &&
         info->Effects[0].MiscValue == AURA_STATE_HEALTH_ABOVE_75_PERCENT && !info->Effects[0].SpellClassMask)
     {
@@ -107,6 +128,11 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].SpellClassMask = flag96(0, 67108864, 0);
         info->Effects[0].MiscValueB = ASCENSION_CLASSMASK_AURASTATE_DAMAGE;
     }
+    // Pious Sweep: "+25% damage to Chastise" against Tranquil Circle targets. The circle's damage-from-caster mask
+    // (word 1 0x4000001) also names every Righteous Upheaval rank through bit 0x1; keep Chastise's bit only.
+    if (id == 801205 && info->Effects[2].ApplyAuraName == SPELL_AURA_MOD_DAMAGE_FROM_CASTER &&
+        info->Effects[2].SpellClassMask == flag96(0, 67108865, 0))
+        info->Effects[2].SpellClassMask = flag96(0, 67108864, 0);
     if (id == 705284 && info->Effects[0].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
         info->Effects[0].MiscValue == SPELLMOD_DAMAGE && !info->Effects[2].Effect)
     {
@@ -181,10 +207,54 @@ void ApplyContracts(SpellInfo* info)
         info->ProcFlags = 0;
         info->ProcCharges = 0;
     }
+    // Argent Blade, every rank (spell_ranks 804929, 807263-807268): its third effect triggers Scourgebane and
+    // templar_casts casts it again on a damaging hit, two per swing. The module's cast is kept.
+    if ((id == 804929 || (id >= 807263 && id <= 807268)) &&
+        info->Effects[2].Effect == SPELL_EFFECT_TRIGGER_SPELL && info->Effects[2].TriggerSpell == 801832)
+        info->Effects[2].Effect = 0;
+    // Testament of Strength: "Your next 3 Titanstrikes"; the client carries no charges. Player::RemoveSpellMods
+    // spends one per Titanstrike its modifiers touch (ProcFlags stay 0), the third keeps its bonus.
+    if (id == 300514 && !info->ProcCharges)
+        info->ProcCharges = 3;
+    // Testament of Strength carries no family flags, so the Testament talents never reach it. Word 1 bit 32768 is
+    // carried by no family 25 spell and no class mask (Spell.dbc scan).
+    if (id == 300514 && !info->SpellFamilyFlags)
+        info->SpellFamilyFlags[1] |= 32768;
+    if (id == 705263 && info->Effects[0].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[0].MiscValue == SPELLMOD_DURATION)
+        info->Effects[0].SpellClassMask[1] |= 32768; // Deep Secrets: +10 sec to Testaments
+    if ((id == 803159 || id == 803844) && info->Effects[1].ApplyAuraName == SPELL_AURA_ADD_FLAT_MODIFIER &&
+        info->Effects[1].MiscValue == SPELLMOD_COOLDOWN)
+        info->Effects[1].SpellClassMask[1] |= 32768; // Chakra of Light: Testament cooldown
+    if (id == 804928 && info->Effects[0].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
+        info->Effects[0].MiscValue == SPELLMOD_COST)
+        info->Effects[0].SpellClassMask[1] |= 32768; // Mark of Aggramar: Testament of Strength's energy cost
+    // Sacred Restraint: "Cannot be targeted by Testaments". Ally Testaments test the target, self Testaments the
+    // caster; triggered casts (Tyr's Guard's Hope copies) skip the caster test. 102208 is a debuff, so the core
+    // also applies it to every unit these Testaments hit (Spell::PrepareTriggersExecutedOnHit): each ally reached
+    // by a Holy Cleave hop of Faith gets it too, and Strength's second application only refreshes it.
+    for (uint32 sid : {801478u, 501601u, 501602u, 501603u, 501604u, 501605u, 501606u, 801455u, 804228u})
+        if (id == sid && !info->ExcludeTargetAuraSpell)
+            info->ExcludeTargetAuraSpell = 102208;
+    for (uint32 sid : {500678u, 1397742u, 300514u})
+        if (id == sid && !info->ExcludeCasterAuraSpell)
+            info->ExcludeCasterAuraSpell = 102208;
     if (id == 801832 || id == 807035 || Family(info, 0, 262144) || id == 807890)
         for (auto& effect : info->Effects)
             if (effect.Effect && effect.TargetA.GetTarget() == TARGET_UNIT_TARGET_ENEMY && !effect.ChainTarget)
                 effect.ChainTarget = 1; // native spellmod adds additional targets to this first target
+    // Testament of Faith, every rank: Oath: Holy Cleave and Oath: Argent Blade add a jump target (SPELLMOD_JUMP_TARGETS
+    // on word 1 0x400000, carried by these seven ranks only), but a ChainTarget of 0 never reaches the jump search.
+    for (uint32 sid : {801478u, 501601u, 501602u, 501603u, 501604u, 501605u, 501606u})
+        if (id == sid)
+            for (auto& effect : info->Effects)
+                if (effect.Effect && effect.TargetA.GetTarget() == TARGET_UNIT_TARGET_ALLY && !effect.ChainTarget)
+                    effect.ChainTarget = 1; // alone, still a single target
+    // Divine Force, every rank (806153, 807800-807805): "... Holy damage", but the client ships a Physical school,
+    // armor-reduced and outside the Holy damage talents. The stun 807890 shares the bit and deals no damage: left out.
+    if (Family(info, 0, 262144) && id != 807890 && info->Effects[2].Effect == SPELL_EFFECT_SCHOOL_DAMAGE &&
+        info->SchoolMask == SPELL_SCHOOL_MASK_NORMAL)
+        info->SchoolMask = SPELL_SCHOOL_MASK_HOLY;
     if (id == 801202)
         dummy(0), dummy(1);
     if (id == 803843 || id == 807903 || id == 803219)
@@ -196,8 +266,7 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[1].BasePoints = int32(id - 803890); // one to four jumps beyond the primary target
     if (id == 300515)
         info->Effects[1].BasePoints = 5;
-    if (id == 801409)
-        AscensionContract::SetDuration(info, 8, "Templar");
+    // 801409 keeps its client duration of 0: Improved Benediction's +15 sec modifier alone gives the 15 sec.
     if (id == 807004)
         dummy(0), dummy(1); // next circle's first tick only; keep its full lifetime
     if (id == 806353)
@@ -316,6 +385,9 @@ class templar_scaling : public UnitScript
             value = float(Amount(527270, 2, player));
         if (info->Id == 803160 && index == 0)
             value = float(Amount(player->HasAura(803844) ? 803844 : 803159, 0, player));
+        // Mending Ward: "${$m1+0+$STA*.25}" of 806353, whose value the dummied aura 231 no longer forwards.
+        if (info->Id == 806352 && index == 0)
+            value = float(Amount(806353, EFFECT_0, player));
         for (auto const& row : TemplarCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {
@@ -325,8 +397,21 @@ class templar_scaling : public UnitScript
                          row.stamina * player->GetStat(STAT_STAMINA) + row.agility * player->GetStat(STAT_AGILITY);
                 value = std::clamp(value, 0.0f, float(INT32_MAX / 2));
             }
+        // Argent Blade, Righteous Lunge and Holy Cleave, every rank: the core adds effect 0's fixed bonus
+        // (NORMALIZED_WEAPON_DMG) to the weapon damage BEFORE effect 1's percentage multiplies the sum
+        // (SpellEffects.cpp, "Sequence is important"). The tooltip is "$s2% Weapon Damage plus X": divide the bonus
+        // by that percentage so only the weapon part is multiplied. Effect 1 has no coefficient row, and its
+        // CalcValue comes back here with index 1, which this test leaves alone.
+        if (index == 0 && (Named(info, 804929) || Named(info, 801443) || Named(info, 801445)) &&
+            info->Effects[1].Effect == SPELL_EFFECT_WEAPON_PERCENT_DAMAGE)
+            if (int32 pct = info->Effects[1].CalcValue(caster); pct > 0)
+                value = value * 100.0f / float(pct);
         if (info->Id == 806352 && index == 0)
+        {
             value += .25f * player->GetUInt32Value(PLAYER_FIELD_COMBAT_RATING_1 + CR_PARRY);
+            if (uint32 stacks = State(player).mending; stacks > 1)
+                value = std::min(value * float(stacks), float(INT32_MAX / 2));
+        }
     }
     void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* info) override
     {
@@ -344,13 +429,16 @@ class templar_scaling : public UnitScript
         Player* player = Owner(target);
         if (!player || !info || info->HasAttribute(SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS))
             return;
+        // The core also calls this hook for periodic heals (HandlePeriodicHealAurasTick): every reduction below
+        // is a damage taken reduction.
+        if (!info->HasAura(SPELL_AURA_PERIODIC_DAMAGE) && !info->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT) &&
+            !info->HasAura(SPELL_AURA_PERIODIC_LEECH))
+            return;
         damage = uint32(damage * Mitigation(player, attacker, info->SchoolMask));
-        // Light's Ward: its helper's periodic damage taken effect (-15%) has no core handler. This hook also runs for
-        // periodic heals, which the ward must not reduce.
+        // Light's Ward: its helper's periodic damage taken effect (-15%) has no core handler. Periodic heals already
+        // left above.
         if (AuraEffect const* ward = player->GetAuraEffect(301283, EFFECT_1))
-            if ((ward->GetMiscValue() & info->SchoolMask) &&
-                (info->HasAura(SPELL_AURA_PERIODIC_DAMAGE) || info->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT) ||
-                 info->HasAura(SPELL_AURA_PERIODIC_LEECH)))
+            if (ward->GetMiscValue() & info->SchoolMask)
                 damage = uint32(damage * std::max(0.0f, 1.0f + float(ward->GetAmount()) / 100.0f));
     }
 };

@@ -6,6 +6,8 @@
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellScript.h"
+#include <algorithm>
+#include <vector>
 
 namespace
 {
@@ -13,8 +15,26 @@ enum HemostasisSpells : uint32
 {
     SPELL_HEMOSTASIS = 681304,
     SPELL_HEMOSTASIS_READY = 302895,
-    SPELL_BLOOD_BURST = 803326
+    SPELL_BLOOD_BURST = 803326,
+    // Troisieme passe du 2026-09-28.
+    SPELL_HEMAL_EXCISION = 803681,       // DISPEL curse (20) on an ally
+    SPELL_EXCISION = 803733,             // e0 DUMMY on the enemy, e1 REMOVE_AURA 803734
+    SPELL_HEMAL_EXCISION_BUFF = 803734   // the 10 s window
 };
+
+// Hemal Excision: "siphoning all curse effects from them. You may reactivate this ability again within
+// $803734d to place these curse effects on an enemy." The dispel worked; the second half had no engine
+// (803682, 803733 and the buff were reached by nothing). The siphoned curses are kept on the window aura
+// itself (script values, gone with it), one packed entry each: spell id, stacks, remaining milliseconds.
+constexpr uint32 KEY_EXCISION_COUNT = 1;
+constexpr uint32 KEY_EXCISION_FIRST = 2;
+constexpr uint32 ExcisionMaxCurses = 20;  // 803681 effect 0 dispels at most 20 (bp 19 + 1)
+
+uint64 PackCurse(uint32 id, uint32 stacks, int32 duration)
+{
+    uint64 const ms = duration > 0 ? std::min<uint64>(uint64(duration), 0xFFFFFF) : 0;
+    return (uint64(id) << 32) | (uint64(std::min<uint32>(stacks, 0xFF)) << 24) | ms;
+}
 
 Player* HemostasisCaster(Unit* unit)
 {
@@ -142,6 +162,161 @@ class spell_ascension_blood_burst : public SpellScript
     }
 };
 
+// 803681 Hemal Excision: the curses are read before the dispel and compared after it, so that only what the
+// dispel actually took (a resisted dispel takes nothing) is siphoned.
+class spell_ascension_bloodmage_hemal_excision : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_bloodmage_hemal_excision);
+
+    struct Curse { uint32 id; ObjectGuid caster; uint32 stacks; int32 duration; };
+    std::vector<Curse> _before;
+
+    bool Validate(SpellInfo const* /*info*/) override
+    {
+        return ValidateSpellInfo({SPELL_EXCISION, SPELL_HEMAL_EXCISION_BUFF});
+    }
+
+    void Snapshot(SpellMissInfo missInfo)
+    {
+        _before.clear();
+        Unit* ally = GetHitUnit();
+        if (missInfo != SPELL_MISS_NONE || !ally)
+            return;
+        for (auto const& pair : ally->GetAppliedAuras())
+        {
+            Aura const* aura = pair.second->GetBase();
+            if (aura->GetSpellInfo()->Dispel == DISPEL_CURSE && !pair.second->IsPositive() && !aura->IsPassive())
+                _before.push_back({aura->GetId(), aura->GetCasterGUID(), std::max<uint32>(aura->GetStackAmount(), 1),
+                    aura->GetDuration()});
+        }
+    }
+
+    void Siphon()
+    {
+        Player* player = HemostasisCaster(GetCaster());
+        Unit* ally = GetHitUnit();
+        if (!player || !ally || _before.empty() || !player->IsAlive())
+            return;
+        std::vector<uint64> taken;
+        for (Curse const& curse : _before)
+        {
+            if (taken.size() >= ExcisionMaxCurses)
+                break;
+            Aura const* left = ally->GetAura(curse.id, curse.caster);
+            uint32 const remaining = left ? std::max<uint32>(left->GetStackAmount(), 1) : 0;
+            if (remaining < curse.stacks)
+                taken.push_back(PackCurse(curse.id, curse.stacks - remaining, curse.duration));
+        }
+        _before.clear();
+        if (taken.empty())
+            return;
+        player->CastSpell(player, SPELL_HEMAL_EXCISION_BUFF, TRIGGERED_FULL_MASK);
+        Aura* window = player->GetAura(SPELL_HEMAL_EXCISION_BUFF, player->GetGUID());
+        if (!window)
+            return;
+        window->SetScriptValue(KEY_EXCISION_COUNT, taken.size());
+        for (uint32 i = 0; i < taken.size(); ++i)
+            window->SetScriptValue(KEY_EXCISION_FIRST + i, taken[i]);
+    }
+
+    void Register() override
+    {
+        BeforeHit += BeforeSpellHitFn(spell_ascension_bloodmage_hemal_excision::Snapshot);
+        AfterHit += SpellHitFn(spell_ascension_bloodmage_hemal_excision::Siphon);
+    }
+};
+
+// 803734, the window: Hemal Excision's slot shows Excision 803733 while it lasts (Hemostasis idiom, P-144).
+class aura_ascension_bloodmage_hemal_excision_window : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_bloodmage_hemal_excision_window);
+
+    void Open(AuraEffect const*, AuraEffectHandleModes)
+    {
+        Player* player = HemostasisCaster(GetTarget());
+        if (!player || !player->HasActiveSpell(SPELL_HEMAL_EXCISION))
+            return;
+        if (player->GetSpellMap().find(SPELL_EXCISION) == player->GetSpellMap().end())
+            player->LearnTemporarySpellReplacementTarget(SPELL_EXCISION);
+        player->SetTemporarySpellReplacement(SPELL_HEMAL_EXCISION, SPELL_EXCISION);
+    }
+
+    void Close(AuraEffect const*, AuraEffectHandleModes)
+    {
+        if (Player* player = HemostasisCaster(GetTarget()))
+        {
+            if (player->GetTemporarySpellReplacement(SPELL_HEMAL_EXCISION) == SPELL_EXCISION)
+                player->SetTemporarySpellReplacement(SPELL_HEMAL_EXCISION, 0);
+            // Only a temporary copy is removed (removeSpell's last argument).
+            player->removeSpell(SPELL_EXCISION, SPEC_MASK_ALL, true);
+        }
+    }
+
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(aura_ascension_bloodmage_hemal_excision_window::Open,
+            EFFECT_0, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_bloodmage_hemal_excision_window::Close,
+            EFFECT_0, SPELL_AURA_DUMMY, AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+// 803733 Excision: "Apply all siphoned curses onto an enemy." The Bloodmage becomes their caster, with the
+// stacks and the time they had left, and the window closes. A miss or an immune target keeps the window
+// (and the curses) until it expires.
+class spell_ascension_bloodmage_excision : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_bloodmage_excision);
+
+    void Place(SpellEffIndex /*index*/)
+    {
+        Player* player = HemostasisCaster(GetCaster());
+        Unit* enemy = GetHitUnit();
+        if (!player || !enemy || !enemy->IsAlive() || !player->IsValidAttackTarget(enemy))
+            return;
+        Aura* window = player->GetAura(SPELL_HEMAL_EXCISION_BUFF, player->GetGUID());
+        if (!window)
+            return;
+        uint32 const count = uint32(std::min<uint64>(window->GetScriptValue(KEY_EXCISION_COUNT), ExcisionMaxCurses));
+        window->SetScriptValue(KEY_EXCISION_COUNT, 0);
+        for (uint32 i = 0; i < count && enemy->IsAlive(); ++i)
+        {
+            uint64 const packed = window->GetScriptValue(KEY_EXCISION_FIRST + i);
+            uint32 const id = uint32(packed >> 32);
+            uint32 const stacks = uint32((packed >> 24) & 0xFF);
+            int32 const duration = int32(packed & 0xFFFFFF);
+            if (!id)
+                continue;
+            Aura* curse = player->AddAura(id, enemy);
+            if (!curse)
+                continue;
+            if (duration > 0)
+            {
+                if (duration > curse->GetMaxDuration())
+                    curse->SetMaxDuration(duration);
+                curse->SetDuration(duration);
+            }
+            if (stacks > 1 && curse->GetStackAmount() < stacks)
+                curse->SetStackAmount(uint8(stacks));
+        }
+        // Closed here rather than by effect 1: the caster's own target entry can be resolved before the
+        // enemy's (a travel time, or the target order), and would take the record away first.
+        window->Remove();
+    }
+
+    void KeepWindow(SpellEffIndex index)
+    {
+        PreventHitDefaultEffect(index);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_bloodmage_excision::Place, EFFECT_0, SPELL_EFFECT_DUMMY);
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_bloodmage_excision::KeepWindow, EFFECT_1,
+            SPELL_EFFECT_REMOVE_AURA);
+    }
+};
+
 class hemostasis_contracts : public GlobalScript
 {
 public:
@@ -152,6 +327,13 @@ public:
         if (info && info->Id == SPELL_HEMOSTASIS_READY && info->SpellFamilyName == 26)
         {
             // The four-second replacement and its target GUID are transient.
+            info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
+            info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
+        }
+        // Hemal Excision's window holds the siphoned curses in memory only: a copy restored from
+        // `character_aura` would reopen the button with nothing to place.
+        if (info && info->Id == SPELL_HEMAL_EXCISION_BUFF && info->SpellFamilyName == 26)
+        {
             info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
             info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
         }
@@ -166,4 +348,8 @@ void AddSC_AscensionBloodmageHemostasis()
     RegisterSpellScript(spell_ascension_blood_burst);
     new hemostasis_burst_target();
     new hemostasis_contracts();
+    // Troisieme passe du 2026-09-28 (SQL compagnon 2026_09_28_26_ascension_bloodmage_nettoyage.sql, sections 5-7).
+    RegisterSpellScript(spell_ascension_bloodmage_hemal_excision);
+    RegisterSpellScript(aura_ascension_bloodmage_hemal_excision_window);
+    RegisterSpellScript(spell_ascension_bloodmage_excision);
 }

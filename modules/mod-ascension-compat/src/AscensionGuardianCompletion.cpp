@@ -279,6 +279,20 @@ void AscensionGuardian::ApplyContracts(SpellInfo* info)
     }
     if (id == 705377)
         info->ProcFlags = 0; // Honorable Demeanor belongs to the existing block callback.
+    if (id == 802895)
+    {
+        if (info->Effects[EFFECT_0].Effect == SPELL_EFFECT_ASCENSION_RESET_COOLDOWN &&
+            info->Effects[EFFECT_0].MiscValue == 802284)
+            // Guardbreaker's "Pulverize Reset" names Ram rank 1 only; the cooldown sits on the rank
+            // actually cast (802284, 573204-573211, all category 1096), so clear the category.
+            info->Effects[EFFECT_0].MiscValueB = 1;
+        else
+            // Guardian is not in the AscensionContract registry: without this line a DBC change
+            // would silently leave Guardbreaker resetting Ram rank 1 only.
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Guardian: 802895 Pulverize Reset refused (effect {}, misc {}), Ram category not cleared",
+                uint32(info->Effects[EFFECT_0].Effect), info->Effects[EFFECT_0].MiscValue);
+    }
     if (id == 706636 && info->Effects[EFFECT_0].IsAura(SPELL_AURA_MOD_DEBUFF_RESISTANCE) &&
         info->Effects[EFFECT_0].MiscValue == DISPEL_DISEASE)
         // Little Drummer: "Allies within 20 yds of you now gain 20% chance to resist
