@@ -81,8 +81,7 @@ void ApplyContracts(SpellInfo* info)
     }
     if (id == Dawn)
     {
-        dummy(0);
-        dummy(1);
+        dummy(0); // Slot 1 stays the native cast-time modifier on Dawnsear (Solar Conduit, 300321).
         info->ProcCharges = 10;
     }
     if (id == SolarPower)
@@ -104,7 +103,8 @@ void ApplyContracts(SpellInfo* info)
     if (id == 803492 || id == 807750 || id == 807751 || id == 807752 || id == 803500 || id == 807446 ||
         id == 805481 || id == 805491 || id == 681471)
         for (uint8 slot = 0; slot < MAX_SPELL_EFFECTS; ++slot)
-            if (info->Effects[slot].Effect)
+            // 807751 slot 1 (IGNORE_ARMOR on Glorious Execution) is kept alive for Vindicator.
+            if (info->Effects[slot].Effect && !(id == 807751 && slot == 1))
                 dummy(slot);
     if (id == 803238)
     {

@@ -70,7 +70,7 @@ class aura_ascension_sun_cleric_lifecycle : public AuraScript
         if (id == 680888)
             GetAura()->SetUsingCharges(false);
         if ((id == Dawn || id == 301265 || id == 301242) && (mode & AURA_EFFECT_HANDLE_REAPPLY))
-            GetAura()->SetCharges(id == Dawn ? 10 : id == 301265 ? 3 : 2);
+            GetAura()->SetCharges(id == Dawn ? GetAura()->CalcMaxCharges() : id == 301265 ? 3 : 2);
         if (id == Dawn || id == 301265 || id == 301242)
             GetAura()->SetUsingCharges(false);
         if (id == 301266)
@@ -90,11 +90,6 @@ class aura_ascension_sun_cleric_lifecycle : public AuraScript
             return;
         uint32 id = GetId();
         uint8 slot = effect->GetEffIndex();
-        if (id == Dawn && slot == 1)
-        {
-            amount = 1;
-            recalculate = false;
-        }
         if ((id == 680624 && slot == 0) || id == 301005 || id == 505340)
             recalculate = false;
         if (id == 561023 && slot == 2)

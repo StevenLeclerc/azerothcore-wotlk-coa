@@ -51,7 +51,10 @@ void Finish(Player* player, Spell* spell)
             if (Aura* aura = player->GetAura(id); aura && generation == aura->GetScriptValue(SolarPower))
             {
                 if ((id == 301265 || id == 301242) && aura->GetCharges() > 1)
+                {
                     aura->SetCharges(aura->GetCharges() - 1);
+                    aura->SetUsingCharges(false); // SetCharges re-arms core charge drops (RemoveSpellMods would take a 2nd one).
+                }
                 else
                     aura->Remove();
                 if (id == 680642)
@@ -122,13 +125,12 @@ public:
                 spell->SetScriptValue(Dawn, 1);
                 State(player).timers.ScheduleEvent(Dawn, 1s);
             }
-            if (AuraEffect* choice = dawn->GetEffect(EFFECT_1); choice && choice->GetAmount() &&
-                (player->HasSpell(92135) || player->HasAura(92135)))
+            if (State(player).dawnChoice && (player->HasSpell(92135) || player->HasAura(92135)))
             {
                 uint32 school = info->SchoolMask & (SPELL_SCHOOL_MASK_HOLY | SPELL_SCHOOL_MASK_FIRE);
                 if (school)
                 {
-                    choice->SetAmount(0);
+                    State(player).dawnChoice = false;
                     bool fire = school == SPELL_SCHOOL_MASK_FIRE;
                     player->RemoveAurasDueToSpell(fire ? Sunrise : Sunset);
                     Cast(player, player, fire ? Sunset : Sunrise);
@@ -138,7 +140,10 @@ public:
             }
             // Charges count qualifying casts even when their Vow cannot fulfill this event.
             if (dawn->GetCharges() > 1)
+            {
                 dawn->SetCharges(dawn->GetCharges() - 1);
+                dawn->SetUsingCharges(false); // Live EFFECT_1 cast-time mod: keep the core from dropping a 2nd charge.
+            }
             else
                 dawn->Remove();
         }
@@ -214,6 +219,9 @@ public:
             ReducePercent(player,id,std::abs(Amount(707528)));
         if (id == 520024)
             Valkyr(player, spell->m_targets.GetUnitTarget(),spell->GetScriptValue(DawnCast),spell->GetScriptValue(Dawn));
+        // The Chosen King (707079): casting Hammer of Kings grants Anointed (524998).
+        if (id == 804751 && player->HasAura(707079))
+            Cast(player, player, 524998);
         Finish(player, spell);
         Refresh(player);
     }
@@ -244,7 +252,13 @@ public:
         {
             if (Named(info, 800611))
             {
-                uint32 copied = CalculatePct(damage, Amount(707521));
+                // Read with the caster so Solemn Priest (804269) reaches the base share as its
+                // EFFECT1 spell mod. Arbiter of Light (302914) carries 0 of its own: its +100 is
+                // 807549 effect 2, which nothing applies, so it is added here under Vow of Light.
+                int32 pct = Amount(707521, 0, player);
+                if (player->HasAura(302914) && player->HasAura(807547))
+                    pct += Amount(807549, 2);
+                uint32 copied = CalculatePct(damage, std::max(0, pct));
                 Copy(player, player, 707522, copied);
                 if (player->HasAura(HolyForm) && player->HasAura(300353))
                     Copy(player, player, 805489, copied);
@@ -284,8 +298,10 @@ public:
                 }
             }
         }
-        if ((info->Id == 800691 || info->Id == 802566) && damage && player->HasAura(807451))
-            Mana(player, CalculatePct(damage, Amount(807451)));
+        // Arbiter of Grace (301313) under Vow of Grace: $807446s3 of Glorious Execution's damage.
+        if ((info->Id == 800691 || info->Id == 802566) && damage && player->HasAura(301313) &&
+            player->HasAura(803719))
+            Mana(player, CalculatePct(damage, std::max(0, Amount(807446, 2))));
         if (healing && player->HasAura(300344) && target->HasAura(Bless, player->GetGUID()) &&
             !spell->IsTriggered() && !spell->GetScriptValue(300344))
         {
@@ -398,7 +414,8 @@ class spell_ascension_sun_cleric_ability : public SpellScript
             done = true;
             if (Aura* aura = player->GetAura(Dawn))
             {
-                aura->SetCharges(10);
+                aura->SetCharges(aura->CalcMaxCharges(player)); // Guiding Glow (300324/300329) included.
+                aura->SetUsingCharges(false);
                 aura->SetDuration(aura->GetMaxDuration());
             }
         }

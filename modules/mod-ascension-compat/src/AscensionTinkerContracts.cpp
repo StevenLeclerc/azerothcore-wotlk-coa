@@ -208,7 +208,33 @@ void ApplyContracts(SpellInfo* info)
             effect.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_TARGET_ALLY);
     }
     if (id == 706692)
+    {
         info->Effects[1].Effect = 0; // Retain native turret appearance until an exact upgraded display is recovered.
+        // TargetAuraSpell 750001 (Sentry Turret Hidden Identifier) is applied by nothing, so CheckTarget
+        // refused every Upgrade! cast on the turret. Abilities.cpp already selects turrets by entry.
+        info->TargetAuraSpell = 0;
+    }
+    if (id == 524979)
+        info->TargetAuraSpell = 0; // 806626 is applied by nothing: the learned passive never reached the player.
+    if (id == 675204)
+    {
+        // Anti-Cloaking Device is Flare's layout (dispel immunity 5 and 6 from a persistent area) without
+        // Flare's purge bit: already stealthed enemies stayed hidden, only a new stealth was prevented.
+        // Known limits, same as Flare: custom stealths without Dispel 5 (803833, 806179, 573038, 705427...)
+        // are untouched; pure invisibility (Dispel 6) is purged only on a target the area already detects.
+        bool layout = true;
+        for (uint8 slot : {uint8(0),uint8(1)})
+            layout = layout && info->Effects[slot].Effect == SPELL_EFFECT_PERSISTENT_AREA_AURA &&
+                info->Effects[slot].ApplyAuraName == SPELL_AURA_DISPEL_IMMUNITY &&
+                info->Effects[slot].MiscValue == (slot ? DISPEL_INVISIBILITY : DISPEL_STEALTH);
+        if (layout)
+            info->AttributesEx |= SPELL_ATTR1_IMMUNITY_PURGES_EFFECT;
+        else if (AscensionContract::Detail::FirstFailure("Tinker",
+                     AscensionContract::Detail::Key("Tinker", id, 0, "anti-cloaking")))
+            LOG_ERROR("module.ascension_compat",
+                "Ascension contract Tinker: spell 675204 is no longer two persistent dispel immunities 5 and 6; "
+                "the stealth purge is not applied.");
+    }
     if (id == 705792)
     {
         info->Effects[0].Effect = 0; // Device crit/hit inheritance is applied explicitly with owner scope.

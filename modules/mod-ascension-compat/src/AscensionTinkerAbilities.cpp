@@ -441,7 +441,7 @@ class spell_ascension_tinker_ability : public SpellScript
             {
                 handled = true;
                 Position position = GetExplTargetDest() ? GetExplTargetDest()->GetPosition() : player->GetPosition();
-                Summon(player,GetExplTargetUnit(),id,&position);
+                Summon(player,GetExplTargetUnit(),id,&position,true);
             }
         }
         if (Any(GetSpellInfo(),{805372}) && type == SPELL_EFFECT_SCRIPT_EFFECT)

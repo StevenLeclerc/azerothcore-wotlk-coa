@@ -67,7 +67,8 @@ void SetAmount(Player* player, uint32 id, uint8 slot, int32 amount);
 void Grant(Player* player, uint32 id, uint32 charges = 1);
 void Spend(Player* player, uint32 id, uint64 generation);
 void PetCast(Player* player, Unit* target, uint32 spell, bool turret = false);
-void Summon(Player* player, Unit* target, uint32 spell, Position const* position = nullptr);
+void Summon(Player* player, Unit* target, uint32 spell, Position const* position = nullptr,
+            bool applyEffectMods = false);
 void DeviceEvent(Player* player, Creature* device, Unit* target, SpellInfo const* info,
                  uint32 damage, uint32 healing, bool critical, bool periodic);
 void Overcharge(Player* player, Creature* device);

@@ -89,6 +89,22 @@ class aura_ascension_starcaller_event : public AuraScript
         case 803888:
             return automatic && damage;
         case 801123:
+            // Cosmic Strides (300772) authors a -100 CHANCE_OF_SUCCESS on this aura: the Aspect goes
+            // silent and every melee or ranged hit grants 300773 instead, the job of the hidden
+            // 300774 that nothing applies here, on 300774's own ProcFlags (84: melee auto, melee
+            // spell, ranged auto; ranged specials excluded). Deferred to the player tick: casting
+            // from a proc check would add an aura while the engine walks the applied-aura map.
+            if (player->HasAura(300772))
+            {
+                if ((e.GetTypeMask() & (PROC_FLAG_DONE_MELEE_AUTO_ATTACK | PROC_FLAG_DONE_SPELL_MELEE_DMG_CLASS |
+                                        PROC_FLAG_DONE_RANGED_AUTO_ATTACK)) &&
+                    damage && !periodic)
+                    State(player).scheduler.Schedule(0ms, [player](TaskContext) {
+                        if (player->IsAlive() && player->HasAura(300772))
+                            Cast(player, player, 300773);
+                    });
+                return false;
+            }
             return (melee || ranged) && damage && !periodic;
         case 800394:
             return damage && Chance(player, id);
@@ -156,12 +172,9 @@ class aura_ascension_starcaller_event : public AuraScript
         case 800510:
         case 803887:
         case 803888:
-            Aspect(player, target, damage);
-            break;
-        case 801123:
-            Aspect(player, target, damage);
-            if (player->HasAura(300772))
-                Cast(player, player, 300773);
+        case 801123: // never reached under Cosmic Strides (300772): Check returns false.
+            // forced: the native gate already rolled (spell_proc Chance=0, DBC ProcChance + spellmods).
+            Aspect(player, target, damage, true, id);
             break;
         case 300992:
         case 680784:

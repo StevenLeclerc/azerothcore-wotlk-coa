@@ -13,6 +13,7 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "TemporarySummon.h"
+#include <algorithm>
 namespace AscensionSunCleric
 {
 namespace
@@ -49,7 +50,10 @@ void Valkyr(Player* player, Unit* target, bool dawn, bool fulfillment)
     ObjectGuid owner = player->GetGUID(), victim = target->GetGUID();
     uint32 map = player->GetMapId();
     Cast(player,player,520025);
-    State(player).scheduler.Schedule(Milliseconds(AscensionSpellSafe::Duration(520024, 3000)),
+    // The window follows the caster's duration mods (Last Call 681448, +1 s), as 520025 itself does.
+    int32 windowMs = AscensionSpellSafe::Duration(520024, 3000);
+    player->ApplySpellMod(520024, SPELLMOD_DURATION, windowMs);
+    State(player).scheduler.Schedule(Milliseconds(std::max(0, windowMs)),
         [owner,victim,map,dawn,fulfillment](TaskContext)
         {
             Player* caster = ObjectAccessor::FindPlayer(owner);

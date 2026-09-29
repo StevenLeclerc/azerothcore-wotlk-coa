@@ -105,7 +105,7 @@ void Scale(Player* player, Creature* creature, bool initial)
             creature->RemoveAurasDueToSpell(talent);
     }
 }
-void Summon(Player* player, Unit* target, uint32 spell, Position const* destination)
+void Summon(Player* player, Unit* target, uint32 spell, Position const* destination, bool applyEffectMods)
 {
     if (!player || !player->IsAlive() || !player->IsInWorld())
         return;
@@ -134,7 +134,14 @@ void Summon(Player* player, Unit* target, uint32 spell, Position const* destinat
     if (spell == 850020 || spell == 806760) count = 2;
     if (spell == 500236) count = 3;
     if (spell == 500535)
-        count = uint32(std::max(1, info->Effects[EFFECT_1].CalcValue(player)));
+    {
+        // CalcValue applies no SpellMod; Duobombers (707258) is SPELLMOD_EFFECT2 +1 on this field.
+        // Only the direct cast takes it: the bomb factory keeps its three bombs.
+        int32 bombs = info->Effects[EFFECT_1].CalcValue(player);
+        if (applyEffectMods)
+            player->ApplySpellMod(spell, SPELLMOD_EFFECT2, bombs);
+        count = uint32(std::max(1, bombs));
+    }
     if (!entry)
         return;
     if (spell == 500239)

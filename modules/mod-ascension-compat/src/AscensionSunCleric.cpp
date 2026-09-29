@@ -247,11 +247,14 @@ void ActivateDawn(Player* player)
 {
     Resource(player, SolarPower, -20);
     Cast(player, player, Dawn);
+    // Base 10 (ProcCharges) plus Guiding Glow's SPELLMOD_CHARGES, as the core computes it.
     if (Aura* aura = player->GetAura(Dawn))
-        aura->SetCharges(10);
-    // This saved, otherwise unused slot arms one school choice per Dawn activation.
-    if (AuraEffect* choice = player->GetAuraEffect(Dawn, EFFECT_1))
-        choice->SetAmount(1);
+    {
+        aura->SetCharges(aura->CalcMaxCharges(player));
+        aura->SetUsingCharges(false); // Our OnSpellBeforeEffects counts casts; the core must not drop charges too.
+    }
+    // Dawn EFFECT_1 stays the native Solar Conduit cast-time modifier; the choice lives in the state.
+    State(player).dawnChoice = true;
     if (player->HasAura(704586))
         Cast(player, player, 805265);
     if (player->HasAura(804625))
@@ -351,8 +354,21 @@ void Refresh(Player* player)
     SetAmount(player, 561023, 2, int32(player->GetItemArmorBySubclass(ITEM_SUBCLASS_ARMOR_SHIELD)));
     SetAmount(player, 680639, 1, int32(5 * player->GetStat(STAT_INTELLECT)));
     // Native periodic helper flags do not express these ownership/lifetime constraints.
-    for (uint32 id : {803500, 803492, 807750, 807751, 807752, 807446, 805481, 805491, 681471})
+    for (uint32 id : {803500, 803492, 807750, 807752, 807446, 805481, 805491, 681471})
         player->RemoveAurasDueToSpell(id);
+    // Vindicator (704938/707773, ranks not chained) under Vow of the Valkyr: 807751 keeps only its
+    // IGNORE_ARMOR slot alive, which the core reads in CalcArmorReducedDamage.
+    SetHelper(player, 807751, player->IsAlive() && player->HasAura(807749) &&
+        (player->HasAura(704938) || player->HasAura(707773)));
+    // Solar Concord (301266) requires CasterAuraSpell 500643, which nothing else applies; the client
+    // checks it too (P-157). AddAura, not a cast: no cast checks, no pre-cast of 500643's exclusion.
+    if (player->IsAlive() && player->HasSpell(301266) && (player->HasAura(Sunrise) || player->HasAura(Sunset)))
+    {
+        if (!player->HasAura(500643))
+            player->AddAura(500643, player);
+    }
+    else
+        player->RemoveAurasDueToSpell(500643);
     bool replacement = player->IsAlive() && player->HasAura(803238) && player->HasSpell(Highest(player, 800231));
     // Unannounced: the client sees Sun Ray only in the rewritten Sunflare slot (one entry, not two, P-144).
     if (replacement && player->GetSpellMap().find(504764) == player->GetSpellMap().end())

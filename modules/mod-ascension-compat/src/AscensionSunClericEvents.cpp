@@ -54,6 +54,9 @@ class aura_ascension_sun_cleric_event : public AuraScript
             return received && damage && !periodic;
         if (id == 680646)
             return received && damage && GetTarget()->GetHealthPct() < 35 && !GetAura()->GetScriptValue(id);
+        // Chosen of the Light: one heal per cast, on the first hit taken below half health.
+        if (id == 800622)
+            return received && damage && GetTarget()->GetHealthPct() < 50 && !GetAura()->GetScriptValue(id);
         if (id == 680911)
             return event.GetActor() == GetTarget() && damage && direct &&
                 (GetTarget()->GetHealthPct() < 35 || GetAura()->GetScriptValue(id));
@@ -167,10 +170,10 @@ class aura_ascension_sun_cleric_event : public AuraScript
             }
             if (id == 803719)
             {
-                uint32 mana = CalculatePct(player->GetMaxPower(POWER_MANA) - player->GetPower(POWER_MANA), Amount(504775)) +
-                    std::max(0, Amount(504877,0,player));
-                if (player->HasAura(547214))
-                    AddPct(mana, Amount(547214));
+                // Both terms read with the caster: Luminary Mendicant (547214) is an ALL_EFFECTS
+                // spell mod on 504775 and 504877, applied once here by the core.
+                uint32 mana = CalculatePct(player->GetMaxPower(POWER_MANA) - player->GetPower(POWER_MANA),
+                    std::max(0, Amount(504775,0,player))) + std::max(0, Amount(504877,0,player));
                 Mana(player, mana);
             }
             if (id == 807435)
@@ -194,9 +197,11 @@ class aura_ascension_sun_cleric_event : public AuraScript
                 auto allies = Allies(player, player, Radius(505197));
                 allies.remove(player);
                 allies.sort([player](Unit* a, Unit* b) { return player->GetDistance(a) < player->GetDistance(b); });
+                // 807750 is never a live aura: its talents (Sunwalker 704934, Soul of Light 807964,
+                // Holy Giant 681337, Taking Vows 300331) reach it only as spell mods of the caster.
                 if (!allies.empty())
-                    Copy(player, allies.front(), 505197, CalculatePct(amount, Amount(807750) *
-                        (player->HasAura(704934) ? 2 : 1) * (fulfillment ? 2 : 1)));
+                    Copy(player, allies.front(), 505197, CalculatePct(amount,
+                        std::max(0, Amount(807750,0,player)) * (fulfillment ? 2 : 1)));
             }
             if (id == 807749 && fulfillment && !automatic)
                 Cast(player, target, 506821);
@@ -245,6 +250,10 @@ class aura_ascension_sun_cleric_event : public AuraScript
             case 680646:
                 GetAura()->SetScriptValue(id,1);
                 Cast(player,GetTarget(),681383);
+                break;
+            case 800622:
+                GetAura()->SetScriptValue(id,1);
+                Cast(player,player,706442);
                 break;
             case 704928:
                 Cast(player,player,704926);

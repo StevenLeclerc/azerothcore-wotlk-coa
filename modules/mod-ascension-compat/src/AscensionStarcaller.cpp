@@ -205,8 +205,14 @@ void Replace(Player* player, uint32 root, uint32 replacement)
 bool Chance(Player* player, uint32 id, uint32 cooldown, float bonus)
 {
     SpellInfo const* info = sSpellMgr->GetSpellInfo(id);
-    if (!player->HasAura(id) || !info || State(player).timers.HasTimeUntilEvent(id) ||
-        !roll_chance_f(std::clamp(float(info->ProcChance) + bonus, 0.0f, 100.0f)))
+    if (!player->HasAura(id) || !info || State(player).timers.HasTimeUntilEvent(id))
+        return false;
+    // The class roll is the real one for these ids (their spell_proc gate is Chance=100), so it
+    // must see SPELLMOD_CHANCE_OF_SUCCESS like CalcProcChance would: Highest Order (680771) +60 on
+    // Shadowsong's Mandate (805439) was dead while this read ProcChance raw.
+    float chance = float(info->ProcChance);
+    player->ApplySpellMod(id, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+    if (!roll_chance_f(std::clamp(chance + bonus, 0.0f, 100.0f)))
         return false;
     if (cooldown)
         State(player).timers.ScheduleEvent(id, Milliseconds(cooldown));
@@ -230,6 +236,33 @@ void Stars(Player* player, Unit* target, uint32 count)
     for (uint32 i = 0; i < std::min(32u, count); ++i)
         Cast(player, target, 804378); // Native stack cap retains the caster's stack-capacity modifiers.
 }
+namespace
+{
+// Mirrors a private counter as a visible stacking aura (Second Moon 520406, Cascade 707424). The
+// aura is a DUMMY read by nobody. Forced permanent: 707424 lasts 12 s in the DBC while the counter
+// never resets on its own, so the icon would otherwise vanish mid-count.
+void ShowCounter(Player* player, uint32 id, uint32 stacks)
+{
+    Aura* aura = player->GetAura(id);
+    if (!stacks)
+    {
+        if (aura)
+            player->RemoveAurasDueToSpell(id);
+        return;
+    }
+    if (!aura)
+        aura = player->AddAura(id, player);
+    if (!aura)
+        return;
+    if (aura->GetStackAmount() != stacks)
+        aura->SetStackAmount(uint8(std::min<uint32>(stacks, 255)));
+    if (aura->GetMaxDuration() != -1)
+    {
+        aura->SetMaxDuration(-1);
+        aura->SetDuration(-1);
+    }
+}
+} // namespace
 void StartConsume(Player* player, Unit* target)
 {
     if (player && target && target->HasAura(804378, player->GetGUID()))
@@ -323,10 +356,30 @@ bool Consume(Player* player, Unit* target)
                 if (effect.Effect == 165)
                     Reduce(player, effect.MiscValue, int32(-effect.CalcValue(player) * effectiveness));
     auto& state = State(player);
-    if (player->HasAura(300252) && ++state.secondMoon == 10)
-        state.secondMoon = 0, Cast(player, target, 520422);
-    if (player->HasAura(704765) && ++state.cascade == 8)
-        state.cascade = 0, Cast(player, player, 707425);
+    // The private counters stay the truth; 520406 / 707424 only mirror them for the player
+    // (both talents have ProcFlags=0, so their native PROC_TRIGGER never posts the counter).
+    if (player->HasAura(300252))
+    {
+        if (++state.secondMoon == 10)
+        {
+            state.secondMoon = 0;
+            player->RemoveAurasDueToSpell(520406);
+            Cast(player, target, 520422);
+        }
+        else
+            ShowCounter(player, 520406, state.secondMoon);
+    }
+    if (player->HasAura(704765))
+    {
+        if (++state.cascade == 8)
+        {
+            state.cascade = 0;
+            player->RemoveAurasDueToSpell(707424);
+            Cast(player, player, 707425);
+        }
+        else
+            ShowCounter(player, 707424, state.cascade);
+    }
     if (Chance(player, 802680))
         Cast(player, player, 802681);
     if (player->HasAura(802203))
@@ -348,12 +401,15 @@ void MarkedHeal(Player* player)
         if (player->IsValidAssistTarget(ally) && ally->HasAura(574154, player->GetGUID()))
             Cast(player, ally, 704232);
 }
-void Aspect(Player* player, Unit* target, uint32 damage, bool forced)
+void Aspect(Player* player, Unit* target, uint32 damage, bool forced, uint32 only)
 {
-    float bonus = player->HasAura(806739) ? float(Amount(806739)) : 0.0f;
+    // The only caller (event Proc) passes forced: the native gate (spell_proc Chance=0 -> DBC
+    // ProcChance + SPELLMOD_CHANCE_OF_SUCCESS, which carries Aspect Mastery, Moonblessed Aspects,
+    // Scattering Blades 806739 and Cosmic Strides 300772 -100) is the roll. Chance() applies the
+    // same spellmods for a non-forced call, so no manual bonus on top either way.
     for (uint32 id : {801128, 805356, 801123, 800510, 803887, 803888})
     {
-        if (!player->HasAura(id) || (!forced && !Chance(player, id, 0, id == 801128 ? bonus : 0)))
+        if ((only && id != only) || !player->HasAura(id) || (!forced && !Chance(player, id)))
             continue;
         Stars(player, target);
         if (id == 801128)
@@ -365,10 +421,7 @@ void Aspect(Player* player, Unit* target, uint32 damage, bool forced)
         else if (id == 805356)
             Copy(player, target, 805357, damage / 4);
         else if (id == 801123)
-        {
-            if (!player->HasAura(300772))
-                Cast(player, target, 801124);
-        }
+            Cast(player, target, 801124); // under 300772 the Aspect is silenced upstream (Check)
         else
         {
             Copy(player, target, 800507, std::max(0, Amount(id, 1, player)));
@@ -418,6 +471,10 @@ void Refresh(Player* player)
         state.secondMoon = 0;
     if (!player->HasAura(704765))
         state.cascade = 0;
+    // Resync the mirrors: a saved aura comes back at login while the counter restarts at 0, and
+    // death may drop the aura while the counter keeps running.
+    ShowCounter(player, 520406, state.secondMoon);
+    ShowCounter(player, 707424, state.cascade);
     if (!player->HasAura(680742))
         state.spentPercent = 0;
     if (!player->HasAura(680215))

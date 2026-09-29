@@ -54,7 +54,7 @@ void ReduceHealing(Player* player, uint32 percent);
 uint32 Highest(Player* player, uint32 root);
 void Replace(Player* player, uint32 root, uint32 replacement);
 void MarkedHeal(Player* player);
-void Aspect(Player* player, Unit* target, uint32 damage, bool forced = false);
+void Aspect(Player* player, Unit* target, uint32 damage, bool forced = false, uint32 only = 0);
 void ApplyContracts(SpellInfo* info);
 } // namespace AscensionStarcaller
 #endif
