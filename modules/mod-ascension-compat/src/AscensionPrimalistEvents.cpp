@@ -1,5 +1,9 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "CellImpl.h"
+#include "Containers.h"
+#include "GridNotifiers.h"
+#include "GridNotifiersImpl.h"
 #include "Pet.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -9,6 +13,7 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <array>
+#include <list>
 
 namespace
 {
@@ -631,7 +636,16 @@ class aura_ascension_primalist_bones_stacker : public AuraScript
         // Removed before the cast, so the mark cannot be re-counted by anything the
         // detonation itself sets off.
         victim->RemoveAurasDueToSpell(SPELL_BONES_MARK, player->GetGUID());
-        summon->CastSpell(victim, SPELL_BONES_DETONATION, true);
+
+        // Vague 5 : « $AP*0.5 » est lu par le client sur 806552, un sort du JOUEUR - c'est donc
+        // la PA du joueur, pas celle du familier qui lance 806553. Une ligne spell_bonus_data
+        // prendrait celle du lanceur. BonusMultiplier reste a 0 (StockCoefficientSpells) : pas
+        // de double compte. La valeur passee est celle du DBC plus la part de PA ; CalcBaseValue
+        // retire 1 quand DieSides est pose, CalcValue ajoute ensuite niveau et de comme d'habitude.
+        SpellEffectInfo const& detonation = sSpellMgr->AssertSpellInfo(SPELL_BONES_DETONATION)->Effects[EFFECT_0];
+        int32 value = detonation.BasePoints + (detonation.DieSides ? 1 : 0) +
+            int32(player->GetTotalAttackPowerValue(BASE_ATTACK) * 0.5f);
+        summon->CastCustomSpell(SPELL_BONES_DETONATION, SPELLVALUE_BASE_POINT0, value, victim, TRIGGERED_FULL_MASK);
     }
 
     void Register() override
@@ -639,6 +653,115 @@ class aura_ascension_primalist_bones_stacker : public AuraScript
         OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_bones_stacker::Proc,
             EFFECT_0, SPELL_AURA_PROC_TRIGGER_SPELL);
     }
+};
+
+// ---------------------------------------------------------------------------------
+// Vague 5 : familier.
+// 800141 Rips and Tears : « Periodic damage dealt by your Primalist spells or your pet ».
+// La ligne spell_proc ne voit que les DoT dont le JOUEUR est l'acteur ; le saignement de
+// Primal Shred (504669) est lance par le familier (500940 = FORCE_CAST). Ce crochet ne voit
+// que les ticks d'une invocation du joueur : pas de double compte avec la ligne.
+// ---------------------------------------------------------------------------------
+constexpr uint32 SPELL_RIPS_AND_TEARS        = 800141;
+constexpr uint32 SPELL_RIPS_AND_TEARS_RAGE   = 521233;
+constexpr uint32 SPELL_RIPS_AND_TEARS_FOCUS  = 521231;
+constexpr uint32 SPELL_PRIMAL_SHRED_R1       = 500940;
+constexpr uint32 SPELL_SPIRITUAL_FRENZY_PET  = 707369;
+constexpr float SPIRITUAL_FRENZY_RANGE       = 8.0f;
+
+class primalist_pet_periodic : public UnitScript
+{
+public:
+    primalist_pet_periodic() : UnitScript("primalist_pet_periodic", true,
+        {UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK}) { }
+
+    void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const*) override
+    {
+        // Le coeur passe aussi par ce crochet pour les soins periodiques (SpellAuraEffects.cpp:6827) :
+        // un tick sur un allie n'est pas un degat.
+        if (!damage || !target || !attacker || attacker->IsFriendlyTo(target))
+            return;
+        Player* player = PrimalistSummonOwner(attacker);
+        if (!player || !player->IsAlive() || !player->HasAura(SPELL_RIPS_AND_TEARS) || !player->IsInMap(attacker))
+            return;
+        player->CastSpell(player, SPELL_RIPS_AND_TEARS_RAGE, true);
+        player->CastSpell(player, SPELL_RIPS_AND_TEARS_FOCUS, true);   // tA 5 : le familier
+    }
+};
+
+// 707367 Spiritual Frenzy : le bit 32 de FF2 porte aussi Golem Form et Thane's Guidance ; seuls
+// les rangs de Primal Shred comptent.
+class aura_ascension_primalist_spiritual_frenzy : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_spiritual_frenzy);
+
+    bool Check(ProcEventInfo& eventInfo)
+    {
+        SpellInfo const* info = eventInfo.GetSpellInfo();
+        return Primalist(GetTarget()) && eventInfo.GetActor() == GetTarget() && info &&
+            info->SpellFamilyName == PRIMALIST_FAMILY && sSpellMgr->GetFirstSpellInChain(info->Id) == SPELL_PRIMAL_SHRED_R1;
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_primalist_spiritual_frenzy::Check);
+    }
+};
+
+// 707369, sur le familier : aura 4 DUMMY, ProcFlags 4 (auto melee), sans trigger. L'entree de
+// proc par defaut existait deja, HandleProcTriggerSpellAuraProc n'en tirait rien. « its auto
+// attacks strike up to $s1 nearby enemies » : la cible principale plus $s1 - 1 autres, par un
+// coup blanc supplementaire chacune. _striking empeche ces coups de reproceder.
+class aura_ascension_primalist_spiritual_frenzy_pet : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_spiritual_frenzy_pet);
+
+    bool Check(ProcEventInfo& eventInfo)
+    {
+        Unit* pet = GetTarget();
+        DamageInfo const* damage = eventInfo.GetDamageInfo();
+        return !_striking && PrimalistSummonOwner(pet) && pet->IsAlive() && eventInfo.GetActor() == pet &&
+            damage && !damage->GetSpellInfo() && damage->GetAttackType() == BASE_ATTACK &&
+            eventInfo.GetActionTarget() && eventInfo.GetActionTarget() != pet;
+    }
+
+    void Cleave(AuraEffect const* effect, ProcEventInfo& eventInfo)
+    {
+        PreventDefaultAction();
+        Unit* pet = GetTarget();
+        Unit* primary = eventInfo.GetActionTarget();
+        int32 extra = effect->GetAmount() - 1;
+        if (extra <= 0)
+            return;
+
+        std::list<Unit*> candidates;
+        Acore::AnyUnfriendlyUnitInObjectRangeCheck check(pet, pet, SPIRITUAL_FRENZY_RANGE);
+        Acore::UnitListSearcher<Acore::AnyUnfriendlyUnitInObjectRangeCheck> searcher(pet, candidates, check);
+        Cell::VisitObjects(pet, searcher, SPIRITUAL_FRENZY_RANGE);
+        candidates.remove_if([&](Unit* unit)
+        {
+            // Ni monstre hors combat (on l'attirerait), ni cible sous controle cassable (Polymorph).
+            return unit == primary || !unit->IsAlive() || !unit->IsInCombat() ||
+                unit->HasBreakableByDamageCrowdControlAura() || !pet->IsValidAttackTarget(unit) ||
+                !pet->IsWithinMeleeRange(unit);
+        });
+        if (candidates.size() > uint32(extra))
+            Acore::Containers::RandomResize(candidates, uint32(extra));
+
+        _striking = true;
+        for (Unit* unit : candidates)
+            pet->AttackerStateUpdate(unit, BASE_ATTACK, true);
+        _striking = false;
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_primalist_spiritual_frenzy_pet::Check);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_spiritual_frenzy_pet::Cleave,
+            EFFECT_0, SPELL_AURA_DUMMY);
+    }
+
+    bool _striking = false;
 };
 
 class primalist_event_metadata : public GlobalScript
@@ -680,4 +803,7 @@ void AddSC_AscensionPrimalistEvents()
     RegisterSpellScript(aura_ascension_primalist_fury_of_the_wild_talent);
     RegisterSpellScript(aura_ascension_primalist_bestial_wrath);
     RegisterSpellScript(aura_ascension_primalist_bones_stacker);
+    RegisterSpellScript(aura_ascension_primalist_spiritual_frenzy);
+    RegisterSpellScript(aura_ascension_primalist_spiritual_frenzy_pet);
+    new primalist_pet_periodic();
 }

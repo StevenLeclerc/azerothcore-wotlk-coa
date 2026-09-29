@@ -216,6 +216,31 @@ public:
             info->AuraInterruptFlags |= AURA_INTERRUPT_FLAG_TAKE_DAMAGE;
         if (info->Id == SPELL_GAZE_SLOW)
             info->ProcCharges = 1; // Native proc data spends this on the next melee/ranged swing, including misses.
+        // Vague 5. « your NEXT Hand of the Earthmother » (805463 Primal Power) et « your NEXT
+        // spell » (803299 Magma Fissure) : le DBC porte ProcCharges = 0, le mod valait donc
+        // pour tous les sorts lances pendant la duree. Une charge est consommee par le mod
+        // lui-meme (Player.cpp:10559-10593).
+        if ((info->Id == 805463 || info->Id == 803299) && !info->ProcCharges)
+            info->ProcCharges = 1;
+        // 800180 Sacred Grove : l'aura de zone (e1) nomme ses allies en TargetA ; DynObjAura
+        // ne cherche les allies que depuis TargetB et retombait sur les ennemis (meme defaut
+        // que Dawnfall 806118). Garde sur la forme exacte lue dans Spell.dbc.
+        if (info->Id == 800180 && info->Effects[EFFECT_1].Effect == SPELL_EFFECT_PERSISTENT_AREA_AURA &&
+            info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_DUMMY &&
+            info->Effects[EFFECT_1].TargetA.GetTarget() == TARGET_UNIT_DEST_AREA_ALLY &&
+            !info->Effects[EFFECT_1].TargetB.GetTarget())
+        {
+            info->Effects[EFFECT_1].TargetA = SpellImplicitTargetInfo(TARGET_DEST_CASTER);
+            info->Effects[EFFECT_1].TargetB = SpellImplicitTargetInfo(TARGET_UNIT_DEST_AREA_ALLY);
+            // « allies within receive 25% increased healing » : porte par l'aura de zone
+            // elle-meme (118 = soins RECUS, Unit::SpellHealingBonusTaken, cote soigne). Un
+            // UnitScript ModifyHealReceived recevait le soigneur en « target » sur le chemin
+            // HealBySpell (Unit.cpp:8750). Montant : 800186 e2 (bp 24, die 1 = 25).
+            info->Effects[EFFECT_1].ApplyAuraName = SPELL_AURA_MOD_HEALING_PCT;
+            SpellInfo const* data = sSpellMgr->GetSpellInfo(800186);
+            info->Effects[EFFECT_1].BasePoints = data ? data->Effects[EFFECT_2].BasePoints : 24;
+            info->Effects[EFFECT_1].DieSides = data ? data->Effects[EFFECT_2].DieSides : 1;
+        }
         if (info->Id == SPELL_ANCIENT_SLOW || info->Id == SPELL_CRACKING_STACK || info->Id == SPELL_GAZE_SLOW)
         {
             info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;

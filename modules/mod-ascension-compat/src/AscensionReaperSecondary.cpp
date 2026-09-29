@@ -3,6 +3,7 @@
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
+#include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
@@ -28,8 +29,81 @@ enum ReaperSecondarySpells : uint32
     SPELL_CRIMSON_THIRST = 807415,
     SPELL_CRIMSON_STACK = 807416,
     SPELL_CRIMSON_AMOUNT = 807417,
-    SPELL_CRIMSON_HEAL = 807545
+    SPELL_CRIMSON_HEAL = 807545,
+
+    SPELL_ANIMA_AMBUSHER = 705424,
+    SPELL_ANIMA_AMBUSH = 705425,
+    SPELL_GHOSTLY_WEAPON = 803997,
+    SPELL_GHOSTLY_WEAPON_DAMAGE = 804474,
+    SPELL_LAMENTING = 705397,
+    SPELL_LAMENTING_HEAL = 807420,
+    SPELL_SLAUGHTER = 500373,
+    SPELL_SOULS_FOR_THE_SLAUGHTER = 705428,
+    SPELL_SOULS_FOR_THE_SLAUGHTER_AURA = 504304,
+    SPELL_SOULS_FOR_THE_SLAUGHTER_DAMAGE = 575847,
+    SPELL_CRIMSON_DEATH = 705414,
+    SPELL_SOULSLAM = 504014,
+    SPELL_SOUL_PIERCER = 712484,
+    SPELL_SOUL_PIERCER_REFUND = 575614,
+    SPELL_SPECTRAL_SCYTHE = 500484,
+    SPELL_SPECTRAL_SCYTHE_CULLING = 500576,
+    SPELL_SIPHON_ANIMA = 504309,
+    SPELL_SIPHON_ANIMA_AURA = 572768,
+    SPELL_SIPHON_ANIMA_HEAL = 504306,
+    SPELL_SOUL_INFUSION = 803031,
+    SPELL_ESSENCE_INVIGORATION = 805186,
+    SPELL_ESSENCE_INVIGORATION_RESTORE = 805187,
+    SPELL_SPECTRE_STRIDE = 801624,
+    SPELL_SCYTHE_RUSH = 500359,
+    SPELL_VEILWALK = 803990,
+    SPELL_GHASTLY_FORM = 704357,
+    SPELL_GHASTLY_FORM_SHIELD = 704358,
+    SPELL_HARVEST_TIME = 803995,
+    SPELL_BLOOD_FRENZY_TALENT = 707899,
+    SPELL_BLOOD_FRENZY = 803039,
+    SPELL_TORMENTED_SOULS_BUFF = 500481,
+    SPELL_HARD_BARGAIN = 300569,
+    SPELL_HARD_BARGAIN_BUFF = 572300,
+    SPELL_LIFE_TAP = 706788,
+    SPELL_REDSHADE_THRESH = 525058,
+    SPELL_DECIMATION_COUNT = 573289,
+    SPELL_DECIMATION_WINDOW = 704215,
+    SPELL_DECIMATE = 500523
 };
+
+// Spectral Warden 805716 summons this entry (effect 28, misc 100481). MEASURED 2026-09-28:
+// acore_world.creature_template has no row 100481, so the summon fails today and Life Tap's
+// heal below has nothing to read. The code waits for the creature, it does not replace it.
+constexpr uint32 NPC_SPECTRAL_WARDEN = 100481;
+
+// Spell::m_scriptEventMask bits used by this file, on Slaughter and Soulslam only. 16-21 and
+// 25-31 are taken elsewhere in the module (Soul Strike uses 18); 0-4 are ResourceEvent.
+constexpr uint8 SOULS_FOR_THE_SLAUGHTER_EVENT = 22;
+constexpr uint8 SOUL_PIERCER_EVENT = 23;
+constexpr uint8 CRIMSON_DEATH_EVENT = 24;
+
+// Harvest Time: "Casting Harvest Time with an enemy targeted within 20 yds of you". The
+// 20 yards is the tooltip's own literal: no field of 707899 or 803039 carries it.
+constexpr float BLOOD_FRENZY_RANGE = 20.0f;
+
+int32 ClampToInt32(uint64 value)
+{
+    return int32(std::min<uint64>(value, std::numeric_limits<int32>::max()));
+}
+
+// A damage copy helper (575847, 804474, 705425) and a heal helper (504306) all carry
+// SPELL_ATTR3_IGNORE_CASTER_MODIFIERS and SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS (804474
+// gets the first one below, in reaper_secondary_metadata): the value copied is already the
+// resolved damage, it must not go through the caster's bonuses a second time.
+bool IsOwnDamageEvent(Unit* owner, ProcEventInfo& event, bool victimAlive)
+{
+    Player* player = owner ? owner->ToPlayer() : nullptr;
+    Unit* victim = event.GetActionTarget();
+    DamageInfo* damage = event.GetDamageInfo();
+    return player && player->getClass() == CLASS_REAPER && player->IsAlive() && player->IsInWorld() &&
+        event.GetActor() == player && victim && victim != player && (!victimAlive || victim->IsAlive()) &&
+        !player->IsFriendlyTo(victim) && damage && damage->GetDamage();
+}
 
 void HealFromDamage(Player* player, uint32 reference, uint32 helper, uint32 damage)
 {
@@ -94,9 +168,74 @@ public:
             spell->GetScriptValue(SPELL_CRIMSON_STACK))
             // Damage and cost have been calculated. A projectile retains its selected stack count.
             caster->RemoveAurasDueToSpell(SPELL_CRIMSON_STACK, caster->GetGUID());
+
+        Player* player = caster ? caster->ToPlayer() : nullptr;
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsAlive() || !player->IsInWorld())
+            return;
+
+        // Siphon Anima 504309: "When you summon a Spectral Scythe, you now heal for $572768s1% of
+        // your damage dealt for $572768d." Both summons count, and 500576 (Spirit Culling) is
+        // always triggered, so this branch does not test IsTriggered. 572768 is an aura 354
+        // (no core handler): aura_ascension_reaper_siphon_anima below is its engine. No
+        // spell_proc row on 504309.
+        if ((info->Id == SPELL_SPECTRAL_SCYTHE || info->Id == SPELL_SPECTRAL_SCYTHE_CULLING) &&
+            player->HasAura(SPELL_SIPHON_ANIMA) && sSpellMgr->GetSpellInfo(SPELL_SIPHON_ANIMA_AURA))
+            player->CastSpell(player, SPELL_SIPHON_ANIMA_AURA, true);
+
+        if (spell->IsTriggered())
+            return;
+
+        // Decimation 704193: "transforms your NEXT Reap into Decimate". Decimate 500523 carries no
+        // remover of the 704215 window (e0 121, e1 31), so one cast ends it here. Deferred: the
+        // removal drops the temporary Decimate spell (SyncReapTransform) and this spell is Decimate.
+        if (info->Id == SPELL_DECIMATE && player->HasAura(SPELL_DECIMATION_WINDOW, player->GetGUID()))
+            player->m_Events.AddEventAtOffset([player]()
+            {
+                if (player->IsInWorld())
+                    player->RemoveAurasDueToSpell(SPELL_DECIMATION_WINDOW, player->GetGUID());
+            }, 1ms);
+
+        // Ghastly Form 704357: "After using Spectre Stride, Scythe Rush, or Veilwalk you now gain
+        // a shield that absorbs ... for $704358d." 704358 carries amount and duration.
+        if ((sSpellMgr->GetFirstSpellInChain(info->Id) == SPELL_SPECTRE_STRIDE || info->Id == SPELL_SCYTHE_RUSH ||
+                info->Id == SPELL_VEILWALK) &&
+            player->HasAura(SPELL_GHASTLY_FORM) && sSpellMgr->GetSpellInfo(SPELL_GHASTLY_FORM_SHIELD))
+            player->CastSpell(player, SPELL_GHASTLY_FORM_SHIELD, true);
+
+        // Blood Frenzy 707899: "Casting Harvest Time with an enemy targeted within 20 yds of you
+        // now unleashes a Blood Frenzy" (803039, a DoT on the target). Harvest Time is a self
+        // buff, so the enemy is the player's selection.
+        if (info->Id == SPELL_HARVEST_TIME && player->HasAura(SPELL_BLOOD_FRENZY_TALENT) &&
+            sSpellMgr->GetSpellInfo(SPELL_BLOOD_FRENZY))
+            if (Unit* target = player->GetSelectedUnit())
+                if (target != player && target->IsAlive() && player->IsValidAttackTarget(target) &&
+                    player->IsWithinDistInMap(target, BLOOD_FRENZY_RANGE) && player->IsWithinLOSInMap(target))
+                    player->CastSpell(target, SPELL_BLOOD_FRENZY, true);
+
+        // Essence Invigoration 805186: "Casting abilities that require Soul Infusion now has a
+        // $h% chance to restore $805187s1% of your missing health." 805187 is effect 136
+        // (HEAL_PCT), which the core computes on MAXIMUM health (SpellEffects.cpp
+        // EffectHealPct); its MiscValueB 1 is Ascension's "missing health" flag, which nothing
+        // reads. The heal is therefore computed here on missing health, like Soul Strike's.
+        if (info->CasterAuraSpell == SPELL_SOUL_INFUSION && player->HasAura(SPELL_ESSENCE_INVIGORATION))
+            if (SpellInfo const* talent = sSpellMgr->GetSpellInfo(SPELL_ESSENCE_INVIGORATION))
+                if (SpellInfo const* restore = sSpellMgr->GetSpellInfo(SPELL_ESSENCE_INVIGORATION_RESTORE))
+                {
+                    int32 chance = int32(std::min<uint32>(talent->ProcChance, 100));
+                    player->ApplySpellMod(SPELL_ESSENCE_INVIGORATION, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+                    uint32 missing = player->GetMaxHealth() - std::min(player->GetHealth(), player->GetMaxHealth());
+                    uint64 amount = uint64(missing) *
+                        uint32(std::clamp(restore->Effects[EFFECT_0].CalcValue(player), 0, 100)) / 100;
+                    if (amount && roll_chance_i(chance))
+                    {
+                        HealInfo heal(player, player, uint32(std::min<uint64>(amount, missing)), restore,
+                            restore->GetSchoolMask());
+                        player->HealBySpell(heal);
+                    }
+                }
     }
 
-    void OnSpellHitResult(Spell* spell, Unit* target, uint8 miss, uint32 damage, uint32, bool) override
+    void OnSpellHitResult(Spell* spell, Unit* target, uint8 miss, uint32 damage, uint32, bool critical) override
     {
         Player* player = spell->GetCaster()->ToPlayer();
         if (!player || player->getClass() != CLASS_REAPER || !player->IsAlive() || !player->IsInWorld() ||
@@ -107,9 +246,54 @@ public:
             HealFromDamage(player, SPELL_ENDBRINGER_AMOUNT, SPELL_ENDBRINGER_HEAL, damage);
         if (id == SPELL_SPECTRE_HIT && target->IsAlive())
             player->CastSpell(target, SPELL_SPECTRE_ROOT, true);
+        // Anima Ambusher 705424: "Spectre Stride now deals an additional
+        // ${($705425d*1000/$705425T1)*($m1)}% of its damage dealt over $705425d." 705424 e0 is an
+        // aura 354 (no core handler) toward 705425, a 5 s DoT ticking every second with fixed
+        // damage. One tick is $m1% of the hit, five ticks make the tooltip's total. 803742 is the
+        // real hit of every Spectre Stride rank (effect 148), and it is triggered, hence before
+        // the IsTriggered return below. No spell_proc row on 705424 (second engine).
+        if (id == SPELL_SPECTRE_HIT && damage && target->IsAlive())
+            if (AuraEffect const* ambusher = player->GetAuraEffect(SPELL_ANIMA_AMBUSHER, EFFECT_0))
+                if (sSpellMgr->GetSpellInfo(SPELL_ANIMA_AMBUSH))
+                    if (uint64 tick = uint64(damage) * uint32(std::clamp(ambusher->GetAmount(), 0, 1000)) / 100)
+                        player->CastCustomSpell(SPELL_ANIMA_AMBUSH, SPELLVALUE_BASE_POINT0, ClampToInt32(tick), target,
+                            TRIGGERED_FULL_MASK);
+        // Lamenting 705397: "Damage dealt by Ghostly Weapon now heals for $s1% of the damage
+        // dealt." 804474 is cast triggered by aura_ascension_reaper_ghostly_weapon; the damage
+        // passed here is the amount actually dealt. 807420 is the copy helper.
+        if (id == SPELL_GHOSTLY_WEAPON_DAMAGE && player->HasAura(SPELL_LAMENTING))
+            HealFromDamage(player, SPELL_LAMENTING, SPELL_LAMENTING_HEAL, damage);
         if (spell->IsTriggered())
             return;
         uint32 root = sSpellMgr->GetFirstSpellInChain(id);
+        if (root == SPELL_SLAUGHTER)
+        {
+            // Souls for the Slaughter 705428: "Critical strikes with Slaughter now cause your
+            // auto attacks to deal an additional $504304s1% Shadow damage for $504304d." Once
+            // per cast. 504304 (aura 354) is run by aura_ascension_reaper_souls_for_the_slaughter.
+            if (critical && player->HasAura(SPELL_SOULS_FOR_THE_SLAUGHTER) &&
+                sSpellMgr->GetSpellInfo(SPELL_SOULS_FOR_THE_SLAUGHTER_AURA) &&
+                spell->TryMarkScriptEventHandled(SOULS_FOR_THE_SLAUGHTER_EVENT))
+                player->CastSpell(player, SPELL_SOULS_FOR_THE_SLAUGHTER_AURA, true);
+            // Crimson Death 705414: "Your Slaughter now has a $h% chance to cast an additional
+            // time free of cost." The copy is the same rank, triggered (no cost, no cooldown),
+            // and a triggered Slaughter returns above, so it cannot chain.
+            if (target->IsAlive() && player->HasAura(SPELL_CRIMSON_DEATH) &&
+                spell->TryMarkScriptEventHandled(CRIMSON_DEATH_EVENT))
+                if (SpellInfo const* talent = sSpellMgr->GetSpellInfo(SPELL_CRIMSON_DEATH))
+                {
+                    int32 chance = int32(std::min<uint32>(talent->ProcChance, 100));
+                    player->ApplySpellMod(SPELL_CRIMSON_DEATH, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+                    if (roll_chance_i(chance))
+                        player->CastSpell(target, id, TRIGGERED_FULL_MASK);
+                }
+        }
+        // Soul Piercer 712484: "Striking at least 1 enemy with Soulslam now refunds its Reaped
+        // Souls." Soulslam needs Soul Infusion and 561290 takes the three souls; 575614 gives
+        // them back (500363 once, then 524732 twice), delayed by its effects 183. Once per cast.
+        if (id == SPELL_SOULSLAM && player->HasAura(SPELL_SOUL_PIERCER) &&
+            sSpellMgr->GetSpellInfo(SPELL_SOUL_PIERCER_REFUND) && spell->TryMarkScriptEventHandled(SOUL_PIERCER_EVENT))
+            player->CastSpell(player, SPELL_SOUL_PIERCER_REFUND, true);
         if (root == SPELL_DIRGE && player->HasAura(SPELL_ENDBRINGER, player->GetGUID()) &&
             !spell->GetScriptValue(SPELL_REAPED_SOUL))
         {
@@ -156,6 +340,153 @@ class aura_ascension_crimson_thirst : public AuraScript
     }
 };
 
+// Ghostly Weapon 803997 (Soul, 15 s active): "causing melee attacks to deal ${$m1+0}%
+// additional damage as Frost damage." e0 is an aura 354 (no core handler) toward 804474, and
+// 803997 has ProcFlags 0: spell_proc 803997 (auto attacks and melee techniques, effects 1-2
+// out of the proc) is the window, this script the engine. The amount already carries Essence
+// Harvest 707908 (+10, SPELLMOD_EFFECT1 on 803997), exactly as Pilfering does for Dirty Blades
+// (AscensionRangerTalents.cpp). Lamenting's heal reads 804474 in reaper_secondary_hits.
+class aura_ascension_reaper_ghostly_weapon : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_reaper_ghostly_weapon);
+
+    bool CheckProc(ProcEventInfo& event)
+    {
+        SpellInfo const* source = event.GetSpellInfo();
+        return IsOwnDamageEvent(GetTarget(), event, true) &&
+            (!source || (source->Id != SPELL_GHOSTLY_WEAPON_DAMAGE && source->Id != SPELL_SOULS_FOR_THE_SLAUGHTER_DAMAGE));
+    }
+
+    void Proc(AuraEffect const* effect, ProcEventInfo& event)
+    {
+        PreventDefaultAction();
+        uint64 amount = uint64(event.GetDamageInfo()->GetDamage()) * uint32(std::clamp(effect->GetAmount(), 0, 1000)) / 100;
+        if (amount && sSpellMgr->GetSpellInfo(SPELL_GHOSTLY_WEAPON_DAMAGE))
+            GetTarget()->CastCustomSpell(SPELL_GHOSTLY_WEAPON_DAMAGE, SPELLVALUE_BASE_POINT0, ClampToInt32(amount),
+                event.GetActionTarget(), true, nullptr, effect);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_reaper_ghostly_weapon::CheckProc);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_reaper_ghostly_weapon::Proc, EFFECT_0, AuraType(354));
+    }
+};
+
+// Souls for the Slaughter 504304 (5 s, posed by reaper_secondary_hits on a Slaughter crit):
+// "your auto attacks deal an additional $504304s1% Shadow damage". e0 aura 354 toward 575847,
+// a copy helper. spell_proc 504304: auto attacks only.
+class aura_ascension_reaper_souls_for_the_slaughter : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_reaper_souls_for_the_slaughter);
+
+    bool CheckProc(ProcEventInfo& event)
+    {
+        return IsOwnDamageEvent(GetTarget(), event, true) && !event.GetSpellInfo() &&
+            (event.GetTypeMask() & PROC_FLAG_DONE_MELEE_AUTO_ATTACK);
+    }
+
+    void Proc(AuraEffect const* effect, ProcEventInfo& event)
+    {
+        PreventDefaultAction();
+        uint64 amount = uint64(event.GetDamageInfo()->GetDamage()) * uint32(std::clamp(effect->GetAmount(), 0, 1000)) / 100;
+        if (amount && sSpellMgr->GetSpellInfo(SPELL_SOULS_FOR_THE_SLAUGHTER_DAMAGE))
+            GetTarget()->CastCustomSpell(SPELL_SOULS_FOR_THE_SLAUGHTER_DAMAGE, SPELLVALUE_BASE_POINT0,
+                ClampToInt32(amount), event.GetActionTarget(), true, nullptr, effect);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_reaper_souls_for_the_slaughter::CheckProc);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_reaper_souls_for_the_slaughter::Proc, EFFECT_0, AuraType(354));
+    }
+};
+
+// Siphon Anima 572768 (10 s, posed by reaper_secondary_hits on a Spectral Scythe summon):
+// "you now heal for $572768s1% of your damage dealt". e0 aura 354 toward 504306, a heal copy
+// helper. spell_proc 572768: direct damage done (auto attacks, melee techniques, magic). The
+// killing blow still heals, hence no "alive" requirement on the victim.
+class aura_ascension_reaper_siphon_anima : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_reaper_siphon_anima);
+
+    bool CheckProc(ProcEventInfo& event)
+    {
+        return IsOwnDamageEvent(GetTarget(), event, false);
+    }
+
+    void Proc(AuraEffect const* effect, ProcEventInfo& event)
+    {
+        PreventDefaultAction();
+        uint64 amount = uint64(event.GetDamageInfo()->GetDamage()) * uint32(std::clamp(effect->GetAmount(), 0, 100)) / 100;
+        if (amount && sSpellMgr->GetSpellInfo(SPELL_SIPHON_ANIMA_HEAL))
+            GetTarget()->CastCustomSpell(SPELL_SIPHON_ANIMA_HEAL, SPELLVALUE_BASE_POINT0, ClampToInt32(amount),
+                GetTarget(), true, nullptr, effect);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_reaper_siphon_anima::CheckProc);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_reaper_siphon_anima::Proc, EFFECT_0, AuraType(354));
+    }
+};
+
+// Hard Bargain 300569: "While Tormented Souls is active on you, your melee attack speed is
+// increased by $572300s1% and your Dreadwake costs $/10;572300s2 less Runic Power." 572300
+// has DurationIndex 2 (300000010 ms, i.e. unbounded), so it lives exactly as long as 500481:
+// posed with it (new application or refresh, Unit.cpp OnAuraApply) and taken away with it.
+// Not saved (metadata below): a relog rebuilds it on the next Tormented Souls.
+//
+// Life Tap 706788 e0 (aura 4, amount 200): Spectral Warden "now heals you equal to $s1% of the
+// damage it deals". Not through HealFromDamage, which caps at 100%. Waits for the creature:
+// see NPC_SPECTRAL_WARDEN.
+class reaper_tormented_souls_events : public UnitScript
+{
+public:
+    reaper_tormented_souls_events() : UnitScript("reaper_tormented_souls_events", true,
+        {UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE, UNITHOOK_ON_DAMAGE}) { }
+
+    void OnAuraApply(Unit* unit, Aura* aura) override
+    {
+        Player* player = unit ? unit->ToPlayer() : nullptr;
+        if (!player || player->getClass() != CLASS_REAPER || !aura || aura->GetId() != SPELL_TORMENTED_SOULS_BUFF ||
+            aura->GetCasterGUID() != player->GetGUID() || !player->IsInWorld() || !player->IsAlive() ||
+            !player->HasAura(SPELL_HARD_BARGAIN) || player->HasAura(SPELL_HARD_BARGAIN_BUFF, player->GetGUID()) ||
+            !sSpellMgr->GetSpellInfo(SPELL_HARD_BARGAIN_BUFF))
+            return;
+        player->CastSpell(player, SPELL_HARD_BARGAIN_BUFF, true);
+    }
+
+    void OnAuraRemove(Unit* unit, AuraApplication* application, AuraRemoveMode) override
+    {
+        Player* player = unit ? unit->ToPlayer() : nullptr;
+        if (!player || player->getClass() != CLASS_REAPER || !application)
+            return;
+        Aura* aura = application->GetBase();
+        if (aura && aura->GetId() == SPELL_TORMENTED_SOULS_BUFF && aura->GetCasterGUID() == player->GetGUID())
+            player->RemoveAurasDueToSpell(SPELL_HARD_BARGAIN_BUFF, player->GetGUID());
+    }
+
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (!attacker || !damage || !attacker->IsCreature() || attacker->GetEntry() != NPC_SPECTRAL_WARDEN ||
+            !victim || victim == attacker)
+            return;
+        Player* owner = attacker->GetCharmerOrOwnerPlayerOrPlayerItself();
+        if (!owner || owner->getClass() != CLASS_REAPER || !owner->IsAlive() || !owner->IsInWorld() || owner == victim)
+            return;
+        AuraEffect const* lifeTap = owner->GetAuraEffect(SPELL_LIFE_TAP, EFFECT_0);
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(SPELL_LIFE_TAP);
+        if (!lifeTap || !info)
+            return;
+        uint64 amount = uint64(damage) * uint32(std::clamp(lifeTap->GetAmount(), 0, 1000)) / 100;
+        if (!amount)
+            return;
+        HealInfo heal(owner, owner, uint32(ClampToInt32(amount)), info, SPELL_SCHOOL_MASK_SHADOW);
+        owner->HealBySpell(heal);
+    }
+};
+
 class reaper_secondary_metadata : public GlobalScript
 {
 public:
@@ -173,7 +504,16 @@ public:
         if (info->Id == SPELL_ENDBRINGER_HEAL)
             // This heal copies resolved weapon damage; native healing-taken effects still apply.
             info->DmgClass = SPELL_DAMAGE_CLASS_NONE;
-        if (info->Id == SPELL_SPIRIT_WALKER_SPEED || info->Id == SPELL_CRIMSON_STACK)
+        // Ghostly Weapon's copy helper already carries SPELL_ATTR4_IGNORE_DAMAGE_TAKEN_MODIFIERS
+        // but, unlike 575847, 705425 and 807420, not IGNORE_CASTER_MODIFIERS: the copied melee
+        // damage would take the caster's bonuses a second time.
+        if (info->Id == SPELL_GHOSTLY_WEAPON_DAMAGE && info->DmgClass == SPELL_DAMAGE_CLASS_MELEE)
+            info->AttributesEx3 |= SPELL_ATTR3_IGNORE_CASTER_MODIFIERS;
+        // Session-bound auras: Hard Bargain follows 500481, the two Reap transformations and the
+        // Decimation counter drive a temporary spell replacement that a relog does not keep.
+        if (info->Id == SPELL_SPIRIT_WALKER_SPEED || info->Id == SPELL_CRIMSON_STACK ||
+            info->Id == SPELL_HARD_BARGAIN_BUFF || info->Id == SPELL_REDSHADE_THRESH ||
+            info->Id == SPELL_DECIMATION_COUNT || info->Id == SPELL_DECIMATION_WINDOW)
         {
             info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
             info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
@@ -187,5 +527,9 @@ void AddSC_AscensionReaperSecondary()
     new reaper_ghost_speed();
     new reaper_secondary_hits();
     new reaper_secondary_metadata();
+    new reaper_tormented_souls_events();
     RegisterSpellScript(aura_ascension_crimson_thirst);
+    RegisterSpellScript(aura_ascension_reaper_ghostly_weapon);
+    RegisterSpellScript(aura_ascension_reaper_souls_for_the_slaughter);
+    RegisterSpellScript(aura_ascension_reaper_siphon_anima);
 }

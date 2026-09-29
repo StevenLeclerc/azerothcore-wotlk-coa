@@ -9,6 +9,7 @@
 #include "ScriptMgr.h"
 #include "Spell.h"
 #include "SpellAuraEffects.h"
+#include "WorldSession.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
@@ -102,6 +103,12 @@ public:
             return;
         if (Spender(info) && !Count(player,Brood))
             result = SPELL_FAILED_NO_POWER;
+        // Tooltip of every Spender rank: "Requires Spider Form"; Brood Marks outlive the form.
+        // Bots are exempt: their AI never leaves Beetle Form for Spider Form, and this check
+        // would silence every Stalking bot (the AI fix belongs in mod-playerbots).
+        if (result == SPELL_CAST_OK && Spender(info) && !player->HasAura(Spider) &&
+            !(player->GetSession() && player->GetSession()->IsBot()))
+            result = SPELL_FAILED_ONLY_SHAPESHIFT;
         if (info->Id == 504705 && (!player->HasAura(807600) || Count(player,807244) < 2))
             result = SPELL_FAILED_CANT_DO_THAT_RIGHT_NOW;
         Unit* target = spell->m_targets.GetUnitTarget();

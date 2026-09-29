@@ -4093,6 +4093,16 @@ int32 Unit::GetAscensionConditionalCombatModifier(Unit const* victim, SpellInfo 
                         aura->GetSpellInfo()->SpellFamilyName == 29 && aura->GetSpellInfo()->Dispel == DISPEL_DISEASE)
                         return true;
         }
+        // Runemaster Leyfrost 712464 (aura 262): "your next spell is treated as if the target were
+        // Frozen". Spell::CheckCast honours aura 262 for cast requirements only; the conditional
+        // damage/crit contracts need the same answer. Scoped to 712464 and to the spells its own
+        // mask selects. The window is consumed in OnSpellCast (AscensionRunemasterSecondary.cpp),
+        // after handle_immediate: instant hits see it, a delayed projectile does not.
+        if (condition == AURA_STATE_FROZEN && !creature && spellInfo)
+            for (AuraEffect const* ignore : GetAuraEffectsByType(SPELL_AURA_ABILITY_IGNORE_AURASTATE))
+                if (ignore->GetId() == 712464 && ignore->GetCasterGUID() == GetGUID() &&
+                    ignore->IsAffectedOnSpell(spellInfo))
+                    return true;
         return creature ? condition > 0 && (victim->GetCreatureTypeMask() & uint32(condition)) :
             victim->HasAscensionConditionalCombatState(condition);
     });

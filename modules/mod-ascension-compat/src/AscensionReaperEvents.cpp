@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "AscensionSpellSafe.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -28,7 +29,23 @@ enum ReaperEventSpells : uint32
     SPELL_DOMINION = 803999,
     SPELL_DOMINION_ARMOR = 804000,
     SPELL_WEAKENED_SOULS = 92146,
-    SPELL_WEAKENED_SOUL = 803433
+    SPELL_WEAKENED_SOUL = 803433,
+
+    SPELL_SOUL_HARVESTER = 804311,
+    SPELL_SOUL_HARVESTER_REGEN = 804312,
+    SPELL_TORMENTOR = 92147,
+    SPELL_TORMENTOR_AMOUNT = 504558,
+    SPELL_TORMENTED_SOULS = 500483,
+    SPELL_SOUL_HARVEST = 504012,
+    SPELL_SOUL_HARVEST_BLAST = 573050,
+    SPELL_PAINBRINGER = 680995,
+    SPELL_PAINBRINGER_TRIGGER = 520533,
+    SPELL_PAINBRINGER_EXTEND = 520877,
+    SPELL_MASOCHISTIC_RAGE = 570097,
+    SPELL_PURGATORY = 504046,
+    SPELL_PURGATORY_BUFF = 504047,
+    SPELL_DAMNED = 706786,
+    SPELL_DAMNED_SPEED = 560420
 };
 
 // Weakened Soul lasts 15 s. This number is a DESIGN DECISION taken by the realm owner on
@@ -151,7 +168,52 @@ class aura_ascension_reaper_soul_events : public AuraScript
                 if (SpellInfo const* culling = sSpellMgr->GetSpellInfo(SPELL_SPIRIT_CULLING))
                     if (roll_chance_i(int32(std::min<uint32>(culling->ProcChance, 100))))
                         player->CastSpell(player, SPELL_SPIRIT_CULLING_SCYTHE, true);
+
+            // Painbringer 680995: "Generating Reaped Souls now has a $h% chance to trigger
+            // Masochistic Rage for $520533s1 sec. If Masochistic Rage is already active, it
+            // will instead extend the duration by $520877s1 sec." ProcFlags 0 and no spell_proc
+            // row: the talent has no engine but this one, so no row may ever be added (double
+            // roll). 520533 is effect 178, EffectNULL in the core (SpellEffects.cpp:250): its
+            // 5 s is read here and applied to 570097. 520877 is effect 177, native
+            // (EffectAscensionModifyAuraDuration). $h goes through SPELLMOD_CHANCE_OF_SUCCESS.
+            if (Still() && player->HasAura(SPELL_PAINBRINGER))
+                if (SpellInfo const* painbringer = sSpellMgr->GetSpellInfo(SPELL_PAINBRINGER))
+                {
+                    int32 chance = int32(std::min<uint32>(painbringer->ProcChance, 100));
+                    player->ApplySpellMod(SPELL_PAINBRINGER, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+                    if (roll_chance_i(chance))
+                    {
+                        if (player->HasAura(SPELL_MASOCHISTIC_RAGE, player->GetGUID()))
+                            player->CastSpell(player, SPELL_PAINBRINGER_EXTEND, true);
+                        else if (SpellInfo const* trigger = sSpellMgr->GetSpellInfo(SPELL_PAINBRINGER_TRIGGER))
+                        {
+                            player->CastSpell(player, SPELL_MASOCHISTIC_RAGE, true);
+                            // The maximum stays 570097's own 15 s, so the +3 s extensions keep
+                            // room to grow under it on the client's timer.
+                            if (Aura* rage = player->GetAura(SPELL_MASOCHISTIC_RAGE, player->GetGUID()))
+                                rage->SetDuration(std::clamp(trigger->Effects[EFFECT_0].CalcValue(player), 1,
+                                    std::max(1, rage->GetMaxDuration())));
+                        }
+                    }
+                }
         }
+
+        // Soul Harvest 504012: "Generating Reaped Souls now triggers Soul Harvest" (573050,
+        // "Blasts your target ..., healing for 100% of the damage dealt"). Once per gain, not
+        // once per soul: a 3-soul award (Wraithblade, Sinister Litany) strikes once. 573050
+        // aims at an enemy (implicit target 6), so it goes to the Reaper's victim, never to
+        // himself. Same engine rule as Painbringer: no spell_proc row on 504012, ever.
+        if (Still() && player->HasAura(SPELL_SOUL_HARVEST))
+            if (SpellInfo const* blast = sSpellMgr->GetSpellInfo(SPELL_SOUL_HARVEST_BLAST))
+            {
+                Unit* victim = player->GetVictim();
+                if (!victim)
+                    victim = player->GetSelectedUnit();
+                if (victim && victim != player && victim->IsAlive() && player->IsValidAttackTarget(victim) &&
+                    player->IsWithinDistInMap(victim, blast->GetMaxRange(false, player)) &&
+                    player->IsWithinLOSInMap(victim))
+                    player->CastSpell(victim, SPELL_SOUL_HARVEST_BLAST, true);
+            }
 
         // Eater of Souls stays OUT of the loop on purpose: its tooltip reads "Reaching 3
         // Reaped Souls", a threshold, not a gain; "... This will not trigger while
@@ -186,8 +248,24 @@ class aura_ascension_reaper_soul_events : public AuraScript
     }
 };
 
-// Dominion: "Gaining Soul Infusion now increases your Armor by ... for 804000d."
-// Soul Infusion is an aura, not a proc event, so the hook is its own application.
+// Soul Infusion is an aura, not a proc event: gaining it is its own application, and
+// consuming it is its removal. Every talent below reads one of the two, never a spell_proc
+// row (it would be a second engine).
+//   Dominion 803999: "Gaining Soul Infusion now increases your Armor by ... for 804000d."
+//   Purgatory 504046: "When you gain Soul Infusion, the damage of your Soulrend and Reliquary
+//     of the Lost is increased by $504047s1% for $504047d, stacking $504047u times."
+//   Damned 706786: "When you gain Soul Infusion, your movement speed is increased by
+//     $560420s2% for $560420d."
+//   Tormentor 92147 (Domination, level 10 passive): "Consuming Soul Infusion now reduces the
+//     cooldown of Tormented Souls by $/1000;504558s1 sec." Its two DBC effects point at other
+//     spells (359019, 805077) and have no proc; the value lives in 504558 e0 (effect 165
+//     MODIFY_COOLDOWN, misc 500483, -3000 ms), which is never cast: its e1 would also grant
+//     mana. Consumption is RemoveAurasDueToSpell (AscensionCompat.cpp ConsumeReaperSouls) or
+//     561290 effect 164 (EffectRemoveAura): both remove with AURA_REMOVE_BY_DEFAULT. Expiry,
+//     death and a cancel are not a consumption. Tormented Souls consumes Soul Infusion itself
+//     before its own cooldown is set: the remaining delay is then 0 and nothing happens.
+// The new ids are deliberately NOT added to Validate(): a missing one would destroy the whole
+// script, Dominion included. Each is tested where it is used.
 class aura_ascension_reaper_soul_infusion : public AuraScript
 {
     PrepareAuraScript(aura_ascension_reaper_soul_infusion);
@@ -201,18 +279,76 @@ class aura_ascension_reaper_soul_infusion : public AuraScript
     {
         Unit* owner = GetTarget();
         Player* player = owner ? owner->ToPlayer() : nullptr;
-        if (!player || player->getClass() != CLASS_REAPER || !player->IsInWorld() ||
-            !player->IsAlive() || !player->HasAura(SPELL_DOMINION))
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsInWorld() || !player->IsAlive())
             return;
         // 804000 carries the armour amount and the duration; it refreshes on its own.
-        player->CastSpell(player, SPELL_DOMINION_ARMOR, true);
+        if (player->HasAura(SPELL_DOMINION))
+            player->CastSpell(player, SPELL_DOMINION_ARMOR, true);
+        // 504047 and 560420 carry their own amount, duration and stack cap.
+        if (player->HasAura(SPELL_PURGATORY) && sSpellMgr->GetSpellInfo(SPELL_PURGATORY_BUFF))
+            player->CastSpell(player, SPELL_PURGATORY_BUFF, true);
+        if (player->HasAura(SPELL_DAMNED) && sSpellMgr->GetSpellInfo(SPELL_DAMNED_SPEED))
+            player->CastSpell(player, SPELL_DAMNED_SPEED, true);
+    }
+
+    void Consumed(AuraEffect const*, AuraEffectHandleModes)
+    {
+        AuraApplication const* application = GetTargetApplication();
+        if (!application || application->GetRemoveMode() != AURA_REMOVE_BY_DEFAULT)
+            return;
+        Unit* owner = GetTarget();
+        Player* player = owner ? owner->ToPlayer() : nullptr;
+        // Logout removes every aura with AURA_REMOVE_BY_DEFAULT too.
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsInWorld() || !player->IsAlive() ||
+            !player->GetSession() || player->GetSession()->PlayerLogout() || !player->HasAura(SPELL_TORMENTOR))
+            return;
+        int32 delta = AscensionSpellSafe::EffectValue(SPELL_TORMENTOR_AMOUNT, EFFECT_0, player, -3000);
+        uint32 remaining = player->GetSpellCooldownDelay(SPELL_TORMENTED_SOULS);
+        if (!remaining || delta >= 0)
+            return;
+        // Same rule as the core's ModifyAscensionCooldown (SpellEffects.cpp): a reduction that
+        // covers what is left is a reset.
+        if (uint64(-int64(delta)) >= remaining)
+            player->RemoveSpellCooldown(SPELL_TORMENTED_SOULS, true);
+        else
+            player->ModifySpellCooldown(SPELL_TORMENTED_SOULS, delta);
     }
 
     void Register() override
     {
         AfterEffectApply += AuraEffectApplyFn(aura_ascension_reaper_soul_infusion::Infused,
             EFFECT_ALL, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL);
+        // 803031 carries a single aura effect (e0, aura 42): EFFECT_ALL runs this once.
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_reaper_soul_infusion::Consumed,
+            EFFECT_ALL, SPELL_AURA_ANY, AURA_EFFECT_HANDLE_REAL);
     }
+};
+
+// Soul Harvester 804311, every Reaper's level-1 passive: "Landing the killing blow on a target
+// that yields experience or honor now grants Soul Harvester for $804312d." ProcFlags 0 and no
+// spell_proc row: the kill is observed here, on the barbarian_kills model
+// (AscensionBarbarianCompletion.cpp). HasAura is right: 804311 carries auras 42 and 4, no
+// effect 190. No hook for the pet's kills: the tooltip says "landing the killing blow". No
+// spell_proc row may be added on 804311 as well (double grant).
+class reaper_kill_events : public PlayerScript
+{
+public:
+    reaper_kill_events() : PlayerScript("reaper_kill_events",
+        {PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_CREATURE_KILL}) { }
+
+    static void Killed(Player* player, Unit* killed)
+    {
+        // OnPlayerPVPKill also arrives with killer == victim (falling, drowning).
+        if (!player || !killed || killed == player || player->getClass() != CLASS_REAPER ||
+            !player->IsAlive() || !player->IsInWorld())
+            return;
+        if (player->HasAura(SPELL_SOUL_HARVESTER) && player->isHonorOrXPTarget(killed) &&
+            sSpellMgr->GetSpellInfo(SPELL_SOUL_HARVESTER_REGEN))
+            player->CastSpell(player, SPELL_SOUL_HARVESTER_REGEN, true);
+    }
+
+    void OnPlayerPVPKill(Player* killer, Player* killed) override { Killed(killer, killed); }
+    void OnPlayerCreatureKill(Player* killer, Creature* killed) override { Killed(killer, killed); }
 };
 
 // Weakened Souls: "Your Soulrend now also applies Weakened Soul". The proc window is a
@@ -321,4 +457,5 @@ void AddSC_AscensionReaperEvents()
     RegisterSpellScript(aura_ascension_reaper_soul_events);
     RegisterSpellScript(aura_ascension_reaper_soul_infusion);
     RegisterSpellScript(aura_ascension_weakened_souls);
+    new reaper_kill_events();
 }

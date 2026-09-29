@@ -415,8 +415,14 @@ public:
                 if (Named(info,706962) && player->HasAura(706038))
                     sp *= 1 + Amount(706038) / 100.0f; // Local relative coefficient interpretation.
                 if (Named(info,800946))
-                    if (AuraEffect const* talent = player->GetAuraEffectOfRankedSpell(560194,EFFECT_1))
+                {
+                    // 560194 / 561349: two ids of CA node 6646, no rank chain; SetTalentRank keeps only one.
+                    AuraEffect const* talent = player->GetAuraEffect(561349,EFFECT_1);
+                    if (!talent)
+                        talent = player->GetAuraEffect(560194,EFFECT_1);
+                    if (talent)
                         sp *= 1 + talent->GetAmount() / 100.0f;
+                }
                 if (info->Id == 504543)
                     sp = State(player).mushroomCoefficient;
                 if (info->Id == 560202 || Named(info,800899) || Named(info,800901))

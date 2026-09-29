@@ -26,6 +26,12 @@ constexpr AscensionConditionalCombatRule AscensionConditionalCombatRules[] =
 {
     { 560444, 18, 0, 112, 20000, 2, 29, 1, 21000, 2, 1, 1,
         { 0u, 2052u, 0u } }, // Overkill
+    // Reaper (famille 36). Ajout a la main le 2026-09-29 : le generateur cite
+    // en tete n'existe pas dans l'arbre. Valeurs lues dans Spell.dbc serveur.
+    { 560486, 36, 0, 112, 20000, 2, 14, 1, 21000, 2, 1, 1,
+        { 258u, 1073743936u, 33554436u } }, // Final Requiem rang 1
+    { 561358, 36, 0, 112, 20000, 2, 29, 1, 21000, 2, 1, 1,
+        { 258u, 1073743936u, 33554436u } }, // Final Requiem rang 2
     { 560517, 18, 0, 112, 20000, 28, 24, 1, 21010, 28, 1, 1,
         { 4294836223u, 4294836223u, 4294836223u } }, // Skullseeker
     { 705234, 18, 0, 112, 20000, 18, 7, 1, 21000, 18, 1, 1,

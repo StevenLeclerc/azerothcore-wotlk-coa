@@ -6,7 +6,9 @@
 #include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
+#include "Random.h"
 #include "SpellScript.h"
+#include "WorldSession.h"
 #include <array>
 
 namespace
@@ -79,6 +81,42 @@ bool ValidateEarthshapingHelpers()
         eruption->Effects[EFFECT_2].SpellClassMask == flag96(0, 0, 2097152);
 }
 
+// Vague 5 : talents « Generating Earthshaping ... ». Aucun ProcFlags ne dit « une pile
+// d'Earthshaping gagnee » : les piles viennent du module (ResourceGainRules, GainEarthshaping,
+// effets 175), jamais d'un evenement de proc. Le seul point commun a tous ces chemins est le
+// changement de montant de 680441, vu ici. Une baisse (Heavy Earth, effet 175 -1) n'est pas un gain.
+constexpr uint32 SPELL_LITHIC_LANCE_TALENT = 706159;   // 20 %, -> 807048
+constexpr uint32 SPELL_LITHIC_LANCE_READY  = 807048;
+constexpr uint32 SPELL_DREAM_TALENT        = 680452;   // a 10 piles ou plus, -> 578256 -> 578255
+constexpr uint32 SPELL_DREAM               = 578255;
+constexpr uint32 SPELL_CATACLYSM           = 680444;   // 10 %, -> 680445 (moitie Stoneshard en spell_proc)
+constexpr uint32 SPELL_SEISMIC_RESET       = 680445;
+constexpr uint8 DREAM_THRESHOLD = 10;
+
+// ProcChance du talent, modifie par SPELLMOD_CHANCE_OF_SUCCESS (piege n. 3 de la procedure).
+bool RollTalentChance(Player* player, uint32 talentId)
+{
+    SpellInfo const* talent = sSpellMgr->GetSpellInfo(talentId);
+    if (!talent)
+        return false;
+    float chance = float(talent->ProcChance);
+    player->ApplySpellMod(talentId, SPELLMOD_CHANCE_OF_SUCCESS, chance);
+    return roll_chance_f(chance);
+}
+
+void OnEarthshapingGained(Player* player, uint8 stacks)
+{
+    if (!player->IsAlive() || !player->IsInWorld())
+        return;
+    if (player->HasAura(SPELL_LITHIC_LANCE_TALENT) && RollTalentChance(player, SPELL_LITHIC_LANCE_TALENT))
+        player->CastSpell(player, SPELL_LITHIC_LANCE_READY, true);
+    // 578256 (TRIGGER_SPELL, tA 6) exige une cible unite ; 578255 vise le lanceur (tA 1).
+    if (stacks >= DREAM_THRESHOLD && player->HasAura(SPELL_DREAM_TALENT))
+        player->CastSpell(player, SPELL_DREAM, true);
+    if (player->HasAura(SPELL_CATACLYSM) && RollTalentChance(player, SPELL_CATACLYSM))
+        player->CastSpell(player, SPELL_SEISMIC_RESET, true);
+}
+
 class spell_ascension_primalist_earthshaping : public AuraScript
 {
     PrepareAuraScript(spell_ascension_primalist_earthshaping);
@@ -99,10 +137,19 @@ class spell_ascension_primalist_earthshaping : public AuraScript
     void Apply(AuraEffect const*, AuraEffectHandleModes)
     {
         SynchronizeEarthshapingHelpers(GetTarget(), false);
+
+        uint8 current = GetStackAmount();
+        bool gained = current > _previousStacks;
+        _previousStacks = current;
+        Player* player = GetTarget()->ToPlayer();
+        // Une aura rechargee a la connexion n'est pas un gain.
+        if (gained && player && player->GetSession() && !player->GetSession()->PlayerLoading())
+            OnEarthshapingGained(player, current);
     }
 
     void Remove(AuraEffect const*, AuraEffectHandleModes)
     {
+        _previousStacks = 0;
         SynchronizeEarthshapingHelpers(GetTarget(), true);
     }
 
@@ -113,6 +160,8 @@ class spell_ascension_primalist_earthshaping : public AuraScript
         AfterEffectRemove += AuraEffectRemoveFn(spell_ascension_primalist_earthshaping::Remove,
             EFFECT_0, SPELL_AURA_HASTE_SPELLS, AURA_EFFECT_HANDLE_REAL);
     }
+
+    uint8 _previousStacks = 0;
 };
 
 class spell_ascension_primalist_therazane_update : public AuraScript
