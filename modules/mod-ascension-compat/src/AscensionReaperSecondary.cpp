@@ -1,14 +1,22 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionReaperTalents.h"
+#include "DynamicObject.h"
+#include "MotionMaster.h"
+#include "ObjectAccessor.h"
+#include "PetDefines.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "ScriptedCreature.h"
 #include "Spell.h"
 #include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
+#include "TemporarySummon.h"
+#include "ThreatManager.h"
 #include <algorithm>
 #include <limits>
+#include <vector>
 
 namespace
 {
@@ -68,13 +76,28 @@ enum ReaperSecondarySpells : uint32
     SPELL_REDSHADE_THRESH = 525058,
     SPELL_DECIMATION_COUNT = 573289,
     SPELL_DECIMATION_WINDOW = 704215,
-    SPELL_DECIMATE = 500523
+    SPELL_DECIMATE = 500523,
+    SPELL_SPECTRAL_WARDEN = 805716,
+    SPELL_WRAITHBLADE = 805258,
+    SPELL_THE_END_IS_NEAR = 680996,
+    SPELL_THE_END_IS_NEAR_SUMMON = 707100,
+    SPELL_GRAVESITE_TALENT = 572213,
+    SPELL_GRAVESITE = 804722,
+    SPELL_GRAVESITE_DAMAGE = 300979,
+    SPELL_CLONE_ME = 45204
 };
 
-// Spectral Warden 805716 summons this entry (effect 28, misc 100481). MEASURED 2026-09-28:
-// acore_world.creature_template has no row 100481, so the summon fails today and Life Tap's
-// heal below has nothing to read. The code waits for the creature, it does not replace it.
+// Spectral Warden 805716 summons this entry (effect 28, misc 100481, SummonProperties 61) and
+// The End Is Near 707100 summons 850000 (misc 850000, SummonProperties 61). Neither row existed
+// in acore_world.creature_template before 2026_09_30_00_ascension_reaper_creatures.sql, which
+// creates both with ScriptName npc_ascension_reaper_summon (below).
+// SummonProperties 61 = Category 1 (ALLY), Type 2 (GUARDIAN), Slot 0, Flags 2: Map::SummonCreature
+// builds a Guardian, Minion::InitStats -> Unit::SetMinion sets its OwnerGUID to the Reaper, so
+// GetCharmerOrOwnerPlayerOrPlayerItself() returns the Reaper (Life Tap below relies on it).
 constexpr uint32 NPC_SPECTRAL_WARDEN = 100481;
+constexpr uint32 NPC_THE_END_IS_NEAR = 850000;
+// Distance past which a summon leaves its master and despawns (same leash as the Xoroth summons).
+constexpr float REAPER_SUMMON_LEASH = 100.0f;
 
 // Spell::m_scriptEventMask bits used by this file, on Slaughter and Soulslam only. 16-21 and
 // 25-31 are taken elsewhere in the module (Soul Strike uses 18); 0-4 are ResourceEvent.
@@ -184,6 +207,24 @@ public:
 
         if (spell->IsTriggered())
             return;
+
+        // The End Is Near 680996: "Wraithblade now creates a spectral version of yourself for
+        // $707100d that casts Dirge and Murder on enemies." 680996 e0 is an aura 42 toward
+        // 707100 with ProcFlags 0 and no spell_proc row: the core never fires it, this is the
+        // engine. Every Wraithblade rank (805258 chain), untriggered casts only: one clone per cast.
+        if (sSpellMgr->GetFirstSpellInChain(info->Id) == SPELL_WRAITHBLADE && player->HasAura(SPELL_THE_END_IS_NEAR) &&
+            sSpellMgr->GetSpellInfo(SPELL_THE_END_IS_NEAR_SUMMON))
+            player->CastSpell(player, SPELL_THE_END_IS_NEAR_SUMMON, true);
+
+        // Gravesite 572213: "Casting Endbringer now marks the ground beneath you as your Gravesite
+        // for $804722d." 804722 e1 is effect 27 (persistent area aura): a DynamicObject at the
+        // caster. One Gravesite per Reaper: an older one is removed first.
+        if (info->Id == SPELL_ENDBRINGER && player->HasAura(SPELL_GRAVESITE_TALENT) &&
+            sSpellMgr->GetSpellInfo(SPELL_GRAVESITE))
+        {
+            player->RemoveDynObject(SPELL_GRAVESITE); // removes every one of them
+            player->CastSpell(player, SPELL_GRAVESITE, true);
+        }
 
         // Decimation 704193: "transforms your NEXT Reap into Decimate". Decimate 500523 carries no
         // remover of the 704215 window (e0 121, e1 31), so one cast ends it here. Deferred: the
@@ -438,8 +479,8 @@ class aura_ascension_reaper_siphon_anima : public AuraScript
 // Not saved (metadata below): a relog rebuilds it on the next Tormented Souls.
 //
 // Life Tap 706788 e0 (aura 4, amount 200): Spectral Warden "now heals you equal to $s1% of the
-// damage it deals". Not through HealFromDamage, which caps at 100%. Waits for the creature:
-// see NPC_SPECTRAL_WARDEN.
+// damage it deals". Not through HealFromDamage, which caps at 100%. The Warden is a
+// Guardian owned by the Reaper: see NPC_SPECTRAL_WARDEN.
 class reaper_tormented_souls_events : public UnitScript
 {
 public:
@@ -484,6 +525,253 @@ public:
             return;
         HealInfo heal(owner, owner, uint32(ClampToInt32(amount)), info, SPELL_SCHOOL_MASK_SHADOW);
         owner->HealBySpell(heal);
+    }
+};
+
+// Gravesite 572213: "Direct critical strikes made against enemies within a Gravesite now deals
+// 300979 Shadow damage." 572213 e0 is an aura 42 (PROC_TRIGGER_SPELL) toward 300979 with
+// ProcFlags 0: spell_proc 572213 (2026_09_30_00_ascension_reaper_creatures.sql) opens the window
+// on direct hits only (auto attacks, melee, none and magic damage classes; no periodic flag),
+// HitMask critical, and TRIGGERED_CAN_PROC because Dirge's real hits (801311) are triggered. This
+// check keeps the enemies in the Reaper's own Gravesite (its DynamicObject 804722, radius read
+// from the object, i.e. from the DBC) or, per the tooltip's "still active while in another
+// Reaper's Gravesite", carrying 804722's area aura from any caster. The default proc action
+// then casts 300979 on the victim: one cast per hit event. 300979 cannot proc it again
+// (Aura::GetProcEffectMask refuses a spell triggered by the aura itself); the damage copies
+// below are excluded so that one swing does not pay twice.
+bool InGravesite(Unit* reaper, Unit* victim)
+{
+    if (DynamicObject* site = reaper->GetDynObject(SPELL_GRAVESITE))
+        if (site->IsInMap(victim) && site->IsWithinDistInMap(victim, site->GetRadius(), true, false, true))
+            return true;
+    return victim->HasAura(SPELL_GRAVESITE);
+}
+
+class aura_ascension_reaper_gravesite : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_reaper_gravesite);
+
+    bool CheckProc(ProcEventInfo& event)
+    {
+        if (!IsOwnDamageEvent(GetTarget(), event, true) || !(event.GetHitMask() & PROC_HIT_CRITICAL))
+            return false;
+        if (SpellInfo const* source = event.GetSpellInfo())
+            if (source->Id == SPELL_GRAVESITE_DAMAGE || source->Id == SPELL_GHOSTLY_WEAPON_DAMAGE ||
+                source->Id == SPELL_SOULS_FOR_THE_SLAUGHTER_DAMAGE || source->Id == SPELL_ANIMA_AMBUSH)
+                return false;
+        return InGravesite(GetTarget(), event.GetActionTarget());
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_reaper_gravesite::CheckProc);
+    }
+};
+
+// Highest rank of `first` the master knows (spell_ranks chain), 0 when none.
+uint32 HighestKnownRank(Player const* player, uint32 first)
+{
+    for (uint32 id = sSpellMgr->GetLastSpellInChain(first); id; id = sSpellMgr->GetPrevSpellInChain(id))
+        if (player->HasSpell(id))
+            return id;
+    return 0;
+}
+
+// Health and damage follow the master, rescaled every 2 s. No tooltip gives a number: the
+// Warden gets half of the master's health and weapon damage, the clone ("a spectral version of
+// yourself") half of the health and all of the weapon damage, both hands (Dirge strikes with
+// both). Values chosen here, not read anywhere.
+void ScaleReaperSummon(Creature* unit, Player* player)
+{
+    bool clone = unit->GetEntry() == NPC_THE_END_IS_NEAR;
+    float share = clone ? 1.0f : 0.5f;
+    uint32 maximum = std::max(1u, player->GetMaxHealth() / 2);
+    float percent = unit->GetMaxHealth() ? unit->GetHealthPct() / 100.0f : 1.0f;
+    unit->SetLevel(player->GetLevel());
+    unit->SetMaxHealth(maximum);
+    unit->SetHealth(std::max(1u, uint32(maximum * percent)));
+    unit->SetArmor(player->GetArmor());
+    unit->SetAttackTime(BASE_ATTACK, player->GetAttackTime(BASE_ATTACK));
+    unit->SetBaseWeaponDamage(BASE_ATTACK, MINDAMAGE, player->GetFloatValue(UNIT_FIELD_MINDAMAGE) * share);
+    unit->SetBaseWeaponDamage(BASE_ATTACK, MAXDAMAGE, player->GetFloatValue(UNIT_FIELD_MAXDAMAGE) * share);
+    unit->UpdateDamagePhysical(BASE_ATTACK);
+    if (clone)
+    {
+        // Guardian::UpdateDamagePhysical ignores the off hand: the fields are written here.
+        float offMin = player->GetFloatValue(UNIT_FIELD_MINOFFHANDDAMAGE) * share;
+        float offMax = player->GetFloatValue(UNIT_FIELD_MAXOFFHANDDAMAGE) * share;
+        unit->SetAttackTime(OFF_ATTACK, player->GetAttackTime(OFF_ATTACK));
+        unit->SetBaseWeaponDamage(OFF_ATTACK, MINDAMAGE, offMin);
+        unit->SetBaseWeaponDamage(OFF_ATTACK, MAXDAMAGE, offMax);
+        unit->SetStatFloatValue(UNIT_FIELD_MINOFFHANDDAMAGE, offMin);
+        unit->SetStatFloatValue(UNIT_FIELD_MAXOFFHANDDAMAGE, offMax);
+    }
+}
+
+// Spectral Warden 100481 (805716): "a spectral guardian to fight along side you ... Threat
+// generated by the Spectral Warden is redirected to the Reaper." Melee on the master's target,
+// threat redirected to the master (ThreatMgr redirect, as the Hellfire Imps of
+// AscensionXorothSummons.cpp). Life Tap's heal is in reaper_tormented_souls_events::OnDamage.
+//
+// The End Is Near 850000 (707100): "a spectral version of yourself ... that casts Dirge and
+// Murder on enemies." Appearance by the native clone, as Mirror Image does (pet_mage.cpp):
+// the master casts Clone Me! 45204 on it (SPELL_AURA_CLONE_CASTER, then copies of both weapons
+// by spell_gen_clone). It casts the master's highest known rank of Dirge 801328 and Murder
+// 500376, triggered for power and cooldown (a creature has no Runic Power), one cast per
+// global cooldown of the spell (StartRecoveryTime, DBC). It does not melee.
+//
+// Both despawn as soon as the master is dead, gone, out of the map or beyond 100 yards; a summon
+// that was not summoned by a Reaper (".npc add") has no master and despawns at its first update.
+struct npc_ascension_reaper_summon : public ScriptedAI
+{
+    explicit npc_ascension_reaper_summon(Creature* creature) : ScriptedAI(creature) { }
+
+    ObjectGuid _master;
+    uint32 _dirge = 0;
+    uint32 _murder = 0;
+    uint32 _scaleTimer = 2000;
+    uint32 _castTimer = 0;
+    bool _dirgeNext = false;
+
+    bool IsClone() const { return me->GetEntry() == NPC_THE_END_IS_NEAR; }
+
+    Player* Master() const
+    {
+        Player* player = _master ? ObjectAccessor::GetPlayer(*me, _master) : nullptr;
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsAlive() || !player->IsInWorld() ||
+            !me->IsWithinDistInMap(player, REAPER_SUMMON_LEASH))
+            return nullptr;
+        return player;
+    }
+
+    void IsSummonedBy(WorldObject* summoner) override
+    {
+        Player* player = summoner ? summoner->ToPlayer() : nullptr;
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsAlive() || me->GetOwnerGUID() != player->GetGUID())
+        {
+            me->DespawnOrUnsummon(1ms);
+            return;
+        }
+        _master = player->GetGUID();
+
+        // One of each per master: an older copy (cooldown reduced below the duration) goes away.
+        std::vector<Creature*> older;
+        for (Unit* controlled : player->m_Controlled)
+            if (controlled != me && controlled->GetEntry() == me->GetEntry() && controlled->IsCreature())
+                older.push_back(controlled->ToCreature());
+        for (Creature* old : older)
+            old->DespawnOrUnsummon(1ms);
+
+        me->SetFaction(player->GetFaction());
+        ScaleReaperSummon(me, player);
+        me->SetFullHealth();
+        me->SetReactState(REACT_PASSIVE); // targets are the master's, chosen in UpdateAI
+        if (IsClone())
+        {
+            _dirge = HighestKnownRank(player, SPELL_DIRGE);
+            _murder = HighestKnownRank(player, SPELL_MURDER);
+            _dirgeNext = !_murder;
+            me->SetCanDualWield(true);
+            if (sSpellMgr->GetSpellInfo(SPELL_CLONE_ME))
+                player->CastSpell(me, SPELL_CLONE_ME, true);
+        }
+        else
+            me->GetThreatMgr().RegisterRedirectThreat(SPELL_SPECTRAL_WARDEN, _master, 100);
+    }
+
+    // No native evade: it strips every aura (the clone would lose its appearance) and walks home.
+    void EnterEvadeMode(EvadeReason /*why*/) override
+    {
+        if (!me->IsAlive())
+            return;
+        me->CombatStop(true);
+        if (Player* player = Master())
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+            {
+                me->GetMotionMaster()->Clear(false);
+                me->GetMotionMaster()->MoveFollow(player, PET_FOLLOW_DIST, me->GetFollowAngle(), MOTION_SLOT_ACTIVE);
+            }
+    }
+
+    Unit* MasterTarget(Player* player) const
+    {
+        Unit* target = player->GetVictim();
+        if (!target && player->IsInCombat())
+            target = player->GetSelectedUnit();
+        if (!target || target == me || !target->IsAlive() || !player->IsValidAttackTarget(target) ||
+            !me->IsValidAttackTarget(target) || !target->IsInMap(me))
+            return nullptr;
+        return target;
+    }
+
+    void UpdateAI(uint32 diff) override
+    {
+        Player* player = Master();
+        if (!player)
+        {
+            me->DespawnOrUnsummon();
+            return;
+        }
+
+        if (_scaleTimer <= diff)
+        {
+            ScaleReaperSummon(me, player);
+            _scaleTimer = 2000;
+        }
+        else
+            _scaleTimer -= diff;
+
+        Unit* target = MasterTarget(player);
+        if (!target)
+        {
+            // AttackStop, not CombatStop: enemies still hitting the Warden keep their combat (its
+            // threat goes to the master anyway); it simply stops swinging and comes back.
+            if (me->GetVictim())
+                me->AttackStop();
+            if (me->GetMotionMaster()->GetCurrentMovementGeneratorType() != FOLLOW_MOTION_TYPE)
+                me->GetMotionMaster()->MoveFollow(player, PET_FOLLOW_DIST, me->GetFollowAngle(), MOTION_SLOT_ACTIVE);
+            return;
+        }
+        if (me->GetVictim() != target)
+            AttackStart(target);
+
+        if (!IsClone())
+        {
+            DoMeleeAttackIfReady();
+            return;
+        }
+
+        if (_castTimer > diff)
+        {
+            _castTimer -= diff;
+            return;
+        }
+        _castTimer = 0;
+        if (me->HasUnitState(UNIT_STATE_CASTING))
+            return;
+
+        SpellInfo const* dirge = _dirge ? sSpellMgr->GetSpellInfo(_dirge) : nullptr;
+        SpellInfo const* murder = _murder ? sSpellMgr->GetSpellInfo(_murder) : nullptr;
+        bool dirgeReady = dirge && me->IsWithinMeleeRange(target);
+        bool murderReady = murder && me->IsWithinDistInMap(target, murder->GetMaxRange(false, me)) &&
+            me->IsWithinLOSInMap(target);
+        SpellInfo const* chosen = nullptr;
+        if (dirgeReady && (_dirgeNext || !murderReady))
+            chosen = dirge;
+        else if (murderReady)
+            chosen = murder;
+        if (!chosen)
+            return;
+
+        TriggerCastFlags flags = TriggerCastFlags(TRIGGERED_IGNORE_POWER_AND_REAGENT_COST |
+            TRIGGERED_IGNORE_SPELL_AND_CATEGORY_CD | TRIGGERED_IGNORE_GCD | TRIGGERED_IGNORE_CASTER_AURAS);
+        if (me->CastSpell(target, chosen, flags) == SPELL_CAST_OK)
+        {
+            _dirgeNext = chosen != dirge;
+            _castTimer = std::max<uint32>(chosen->StartRecoveryTime, 1000);
+        }
+        else
+            _castTimer = 500;
     }
 };
 
@@ -532,4 +820,6 @@ void AddSC_AscensionReaperSecondary()
     RegisterSpellScript(aura_ascension_reaper_ghostly_weapon);
     RegisterSpellScript(aura_ascension_reaper_souls_for_the_slaughter);
     RegisterSpellScript(aura_ascension_reaper_siphon_anima);
+    RegisterSpellScript(aura_ascension_reaper_gravesite);
+    RegisterCreatureAI(npc_ascension_reaper_summon);
 }
