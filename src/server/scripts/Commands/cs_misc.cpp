@@ -1905,6 +1905,14 @@ public:
                 playerTarget->SendNewItem(item, count, true, false);
             }
         }
+        // CoA : depuis la console (RA, panneau web), aucune session, donc `p` est nul et la cible
+        // n'etait jamais avertie. Un bot n'evalue ses ameliorations que sur SMSG_ITEM_PUSH_RESULT
+        // (mod-playerbots, trigger « item push result ») : sans ce paquet, l'objet restait en sac
+        // jusqu'au rafraichissement suivant, qui vide le sac (P-164).
+        else if (!p && count && item)
+        {
+            playerTarget->SendNewItem(item, count, true, false);
+        }
 
         if (noSpaceForCount)
             handler->PSendSysMessage(LANG_ITEM_CANNOT_CREATE, itemId, noSpaceForCount);
