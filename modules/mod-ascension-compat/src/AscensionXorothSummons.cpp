@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionSpellSafe.h"
 #include "AscensionXoroth.h"
+#include "DBCStores.h"
 #include "Map.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
@@ -22,8 +23,14 @@ void Summon(Player* player, uint32 entry, Position const& position, uint32 durat
 {
     if (!player || !player->IsAlive() || !player->IsInWorld())
         return;
-    if (TempSummon* unit =
-            player->GetMap()->SummonCreature(entry, position, nullptr, duration + (entry == 51323 ? 500 : 0), player))
+    // Hellfire Imps and the Abyssal fight for the knight: summon them as true guardians (SummonProperties
+    // 61, category ALLY, type GUARDIAN, slot 0, as the Reaper's Spectral Warden). SetMinion then puts them in
+    // m_Controlled with the creator field and the owner's PvP/FFA byte, kept in sync by the core: the client
+    // sees them as the player's own (no longer hostile in High Risk) and the combat log credits their damage.
+    SummonPropertiesEntry const* properties =
+        (entry == 50301 || entry == 50375) ? sSummonPropertiesStore.LookupEntry(61) : nullptr;
+    if (TempSummon* unit = player->GetMap()->SummonCreature(entry, position, properties,
+                                                            duration + (entry == 51323 ? 500 : 0), player))
         unit->SetTempSummonType(TEMPSUMMON_TIMED_DESPAWN);
 }
 } // namespace AscensionXoroth
@@ -85,7 +92,7 @@ struct npc_ascension_xoroth_summon : public ScriptedAI
             me->SetReactState(REACT_DEFENSIVE);
             if (me->GetEntry() == 50301)
             {
-                // This TempSummon bypasses SetMinion; Firebolt still needs player target and immunity rules.
+                // SetMinion (guardian, SummonProperties 61) already sets these; kept for Firebolt target and immunity rules.
                 me->m_ControlledByPlayer = true;
                 me->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
                 me->SetByteValue(UNIT_FIELD_BYTES_2, 1, player->GetByteValue(UNIT_FIELD_BYTES_2, 1));
