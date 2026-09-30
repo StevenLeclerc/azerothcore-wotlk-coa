@@ -207,6 +207,15 @@ class witch_doctor_casts : public AllSpellScript
             factor *= 1.5f;
         if (info->Id == Volley && player->HasAura(Gift))
             factor *= 1.0f + Spirits(player) * 0.02f;
+        // Vol'jin's Vigil heal (681004) has no family flags, so Spirit Walker's SPELLMOD_ALL_EFFECTS on Vigil never
+        // reached it. Scale it by Vigil's own ALL_EFFECTS modifiers (+10% / +20%), only when Vigil's periodic cast
+        // it: Soul of Bwonsamdi (503598) triggers 681004 through a periodic aura and must stay untouched.
+        if (info->Id == VigilHeal && !spell->GetTriggeredByAuraSpellInfo() && player->HasAura(Vigil))
+        {
+            float percent = 100.0f;
+            player->ApplySpellMod(Vigil, SPELLMOD_ALL_EFFECTS, percent);
+            factor *= std::max(0.0f, percent) / 100.0f;
+        }
         hit.damage = int32(hit.damage * factor);
         hit.damageBeforeTakenMods = int32(hit.damageBeforeTakenMods * factor);
     }

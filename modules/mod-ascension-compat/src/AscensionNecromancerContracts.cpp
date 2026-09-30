@@ -133,6 +133,9 @@ void ApplyContracts(SpellInfo* info)
     {
         info->Effects[0].Effect = SPELL_EFFECT_DUMMY;
         info->Effects[1].Effect = info->Effects[2].Effect = 0;
+        // No range limit (tooltip of 805038): the 40 yd owner aura 807317 is no longer required;
+        // the client copy is cleared in patch-ZZ.MPQ, and Abilities still demands a live circle.
+        info->CasterAuraSpell = 0;
     }
     if (id == 570132)
         for (auto& effect : info->Effects)
@@ -367,7 +370,16 @@ void ApplyContracts(SpellInfo* info)
     // 802913 "Plagued" is put on by nothing (570132 is rebuilt as a DUMMY, 806457 is unreachable);
     // the diseases are checked by Diseases() in the Expunge hit. 500443 has no button.
     if (id == 500443)
+    {
         info->TargetAuraSpell = 0;
+        // "Blast a diseased enemy for ${$m1+0} Plague Damage": effect 0 is a DUMMY that nothing
+        // executed (the ability Hit only lays 573233). As SCHOOL_DAMAGE the core deals it at
+        // launch with the spell's own school (SchoolMask 40, Plague), crit, resist and the
+        // record's EffectBonusMultiplier (0.6, Spell.dbc field 229; no spell_bonus_data row).
+        // The ability Hit prevents only the hit-mode handler, which SCHOOL_DAMAGE does not use.
+        if (info->Effects[0].Effect == SPELL_EFFECT_DUMMY)
+            info->Effects[0].Effect = SPELL_EFFECT_SCHOOL_DAMAGE;
+    }
     if (id == 805031)
     {
         info->Effects[0].Effect = 0; // owner-controlled sacrifice already removed the selected minion

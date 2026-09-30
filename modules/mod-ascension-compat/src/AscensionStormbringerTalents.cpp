@@ -62,6 +62,7 @@ enum StormbringerTalentSpells : uint32
     // Helpers those talents point at, each record read in Spell.dbc.
     SPELL_CONDUCTIVE = 567559,           // buff of the Stormbringer (tA1), StackAmount 10, e0 dummy 50 = % per stack
     SPELL_CONDUCTION = 567560,           // Frost damage, "increased by $567559s1% for each stack"
+    SPELL_CONDUCTIVE_CONSUME = 567573,   // "Consume this with Call Lightning or Torrential Wrath", e0 +30 (aura 108 misc 0)
     SPELL_WRATH_OF_ALAKIR_EXTEND = 300835, // two effects 177 on Unshackle 706625, +3000 ms
     SPELL_UNSHACKLE = 706625,
     SPELL_HURRICANES_BUFF = 570129,
@@ -213,12 +214,32 @@ public:
             player->CastSpell(player, SPELL_WRATH_OF_ALAKIR_EXTEND, true);
     }
 
+    // 567559 effect 1 -> 567573 "Consume this with Call Lightning or Torrential Wrath":
+    // +$567573s1% (30) damage per Conductive stack consumed. 567573 itself is never applied:
+    // its three masks (0x8000,0x8000,0) (0x2000000,0,0) (0,0xc000,0) cover neither Call
+    // Lightning (0,0x10,0x20) nor Torrential Wrath (0,0x1,0x20), it has no charges, and on the
+    // Stormbringer it would be a permanent bonus. The count is read at launch (only targets
+    // that are hit reach this hook: Spell::DoAllEffectOnLaunchTarget returns on any miss) and
+    // kept on the Spell, so the stacks are removed exactly once, in the hit result, after
+    // Torrential Wrath has triggered Conduction with the stacks still present.
+    static bool IsConductiveConsumer(Spell const* spell, SpellInfo const* info)
+    {
+        return spell && info && !spell->IsTriggered() &&
+            (IsTorrentialWrath(info->Id) || sSpellMgr->GetFirstSpellInChain(info->Id) == SPELL_CALL_LIGHTNING);
+    }
+
     void OnSpellCalculatedTarget(Spell* spell, Unit* target, TargetInfo& result) override
     {
+        SpellInfo const* info = spell->GetSpellInfo();
+        if (info && info->SpellFamilyName == STORMBRINGER_SPELL_FAMILY && IsConductiveConsumer(spell, info))
+        {
+            ApplyConductiveConsumption(spell, target, result);
+            return;
+        }
+
         // Conduction: "increased by $567559s1% for each stack of Conductive". Conductive is
         // the Stormbringer's own buff (every effect of 567559 is TARGET_UNIT_CASTER, aura text
         // "Some of your abilities deal additional Frost Damage"). Nothing is consumed.
-        SpellInfo const* info = spell->GetSpellInfo();
         if (!info || info->Id != SPELL_CONDUCTION || !target || !result.damage)
             return;
         Unit* caster = spell->GetCaster();
@@ -234,7 +255,57 @@ public:
         result.damageBeforeTakenMods = uint32(result.damageBeforeTakenMods * multiplier);
     }
 
-    void OnSpellHitResult(Spell* spell, Unit* target, uint8 miss, uint32 damage, uint32, bool critical) override
+    void ApplyConductiveConsumption(Spell* spell, Unit* target, TargetInfo& result)
+    {
+        Unit* caster = spell->GetCaster();
+        Player* player = caster ? caster->ToPlayer() : nullptr;
+        // A reflected cast launches on the caster itself: no bonus, nothing consumed.
+        if (!player || player->getClass() != CLASS_STORMBRINGER || !target || target == player ||
+            player->IsFriendlyTo(target) || result.damage <= 0)
+            return;
+
+        // First hit target of this cast reads the stacks; the value is stacks + 1.
+        if (!spell->GetScriptValue(SPELL_CONDUCTIVE_CONSUME))
+        {
+            Aura const* conductive = player->GetAura(SPELL_CONDUCTIVE, player->GetGUID());
+            spell->SetScriptValue(SPELL_CONDUCTIVE_CONSUME, uint64(conductive ? conductive->GetStackAmount() : 0) + 1);
+        }
+        uint64 const stacks = spell->GetScriptValue(SPELL_CONDUCTIVE_CONSUME) - 1;
+        SpellInfo const* bonusInfo = AscensionSpellSafe::Get(SPELL_CONDUCTIVE_CONSUME);
+        if (!stacks || !bonusInfo)
+            return;
+        int32 perStack = bonusInfo->Effects[EFFECT_0].CalcValue(player);
+        if (perStack <= 0)
+            return;
+        float multiplier = 1.0f + float(perStack) * float(stacks) / 100.0f;
+        result.damage = int32(result.damage * multiplier);
+        result.damageBeforeTakenMods = int32(result.damageBeforeTakenMods * multiplier);
+    }
+
+    // Removes the stacks counted at launch, once per cast. Runs after the talent handlers, so
+    // Torrential Wrath's Conduction (92098) still sees Conductive. Only the counted stacks go:
+    // a stack gained while the spell was in flight stays.
+    void ConsumeConductive(Spell* spell)
+    {
+        SpellInfo const* info = spell->GetSpellInfo();
+        if (!info || info->SpellFamilyName != STORMBRINGER_SPELL_FAMILY)
+            return;
+        uint64 const stored = spell->GetScriptValue(SPELL_CONDUCTIVE_CONSUME);
+        if (stored <= 1)
+            return;
+        spell->SetScriptValue(SPELL_CONDUCTIVE_CONSUME, 1);
+        Unit* caster = spell->GetCaster();
+        if (Aura* conductive = caster ? caster->GetAura(SPELL_CONDUCTIVE, caster->GetGUID()) : nullptr)
+            conductive->ModStackAmount(-int32(std::min<uint64>(stored - 1, conductive->GetStackAmount())));
+    }
+
+    void OnSpellHitResult(Spell* spell, Unit* target, uint8 miss, uint32 damage, uint32 healing, bool critical) override
+    {
+        HandleTalentHit(spell, target, miss, damage, healing, critical);
+        ConsumeConductive(spell);
+    }
+
+    void HandleTalentHit(Spell* spell, Unit* target, uint8 miss, uint32 damage, uint32, bool critical)
     {
         Player* player = spell->GetCaster()->ToPlayer();
         SpellInfo const* info = spell->GetSpellInfo();

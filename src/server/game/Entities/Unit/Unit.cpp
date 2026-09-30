@@ -11782,6 +11782,13 @@ void Unit::UpdateSpeed(UnitMoveType mtype, bool forced)
     // now we ready for speed calculation
     if (mtype == MOVE_RUN && !IsMounted() && IsPlayer() && getClass() == CLASS_WITCH_HUNTER && HasAura(504790))
         main_speed_mod = std::max(main_speed_mod, 20);
+    // Knight of Xoroth, Hellknight 800703 (stacks of Champion of the Legion 800702): "Movement speed increased and
+    // global cooldowns reduced by $s1%" per stack. Its three effects are taken (GCD, Physical damage, crit), so the
+    // speed reads the GCD effect's amount (-5 per stack, stacks included): same value as the tooltip, and like any
+    // MOD_INCREASE_SPEED it takes the highest run speed bonus rather than adding to Sprint and the like.
+    if (mtype == MOVE_RUN && !IsMounted() && IsPlayer() && getClass() == CLASS_FLESHWARDEN)
+        if (AuraEffect const* hellknight = GetAuraEffect(800703, EFFECT_0))
+            main_speed_mod = std::max(main_speed_mod, std::abs(hellknight->GetAmount()));
     float speed = std::max(non_stack_bonus, stack_bonus);
     if (main_speed_mod)
         AddPct(speed, main_speed_mod);

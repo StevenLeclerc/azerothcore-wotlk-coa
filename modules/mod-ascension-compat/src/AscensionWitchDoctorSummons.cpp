@@ -476,10 +476,11 @@ class npc_ascension_witch_doctor : public ScriptedAI
         if (entry == NpcShadow || entry == NpcGraven || entry == NpcCursed)
         {
             // Shadow "within $504761a1 yds" (30) and Cursed "within $506820a1 yds" (15) read their field's
-            // record. Graven keeps the 10 yd it always had: its tooltip cites $504761s1 (20), left to the sponsor.
+            // record. Graven's tooltip cites $504761s1 (20), a points value rather than a radius: the sponsor
+            // ruled on 2026-09-30 that Graven Effigy acts within 20 yd, as its tooltip says (was 10 yd).
             float range = entry == NpcShadow   ? FieldRadius(player, ShadowField, EFFECT_0, 10.0f)
                           : entry == NpcCursed ? FieldRadius(player, CursedField, EFFECT_0, 10.0f)
-                                               : 10.0f;
+                                               : 20.0f;
             for (Unit* enemy : Nearby(me, range))
                 if (player->IsValidAttackTarget(enemy))
                 {

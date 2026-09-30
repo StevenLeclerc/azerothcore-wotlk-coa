@@ -445,6 +445,76 @@ class aura_ascension_primalist_sacred_grove : public AuraScript
             EFFECT_1, SPELL_AURA_MOD_HEALING_PCT);
     }
 };
+
+// 301307 Earthmother's Roar (« heals allies equal to $301307s1% of their missing health ») and
+// 800179 Sacred Grove tick (800180 : « regain $800179s1% of their missing health, Rage, and
+// mana ») : HEAL_PCT (136) and ENERGIZE_PCT (137) give a share of the MAXIMUM. Decision of the
+// commissioner (2026-09-30) : the share is taken on what is MISSING, per target.
+//  - HEAL_PCT is resolved at launch (EffectHealPct, SpellEffects.cpp) with its done/taken
+//    bonuses ; OnHit runs before the heal is dealt (Spell::DoAllEffectOnTarget) and scales it by
+//    missing / maximum, read at that moment. A full-health target gets 0 (no heal is dealt).
+//  - ENERGIZE_PCT is resolved on hit : the default handler is prevented and the same checks
+//    as EffectEnergizePct are made, on max - current.
+// 800186's own aura text says « maximum » : it is never applied (see 800180 above), the
+// player reads 800180 and 301306.
+class spell_ascension_primalist_missing_pct : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_primalist_missing_pct);
+
+    void ScaleHeal()
+    {
+        Unit* target = GetHitUnit();
+        int32 heal = GetHitHeal();
+        if (!target || heal <= 0)
+            return;
+        uint32 const maximum = target->GetMaxHealth();
+        uint32 const current = target->GetHealth();
+        if (!maximum || !target->IsAlive() || current >= maximum)
+        {
+            SetHitHeal(0);
+            return;
+        }
+        SetHitHeal(int32(uint64(heal) * (maximum - current) / maximum));
+    }
+
+    void Energize(SpellEffIndex effIndex)
+    {
+        PreventHitDefaultEffect(effIndex);
+        Unit* caster = GetCaster();
+        Unit* target = GetHitUnit();
+        if (!caster || !target || !target->IsAlive())
+            return;
+        if (target->HasUnitState(UNIT_STATE_ISOLATED))
+        {
+            caster->SendSpellDamageImmune(target, GetSpellInfo()->Id);
+            return;
+        }
+        int32 const misc = GetSpellInfo()->Effects[effIndex].MiscValue;
+        if (misc < 0 || misc >= int8(MAX_POWERS))
+            return;
+        Powers const power = Powers(misc);
+        if (target->IsPlayer() && !target->CanReceivePowerFromSpell(power) &&
+            !GetSpellInfo()->HasAttribute(SPELL_ATTR7_ONLY_IN_SPELLBOOK_UNTIL_LEARNED))
+            return;
+        uint32 const maximum = target->GetMaxPower(power);
+        uint32 const current = target->GetPower(power);
+        int32 const pct = GetEffectValue();
+        if (!maximum || current >= maximum || pct <= 0)
+            return;
+        if (uint32 gain = CalculatePct(maximum - current, pct))
+            caster->EnergizeBySpell(target, GetSpellInfo()->Id, gain, power);
+    }
+
+    void Register() override
+    {
+        OnHit += SpellHitFn(spell_ascension_primalist_missing_pct::ScaleHeal);
+        // 301307 has no ENERGIZE_PCT : an unmatched effect hook only writes an error at start.
+        if (SpellInfo const* script = sSpellMgr->GetSpellInfo(m_scriptSpellId))
+            if (script->HasEffect(SPELL_EFFECT_ENERGIZE_PCT))
+                OnEffectHitTarget += SpellEffectFn(spell_ascension_primalist_missing_pct::Energize, EFFECT_ALL,
+                    SPELL_EFFECT_ENERGIZE_PCT);
+    }
+};
 }
 
 void AddSC_AscensionPrimalistTalents()
@@ -462,4 +532,5 @@ void AddSC_AscensionPrimalistTalents()
     RegisterSpellScript(aura_ascension_primalist_son_of_ursoc);
     RegisterSpellScript(spell_ascension_primalist_soothing_touch);
     RegisterSpellScript(aura_ascension_primalist_sacred_grove);
+    RegisterSpellScript(spell_ascension_primalist_missing_pct);
 }

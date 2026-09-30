@@ -308,6 +308,30 @@ public:
     }
 };
 
+// Mountain Fury 806185 ticks 806186, whose effect 1 is the pull damage: "${$806186m2+$SP*.65+$AP*.17+$STA*1.25}".
+// spell_bonus_data (2026_09_29_32_ascension_primalist_coefficients.sql) carries the SP and AP parts; it cannot
+// express Stamina, so the $STA*1.25 term is added here to the effect's base value, before the caster's damage
+// modifiers apply, as the Stamina terms of the other classes (Xoroth, Templar ModifySpellEffectBaseValue).
+constexpr uint32 MountainFuryPull = 806186;
+
+class primalist_mountain_fury_stamina : public UnitScript
+{
+public:
+    primalist_mountain_fury_stamina()
+        : UnitScript("primalist_mountain_fury_stamina", true, {UNITHOOK_MODIFY_SPELL_EFFECT_BASE_VALUE}) { }
+
+    void ModifySpellEffectBaseValue(Unit const* caster, SpellInfo const* info, uint8 index, float& value) override
+    {
+        if (!caster || !info || info->Id != MountainFuryPull || index != EFFECT_1 ||
+            info->Effects[EFFECT_1].Effect != SPELL_EFFECT_SCHOOL_DAMAGE)
+            return;
+        Player const* player = caster->ToPlayer();
+        if (!player || player->getClass() != CLASS_WILDWALKER)
+            return;
+        value += std::max(0.0f, player->GetStat(STAT_STAMINA)) * 1.25f;
+    }
+};
+
 class mountain_talent_metadata : public GlobalScript
 {
 public:
@@ -328,4 +352,5 @@ void AddSC_AscensionPrimalistMountain()
     RegisterSpellScript(aura_ascension_mountain_threshold);
     new mountain_talent_metadata();
     new primalist_wave5_spells();
+    new primalist_mountain_fury_stamina();
 }

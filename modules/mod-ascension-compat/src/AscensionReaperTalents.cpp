@@ -27,6 +27,7 @@ enum ReaperTalentSpells : uint32
     SPELL_SOUL_CAPTURED = 572887,
     SPELL_SOUL_SPLINTERS = 805719,
     SPELL_SOUL_SPLINTER = 805720,
+    SPELL_TORMENTED_SOUL_HEAL = 500482,  // e0 HEAL, triggered by 500481 e1 (aura 42)
 
     SPELL_REAP = 500357,
     SPELL_THRESH = 505170,
@@ -497,6 +498,13 @@ public:
         if (caster && caster->IsPlayer() && caster->getClass() == CLASS_REAPER && info->Id == SPELL_SOUL_SPLINTER &&
             info->SpellFamilyName == 36 && index == EFFECT_0 && info->Effects[index].IsAura(SPELL_AURA_PERIODIC_DAMAGE))
             value += std::max(0.0f, caster->GetStat(STAT_STAMINA)) * 0.035f;
+        // 500481 Tormented Souls heals "${$500482m1+$500482ppl1+$AP*.058+$STA*.24}" when a direct
+        // attack consumes its charge (spell_proc 500481, 2026_09_30_20_ascension_reaper_tormented_souls.sql).
+        // 500482 carries m1 and the per-level points; the attack power and Stamina part is added here.
+        if (caster && caster->IsPlayer() && caster->getClass() == CLASS_REAPER && info->Id == SPELL_TORMENTED_SOUL_HEAL &&
+            info->SpellFamilyName == 36 && index == EFFECT_0 && info->Effects[index].Effect == SPELL_EFFECT_HEAL)
+            value += std::max(0.0f, caster->GetTotalAttackPowerValue(BASE_ATTACK)) * 0.058f +
+                std::max(0.0f, caster->GetStat(STAT_STAMINA)) * 0.24f;
     }
 };
 }

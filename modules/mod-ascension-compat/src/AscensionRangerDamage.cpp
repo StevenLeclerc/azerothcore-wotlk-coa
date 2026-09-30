@@ -16,6 +16,9 @@ namespace
 constexpr uint32 SPELL_RANGER_RUSTY_SHIV = 561315;
 constexpr uint32 SPELL_RANGER_RUSTY_SHIV_DAMAGE = 681459;
 constexpr uint32 RANGER_SPELL_FAMILY = 27;
+constexpr uint32 SPELL_RANGER_FALCONSTRIKE_RANK_2 = 806437;
+constexpr uint32 SPELL_RANGER_FALCONSTRIKE_RANK_8 = 806443;
+constexpr int32 SPELL_RANGER_FALCONSTRIKE_WEAPON_POINTS = 120; // rank 1 806345 effect 2: 120 + DieSides 1 = 121 %
 // CoA changelog 71878 raises the accumulated share from 10% to 20%.
 constexpr uint32 RUSTY_SHIV_DAMAGE_DIVISOR = 5;
 
@@ -164,6 +167,17 @@ class spell_ascension_ranger_rusty_shiv_damage : public SpellScript
 
 void ApplyAscensionRangerDamageContracts(SpellInfo* spellInfo)
 {
+    // Falconstrike ranks 2-8 (806437-806443): Spell.dbc effect 2 (WEAPON_PERCENT_DAMAGE) holds BasePoints 928 to
+    // 3196, i.e. 929 % to 3197 % of weapon damage, against 120 (121 %) on rank 1 806345. Sponsor's ruling of
+    // 2026-09-30: every rank strikes for 121 % like rank 1, the rank growth coming from effect 0 (Nature damage).
+    // DieSides is 1 and RealPointsPerLevel 0 on this effect for all eight ranks, so the value is BasePoints + 1.
+    // The client Spell.dbc is patched separately so that $s3 reads 121 too.
+    if (spellInfo && spellInfo->Id >= SPELL_RANGER_FALCONSTRIKE_RANK_2 && spellInfo->Id <= SPELL_RANGER_FALCONSTRIKE_RANK_8 &&
+        spellInfo->SpellFamilyName == RANGER_SPELL_FAMILY &&
+        spellInfo->Effects[EFFECT_2].Effect == SPELL_EFFECT_WEAPON_PERCENT_DAMAGE &&
+        spellInfo->Effects[EFFECT_2].BasePoints != SPELL_RANGER_FALCONSTRIKE_WEAPON_POINTS)
+        spellInfo->Effects[EFFECT_2].BasePoints = SPELL_RANGER_FALCONSTRIKE_WEAPON_POINTS;
+
     if (!spellInfo || spellInfo->Id != SPELL_RANGER_RUSTY_SHIV ||
         spellInfo->SpellFamilyName != RANGER_SPELL_FAMILY)
         return;

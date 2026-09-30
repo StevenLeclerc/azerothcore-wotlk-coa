@@ -17,7 +17,7 @@ struct ClassSpell
     std::uint32_t SpellId;
 };
 
-inline constexpr std::array<ClassSpell, 846> ClassSpells =
+inline constexpr std::array<ClassSpell, 845> ClassSpells =
 {{
     {12, 1, 81},
     {12, 1, 107},
@@ -328,7 +328,6 @@ inline constexpr std::array<ClassSpell, 846> ClassSpells =
     {19, 18, 807814},
     {19, 20, 500688},
     {19, 20, 572629},
-    {19, 20, 804781},
     {19, 22, 801165},
     {19, 24, 560963},
     {19, 28, 804228},
@@ -867,7 +866,7 @@ inline constexpr std::array<ClassSpell, 846> ClassSpells =
     {32, 60, 561265},
 }};
 
-inline constexpr std::array<ClassSpell, 269> LegacyGeneratedClassSpells =
+inline constexpr std::array<ClassSpell, 268> LegacyGeneratedClassSpells =
 {{
     {12, 1, 15590},
     {12, 2, 500915},
@@ -961,7 +960,6 @@ inline constexpr std::array<ClassSpell, 269> LegacyGeneratedClassSpells =
     {19, 5, 801478},
     {19, 0, 802992},
     {19, 1, 804280},
-    {19, 9, 804781},
     {19, 1, 805401},
     {19, 1, 805402},
     {19, 1, 806014},

@@ -188,9 +188,29 @@ class aura_ascension_xoroth_block : public AuraScript
         OnEffectAbsorb += AuraEffectAbsorbFn(aura_ascension_xoroth_block::Absorb, EFFECT_0);
     }
 };
+// Hellknight 800703: its movement speed is read in Unit::UpdateSpeed from the GCD effect's amount (-5 per stack).
+// Refresh the run speed on apply, on every stack change (REAPPLY, amount already updated) and on removal (the
+// application is already out of m_appliedAuras in AfterEffectRemove, so the bonus is dropped).
+class aura_ascension_xoroth_hellknight : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_xoroth_hellknight);
+    void Refresh(AuraEffect const*, AuraEffectHandleModes)
+    {
+        if (Unit* target = GetTarget())
+            target->UpdateSpeed(MOVE_RUN, true);
+    }
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(aura_ascension_xoroth_hellknight::Refresh, EFFECT_0,
+                                              SPELL_AURA_ADD_PCT_MODIFIER, AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_xoroth_hellknight::Refresh, EFFECT_0,
+                                                SPELL_AURA_ADD_PCT_MODIFIER, AURA_EFFECT_HANDLE_REAL);
+    }
+};
 } // namespace
 void AddSC_AscensionXorothAuras()
 {
     RegisterSpellScript(aura_ascension_xoroth_lifecycle);
     RegisterSpellScript(aura_ascension_xoroth_block);
+    RegisterSpellScript(aura_ascension_xoroth_hellknight);
 }

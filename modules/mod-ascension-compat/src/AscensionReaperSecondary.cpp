@@ -476,7 +476,8 @@ class aura_ascension_reaper_siphon_anima : public AuraScript
 // increased by $572300s1% and your Dreadwake costs $/10;572300s2 less Runic Power." 572300
 // has DurationIndex 2 (300000010 ms, i.e. unbounded), so it lives exactly as long as 500481:
 // posed with it (new application or refresh, Unit.cpp OnAuraApply) and taken away with it.
-// Not saved (metadata below): a relog rebuilds it on the next Tormented Souls.
+// Not saved (metadata below). 500481 itself is saved, but when it is reloaded at login the player
+// is not yet in the world and OnAuraApply refuses: reaper_hard_bargain_login rebuilds it then.
 //
 // Life Tap 706788 e0 (aura 4, amount 200): Spectral Warden "now heals you equal to $s1% of the
 // damage it deals". Not through HealFromDamage, which caps at 100%. The Warden is a
@@ -487,15 +488,26 @@ public:
     reaper_tormented_souls_events() : UnitScript("reaper_tormented_souls_events", true,
         {UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE, UNITHOOK_ON_DAMAGE}) { }
 
-    void OnAuraApply(Unit* unit, Aura* aura) override
+    // Pose 572300 when the Reaper carries Hard Bargain and his own Tormented Souls, and has not got it yet.
+    static void GrantHardBargain(Player* player)
     {
-        Player* player = unit ? unit->ToPlayer() : nullptr;
-        if (!player || player->getClass() != CLASS_REAPER || !aura || aura->GetId() != SPELL_TORMENTED_SOULS_BUFF ||
-            aura->GetCasterGUID() != player->GetGUID() || !player->IsInWorld() || !player->IsAlive() ||
-            !player->HasAura(SPELL_HARD_BARGAIN) || player->HasAura(SPELL_HARD_BARGAIN_BUFF, player->GetGUID()) ||
+        if (!player || player->getClass() != CLASS_REAPER || !player->IsInWorld() || !player->IsAlive() ||
+            !player->HasAura(SPELL_TORMENTED_SOULS_BUFF, player->GetGUID()) || !player->HasAura(SPELL_HARD_BARGAIN) ||
+            player->HasAura(SPELL_HARD_BARGAIN_BUFF, player->GetGUID()) ||
             !sSpellMgr->GetSpellInfo(SPELL_HARD_BARGAIN_BUFF))
             return;
         player->CastSpell(player, SPELL_HARD_BARGAIN_BUFF, true);
+    }
+
+    void OnAuraApply(Unit* unit, Aura* aura) override
+    {
+        // Either order: Tormented Souls on a Reaper who has the talent, or the talent's passive landing while his
+        // Tormented Souls is up (talent learned or its passive reapplied after login).
+        Player* player = unit ? unit->ToPlayer() : nullptr;
+        if (!player || !aura || aura->GetCasterGUID() != player->GetGUID() ||
+            (aura->GetId() != SPELL_TORMENTED_SOULS_BUFF && aura->GetId() != SPELL_HARD_BARGAIN))
+            return;
+        GrantHardBargain(player);
     }
 
     void OnAuraRemove(Unit* unit, AuraApplication* application, AuraRemoveMode) override
@@ -504,7 +516,9 @@ public:
         if (!player || player->getClass() != CLASS_REAPER || !application)
             return;
         Aura* aura = application->GetBase();
-        if (aura && aura->GetId() == SPELL_TORMENTED_SOULS_BUFF && aura->GetCasterGUID() == player->GetGUID())
+        // The buff leaves with Tormented Souls, or with the talent itself (unlearned or respecced).
+        if (aura && aura->GetCasterGUID() == player->GetGUID() &&
+            (aura->GetId() == SPELL_TORMENTED_SOULS_BUFF || aura->GetId() == SPELL_HARD_BARGAIN))
             player->RemoveAurasDueToSpell(SPELL_HARD_BARGAIN_BUFF, player->GetGUID());
     }
 
@@ -775,6 +789,21 @@ struct npc_ascension_reaper_summon : public ScriptedAI
     }
 };
 
+// Hard Bargain after a relog: the saved Tormented Souls 500481 comes back with the character, but
+// its application ran before the player entered the world, where OnAuraApply above refuses. At
+// login the player is in the map (CharacterHandler: AddPlayerToMap precedes OnPlayerLogin) and his
+// talents and saved auras are loaded: grant the buff with the same conditions.
+class reaper_hard_bargain_login : public PlayerScript
+{
+public:
+    reaper_hard_bargain_login() : PlayerScript("reaper_hard_bargain_login", {PLAYERHOOK_ON_LOGIN}) { }
+
+    void OnPlayerLogin(Player* player) override
+    {
+        reaper_tormented_souls_events::GrantHardBargain(player);
+    }
+};
+
 class reaper_secondary_metadata : public GlobalScript
 {
 public:
@@ -816,6 +845,7 @@ void AddSC_AscensionReaperSecondary()
     new reaper_secondary_hits();
     new reaper_secondary_metadata();
     new reaper_tormented_souls_events();
+    new reaper_hard_bargain_login();
     RegisterSpellScript(aura_ascension_crimson_thirst);
     RegisterSpellScript(aura_ascension_reaper_ghostly_weapon);
     RegisterSpellScript(aura_ascension_reaper_souls_for_the_slaughter);
