@@ -1,7 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionXoroth.h"
 #include "AscensionSpellSafe.h"
-#include "Log.h"
 #include "Pet.h"
 #include "Player.h"
 #include "Random.h"
@@ -11,7 +10,6 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
-#include "WorldSession.h"
 namespace
 {
 using namespace AscensionXoroth;
@@ -53,19 +51,7 @@ class aura_ascension_xoroth_event : public AuraScript
             switch (id)
             {
             case 92104:
-            {
-                if (!block)
-                    return false;
-                bool cooling = State(player).timers.HasTimeUntilEvent(id);
-                bool summon = Chance(player, id, 3000);
-                // Temporary, until Brimstone Buckler's rate is measured in game (players only, not bots).
-                // "cooldown" lines are excluded from the 30 % rate: only "summoned" / "roll failed" count.
-                if (player->GetSession() && !player->GetSession()->IsBot())
-                    LOG_INFO("module.ascension_compat", "Xoroth 92104 Brimstone Buckler: {} blocked (hitMask {}), imp {}",
-                             player->GetName(), e.GetHitMask(),
-                             summon ? "summoned" : (cooling ? "none (3 s cooldown)" : "none (roll failed)"));
-                return summon;
-            }
+                return block && Chance(player, id, 3000);
             case 560546:
                 return block;
             case 560630:
