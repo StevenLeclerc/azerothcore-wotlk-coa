@@ -11516,7 +11516,19 @@ bool Unit::_IsValidAssistTarget(Unit const* target, SpellInfo const* bySpell) co
                     return false;
             }
             // can't assist player in ffa_pvp zone from outside
-            if (target->IsFFAPvP() && !IsFFAPvP())
+            // CoA (P-168) : sauf un BOT du groupe ou du raid du joueur. La regle High Risk
+            // pose le FFA au joueur jusque dans les donjons (AscensionCompat.HighRiskIsFFA),
+            // et ses bots soigneurs, qui ne sont pas FFA, ne pouvaient plus le cibler :
+            // BAD_TARGETS, sort au banc, aucun soin. L'exception est bornee de deux facons,
+            // relevees en revue : un HUMAIN non FFA ne soigne toujours pas un FFA (sinon il
+            // soutiendrait un combat FFA sans pouvoir y etre frappe), et une vraie aire
+            // d'arene FFA (AREA_FLAG_ARENA, Gurubashi) garde la regle d'origine.
+            bool const botDuGroupe = selfPlayerOwner && targetPlayerOwner
+                && selfPlayerOwner->GetSession() && selfPlayerOwner->GetSession()->IsBot()
+                && selfPlayerOwner->IsInSameRaidWith(targetPlayerOwner);
+            AreaTableEntry const* aireCible = botDuGroupe ? sAreaTableStore.LookupEntry(target->GetAreaId()) : nullptr;
+            bool const aireArene = aireCible && (aireCible->flags & AREA_FLAG_ARENA);
+            if (target->IsFFAPvP() && !IsFFAPvP() && !(botDuGroupe && !aireArene))
                 return false;
 
             // can't assist player out of sanctuary from sanctuary if has pvp enabled
