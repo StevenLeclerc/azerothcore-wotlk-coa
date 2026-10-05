@@ -35,7 +35,7 @@ struct TalentReplacement
 // compares it to sSpellMgr->GetFirstSpellInChain(id). Ranks must be declared by
 // ascending RequiredLevel: the loop keeps the LAST qualifying entry, not the
 // highest one.
-inline constexpr std::array<TalentReplacement, 16> TalentReplacements =
+inline constexpr std::array<TalentReplacement, 17> TalentReplacements =
 {{
     // Warbringer: every rank of Spell.dbc, at its SpellLevel (802581@8, 802582@18 .. 802586@52;
     // rank 1 keeps gate 0 as before). These ranks are in no acore_world.spell_ranks chain and not in
@@ -100,7 +100,18 @@ inline constexpr std::array<TalentReplacement, 16> TalentReplacements =
     // Hellfire Bellows and Brimstone Bludgeon have a single castable spell each in
     // Spell.dbc (no "Rank N" siblings): one rank, no invented level gate.
     { 17, 17, 807587, 801059, {{ { 520292, 0 } }} }, // Flames of Xoroth -> Hellfire Bellows
-    { 17, 18, 800710, 500904, {{ { 520005, 0 } }} }  // Sever -> Brimstone Bludgeon
+    { 17, 18, 800710, 500904, {{ { 520005, 0 } }} }, // Sever -> Brimstone Bludgeon
+    // Impcaller 706755: "Transforms your Call: Hellfire Imp into Impcaller." (Spell.dbc description).
+    // The target 707666 is the "Impcaller" (rank "Aura") spell whose tooltip states the talent's effect;
+    // it is not a summon. Call's slot shows it, and a cast of 804883 from the client is redirected to it
+    // (WorldSession::HandleCastSpellOpcode), so Call no longer summons. 707666 cast by hand only
+    // re-applies the aura AscensionXoroth::Refresh already keeps on the player: no cost, no GCD, no
+    // cooldown. Removing the temporary 707666 spell also strips its aura (Player::removeSpell ->
+    // RemoveOwnedAura); Refresh puts it back as long as 706755 is held, which is what Infernal Strike
+    // and Shieldgore read to summon. Direct casts of 804883 (bots, scripts) are refused in
+    // AscensionXorothAbilities.cpp's OnSpellCheckCast while this replacement is shown. Spec 17 DEFIANCE
+    // (talent node 34085). 804883 is a single-rank root (no spell_ranks chain).
+    { 17, 17, 706755, 804883, {{ { 707666, 0 } }} }  // Call: Hellfire Imp -> Impcaller
 }};
 
 // Rank 1 of the replacement chain a spell belongs to, or the spell itself.

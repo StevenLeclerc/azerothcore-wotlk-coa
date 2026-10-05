@@ -146,6 +146,12 @@ class xoroth_casts : public AllSpellScript
             result = SPELL_FAILED_NO_POWER;
         if ((info->Id == 804702 || info->Id == 804704) && (!player->HasAura(804703) || player->HasAura(807248)))
             result = SPELL_FAILED_CASTER_AURASTATE;
+        // Impcaller 706755 transforms Call: Hellfire Imp into Impcaller (TalentReplacements row
+        // {706755, 804883, 707666}). A client cast of 804883 is already redirected to 707666; this refuses
+        // the casts that bypass that redirect (playerbots, scripts), and only while the slot shows
+        // Impcaller, so a Call button the client still shows is never refused.
+        if (info->Id == 804883 && player->GetTemporarySpellReplacement(804883) != 804883)
+            result = SPELL_FAILED_NOT_KNOWN;
         if (info->Id == 801042)
         {
             Unit* unit = spell->m_targets.GetUnitTarget();

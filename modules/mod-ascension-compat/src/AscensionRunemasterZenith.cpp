@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionRunemasterZenith.h"
+#include "AscensionScalingBaseData.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "ScriptMgr.h"
@@ -9,6 +10,7 @@
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -19,6 +21,17 @@ constexpr uint32 SPELL_ZENITH_CHARGES = 712389;
 constexpr uint32 SPELL_RUNELORD_PASSIVE = 806984;
 constexpr uint32 SPELL_RUNELORD_DAMAGE = 806997;
 constexpr uint32 SPELL_RUNELORD_BUFF = 807379;
+
+// True when ascension_scaling_base (AscensionScalingBase.cpp) already multiplies this (spell, effect)
+// by $scalingbp, because AscensionScalingBaseData.h lists it.
+bool RunelordScaledByScalingBase(uint32 id, uint8 index)
+{
+    auto const entry = std::lower_bound(AscensionCompatData::ScalingBaseSpells.begin(),
+        AscensionCompatData::ScalingBaseSpells.end(), id,
+        [](AscensionCompatData::ScalingBaseEntry const& row, uint32 spell) { return row.Spell < spell; });
+    return entry != AscensionCompatData::ScalingBaseSpells.end() && entry->Spell == id &&
+        index < 8 && (entry->EffectMask & (1u << index));
+}
 
 bool IsRunemasterPlayer(Unit const* caster)
 {
@@ -210,6 +223,12 @@ class spell_ascension_runemaster_runelord_damage : public SpellScript
             GetSpellValue()->EffectBasePoints[EFFECT_0] != GetSpellInfo()->Effects[EFFECT_0].BasePoints)
             return;
         _scaled = true;
+
+        // $scalingbp once. {806997, e0} is in AscensionScalingBaseData.h, so SpellInfo::CalcValue
+        // already runs ascension_scaling_base on this base (raw 899 + DieSides 1 = 900, times the
+        // curve). Writing 900 x curve here as well squared it. Leave the raw base to that hook.
+        if (RunelordScaledByScalingBase(SPELL_RUNELORD_DAMAGE, EFFECT_0))
+            return;
 
         // Copied m1 selects the minimum, not the old 900..916 range. Scale the
         // raw 900 before CalcValue applies independent effect modifiers. The

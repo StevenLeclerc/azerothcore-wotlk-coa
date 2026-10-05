@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionContract.h"
+#include "AscensionScalingBaseData.h"
 #include "AscensionTinker.h"
 #include "AscensionTinkerData.h"
 #include "DBCStores.h"
@@ -306,6 +307,16 @@ void ApplyContracts(SpellInfo* info)
 namespace
 {
 using namespace AscensionTinker;
+// True when ascension_scaling_base (AscensionScalingBase.cpp) already multiplies this (spell, effect)
+// by $scalingbp, because AscensionScalingBaseData.h lists it.
+bool TinkerScaledByScalingBase(uint32 id, uint8 index)
+{
+    auto const entry = std::lower_bound(AscensionCompatData::ScalingBaseSpells.begin(),
+        AscensionCompatData::ScalingBaseSpells.end(), id,
+        [](AscensionCompatData::ScalingBaseEntry const& row, uint32 spell) { return row.Spell < spell; });
+    return entry != AscensionCompatData::ScalingBaseSpells.end() && entry->Spell == id &&
+        index < 8 && (entry->EffectMask & (1u << index));
+}
 class tinker_scaling : public UnitScript
 {
 public:
@@ -319,7 +330,12 @@ public:
         for (auto const& row : TinkerCoefficients)
             if (row.spell == info->Id && row.effect == index)
             {
-                if (row.curve)
+                // $scalingbp once. 500601, 560709, 706689, 706700, 706829 and 802176 e0 are also in
+                // AscensionScalingBaseData.h, so ascension_scaling_base already applied the curve and
+                // applying it here squared it (x2.9 too low at level 30). 520375 is not in that table
+                // and keeps its curve here. The SP/AP terms below stay unscaled only because
+                // ascension_scaling_base is registered before this script (MP_loader.cpp).
+                if (row.curve && !TinkerScaledByScalingBase(row.spell, row.effect))
                 {
                     double level = player->GetLevel();
                     value *= float(.0267291844060354 + .0048541098014737 * level + .0001859597762293 * level * level);

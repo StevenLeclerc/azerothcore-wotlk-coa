@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionContract.h"
+#include "AscensionScalingBaseData.h"
 #include "AscensionVenomancer.h"
 #include "AscensionVenomancerData.h"
 #include "DBCStores.h"
@@ -383,6 +384,14 @@ void ApplyContracts(SpellInfo* info)
 namespace
 {
 using namespace AscensionVenomancer;
+bool ScaledByScalingBase(uint32 id, uint8 index)
+{
+    auto const entry = std::lower_bound(AscensionCompatData::ScalingBaseSpells.begin(),
+        AscensionCompatData::ScalingBaseSpells.end(), id,
+        [](AscensionCompatData::ScalingBaseEntry const& row, uint32 spell) { return row.Spell < spell; });
+    return entry != AscensionCompatData::ScalingBaseSpells.end() && entry->Spell == id &&
+        index < 8 && (entry->EffectMask & (1u << index));
+}
 class venomancer_scaling : public UnitScript
 {
 public:
@@ -402,8 +411,12 @@ public:
         if (!player || !info || info->SpellFamilyName != 35 || Derived(info) || !std::isfinite(value))
             return;
         for (uint32 curved : {503929,504543,503925,503857,705985,570208,707234,807342,807611})
-            if (info->Id == curved && (index == 0 || (info->Id == 707234 && index == 1)))
+            if (info->Id == curved && (index == 0 || (info->Id == 707234 && index == 1)) &&
+                !ScaledByScalingBase(info->Id, index))
             {
+                // $scalingbp once: ascension_scaling_base already applies this curve to every
+                // (spell, effect) of AscensionScalingBaseData.h, which holds eight of these nine
+                // (807342 and 707234 e0 are not in it). Without this guard they took the curve twice.
                 double level = player->GetLevel();
                 value *= float(.0267291844060354 + .0048541098014737 * level + .0001859597762293 * level * level);
             }

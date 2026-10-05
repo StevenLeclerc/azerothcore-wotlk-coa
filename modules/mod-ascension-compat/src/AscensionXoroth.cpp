@@ -251,19 +251,17 @@ void Refresh(Player* player)
     // AscensionTalentReplacementData.h, the only path that also teaches the target
     // spell and that handles rank gates, spec changes and forgetting the talent
     // (P-044). Warbringer was already declared there, so this loop was a duplicate.
-    // The fifth entry, Impcaller {706755, 804883, 707666}, was a mistake and is not
-    // ported: 707666 is an aura, not a button. It has no power cost, no cooldown, no
-    // cast time and no active effect - only SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS
-    // (effect 0, aura 133, value 30: +30% imp health) and a SPELL_AURA_DUMMY carrier - and it
-    // is flagged SPELL_ATTR0_NO_AURA_CANCEL. AscensionXorothAbilities.cpp (Infernal Strike cast)
-    // and AscensionXorothSummons.cpp (Scale) read it with HasAura(707666), never as a spell.
-    // Replacing Call: Hellfire Imp with it would have removed the summon button.
-    // That defect - nothing applied aura 707666, so both HasAura(707666) tests were always
-    // false - was closed on 2026-09-20 in data alone: one spell_linked_spell row of type 2
-    // (SPELL_LINK_AURA) from 706755 to 707666, in
-    // data/sql/db-world/2026_09_20_18_ascension_xoroth_impcaller.sql. The aura now lives
-    // exactly as long as the talent is held, so the two tests below and in
-    // AscensionXorothSummons.cpp are reachable. Do not re-open it as a spell replacement.
+    // The fifth entry, Impcaller {706755, 804883, 707666}, was first left out on purpose: 707666 is
+    // an aura (effect 0 SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS, aura 133 +30% imp health;
+    // effect 1 SPELL_AURA_DUMMY; no cost, cast time or cooldown) that AscensionXorothAbilities.cpp
+    // (Infernal Strike cast) and AscensionXorothSummons.cpp (Scale) read with HasAura(707666), and
+    // swapping Call for it removes the summon button. That removal is what 706755 says ("Transforms
+    // your Call: Hellfire Imp into Impcaller"), so since 2026-10-02 the row is in
+    // AscensionTalentReplacementData.h. The aura itself never depended on the swap: the
+    // spell_linked_spell row 706755 -> 707666 (2026_09_20_18_ascension_xoroth_impcaller.sql) and the
+    // AddAura above put it on the player; dropping the temporary 707666 spell strips it
+    // (Player::removeSpell -> RemoveOwnedAura) and the AddAura above restores it on the next Refresh
+    // while 706755 is held.
     bool impTalent = player->HasAura(92101) || player->HasAura(704993);
     if (impTalent && !player->HasSpell(520661))
         player->learnSpell(520661);

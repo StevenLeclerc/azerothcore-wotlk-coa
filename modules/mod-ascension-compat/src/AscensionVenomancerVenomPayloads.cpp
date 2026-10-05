@@ -1,16 +1,27 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionVenomancerVenomPayloads.h"
+#include "AscensionScalingBaseData.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "SpellAuraDefines.h"
 #include "SpellInfo.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
 namespace
 {
+bool IsScaledByScalingBase(uint32 id, uint8 index)
+{
+    auto const entry = std::lower_bound(AscensionCompatData::ScalingBaseSpells.begin(),
+        AscensionCompatData::ScalingBaseSpells.end(), id,
+        [](AscensionCompatData::ScalingBaseEntry const& row, uint32 spell) { return row.Spell < spell; });
+    return entry != AscensionCompatData::ScalingBaseSpells.end() && entry->Spell == id &&
+        index < 8 && (entry->EffectMask & (1u << index));
+}
+
 bool IsFamily(SpellInfo const* info, uint32 id, uint32 flags2)
 {
     return info && info->Id == id && info->SpellFamilyName == uint32(CLASS_PROPHET) + 6 &&
@@ -83,11 +94,18 @@ public:
             !std::isfinite(value))
             return;
 
-        double const level = player->GetLevel();
-        double const curve = 0.0267291844060354 + 0.0048541098014737 * level +
-            0.0001859597762293 * level * level;
         // Native PPL and one random roll already ran. Scale only that raw base,
         // before combo/effect modifiers and periodic SP/BH snapshot calculations.
+        // $scalingbp is applied once. ascension_scaling_base (AscensionScalingBase.cpp) already
+        // multiplies 805896 e0 and 630869 e0 by the same curve, since both are in
+        // AscensionScalingBaseData.h; applying it here too squared it (Blight Venom ticked 18 on a
+        // mob at level 31, the curve squared, instead of ~49). Only scale when that table does not.
+        double curve = 1.0;
+        if (!IsScaledByScalingBase(info->Id, index))
+        {
+            double const level = player->GetLevel();
+            curve = 0.0267291844060354 + 0.0048541098014737 * level + 0.0001859597762293 * level * level;
+        }
         double const adjusted = double(value) * curve / (info->Id == 630869 ? 3.0 : 1.0);
         if (!std::isfinite(adjusted))
             return;
