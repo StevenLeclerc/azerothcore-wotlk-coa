@@ -6454,10 +6454,12 @@ private:
 
   // Monstres d'evenement du Directeur (coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.5, lot D) :
   // la plage 9100000-9109999 est reservee aux gabarits neufs des evenements. Le Directeur pose leur
-  // niveau lui-meme (niveau du joueur -1/0/+1, ExecuterInvoquer de CoaDirecteur.cpp) ; sans cette
-  // exclusion, OnBeforeCreatureSelectLevel le reecrirait a la creation, puis OnAllCreatureUpdate
-  // chaque seconde (maximum des joueurs a portee, bots compris, moins 3). Les deux crochets
-  // commencent par CanScale : l'exclure ici suffit pour les deux.
+  // niveau lui-meme (niveau du joueur -1/0/+1, ExecuterInvoquer de CoaDirecteur.cpp). Sans cette
+  // exclusion, OnAllCreatureUpdate le reecrirait chaque seconde (maximum des joueurs a portee, bots
+  // compris, moins 3) ; a la creation, le crochet du Directeur passe APRES celui-ci (ce module
+  // s'enregistre avant mod-playerbots, ModulesLoader.cpp) et l'emporte, mais une creature de la plage
+  // sans niveau impose serait mise a l'echelle des la creation. Le Directeur retire tout invoque dont
+  // le niveau a change. Les deux crochets commencent par CanScale : l'exclure ici suffit pour les deux.
   static constexpr uint32 DIRECTEUR_EVENEMENT_ENTREE_MIN = 9100000;
   static constexpr uint32 DIRECTEUR_EVENEMENT_ENTREE_MAX = 9109999;
 
