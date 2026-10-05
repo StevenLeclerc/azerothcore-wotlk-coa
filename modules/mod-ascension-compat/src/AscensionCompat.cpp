@@ -6452,9 +6452,20 @@ private:
     uint32 Timer;
   };
 
+  // Monstres d'evenement du Directeur (coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.5, lot D) :
+  // la plage 9100000-9109999 est reservee aux gabarits neufs des evenements. Le Directeur pose leur
+  // niveau lui-meme (niveau du joueur -1/0/+1, ExecuterInvoquer de CoaDirecteur.cpp) ; sans cette
+  // exclusion, OnBeforeCreatureSelectLevel le reecrirait a la creation, puis OnAllCreatureUpdate
+  // chaque seconde (maximum des joueurs a portee, bots compris, moins 3). Les deux crochets
+  // commencent par CanScale : l'exclure ici suffit pour les deux.
+  static constexpr uint32 DIRECTEUR_EVENEMENT_ENTREE_MIN = 9100000;
+  static constexpr uint32 DIRECTEUR_EVENEMENT_ENTREE_MAX = 9109999;
+
   static bool CanScale(Creature const* creature)
   {
     return LocalLevelScaling::CreatureEnabled.load(std::memory_order_relaxed) && creature &&
+        (creature->GetEntry() < DIRECTEUR_EVENEMENT_ENTREE_MIN ||
+         creature->GetEntry() > DIRECTEUR_EVENEMENT_ENTREE_MAX) &&
         !creature->GetMap()->IsScriptedPrivateInstance() &&
         !creature->IsPet() && !creature->IsTotem() && !creature->IsTrigger() && !creature->IsCritter() &&
         creature->GetCreatureType() != CREATURE_TYPE_NON_COMBAT_PET && !creature->GetCharmerOrOwner();
