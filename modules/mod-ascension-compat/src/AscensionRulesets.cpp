@@ -65,8 +65,14 @@ class spell_ascension_ruleset_select : public SpellScript
     SpellCastResult CheckCast()
     {
         // The selection spell descriptions require a rested area, including inns.
+        // CoA (09/10/2026, commanditaire) : AscensionCompat.RulesetSelectAnywhere = 1 (defaut) permet le choix du
+        // jeu de regles partout, hors combat ; 0 rend l'exigence d'origine (zone de repos : ville ou auberge).
         Player* player = GetCaster()->ToPlayer();
-        return player && player->HasPlayerFlag(PLAYER_FLAGS_RESTING) ? SPELL_CAST_OK : SPELL_FAILED_NOT_HERE;
+        if (!player)
+            return SPELL_FAILED_NOT_HERE;
+        if (sConfigMgr->GetOption<bool>("AscensionCompat.RulesetSelectAnywhere", true))
+            return player->IsInCombat() ? SPELL_FAILED_AFFECTING_COMBAT : SPELL_CAST_OK;
+        return player->HasPlayerFlag(PLAYER_FLAGS_RESTING) ? SPELL_CAST_OK : SPELL_FAILED_NOT_HERE;
     }
 
     void Select(SpellEffIndex)

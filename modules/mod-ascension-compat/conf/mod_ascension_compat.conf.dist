@@ -164,6 +164,14 @@ AscensionCompat.HighRiskPremiumPerItemLevel = 100
 AscensionCompat.HighRiskLootToKiller = 1
 
 #
+#    AscensionCompat.RulesetSelectAnywhere
+#        Description: choix du jeu de regles (High Risk, War Mode, PvE) partout, hors combat (09/10/2026).
+#                     0 : exigence d'origine, en zone de repos seulement (ville ou auberge).
+#        Default:     1
+
+AscensionCompat.RulesetSelectAnywhere = 1
+
+#
 #    AscensionCompat.HighRiskSettleDelayMs
 #        Description: How long after the body is released the penalty waits
 #                     before it is applied, in milliseconds.
