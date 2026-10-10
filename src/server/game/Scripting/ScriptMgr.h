@@ -414,6 +414,7 @@ public: /* PlayerScript */
     void OnPlayerAfterGuardianInitStatsForLevel(Player* player, Guardian* guardian);
     void OnPlayerBeforeLoadPetFromDB(Player* player, uint32& petentry, uint32& petnumber, bool& current, bool& forceLoadFromDB);
     bool OnPlayerCanJoinInArenaQueue(Player* player, ObjectGuid BattlemasterGuid, uint8 arenaslot, BattlegroundTypeId BGTypeID, uint8 joinAsGroup, uint8 IsRated, GroupJoinBattlegroundResult& err);
+    bool OnPlayerBeforeBattlemasterJoinArena(Player* player, ObjectGuid BattlemasterGuid, uint8 arenaslot, uint8 asGroup, uint8 isRated); // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
     bool OnPlayerCanBattleFieldPort(Player* player, uint8 arenaType, BattlegroundTypeId BGTypeID, uint8 action);
     bool OnPlayerCanGroupInvite(Player* player, std::string& membername);
     bool OnPlayerCanGroupAccept(Player* player, Group* group);

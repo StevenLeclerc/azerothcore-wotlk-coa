@@ -231,6 +231,7 @@ enum PlayerHook
     PLAYERHOOK_ON_PLAYER_BREATH_INVERTED,
     PLAYERHOOK_ON_CAN_REGENERATE,
     PLAYERHOOK_ON_CAN_ENERGIZE,
+    PLAYERHOOK_ON_BEFORE_BATTLEMASTER_JOIN_ARENA, // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
     PLAYERHOOK_END
 };
 
@@ -519,6 +520,12 @@ public:
     virtual void OnPlayerBeforeLoadPetFromDB(Player* /*player*/, uint32& /*petentry*/, uint32& /*petnumber*/, bool& /*current*/, bool& /*forceLoadFromDB*/) { }
 
     [[nodiscard]] virtual bool OnPlayerCanJoinInArenaQueue(Player* /*player*/, ObjectGuid /*BattlemasterGuid*/, uint8 /*arenaslot*/, BattlegroundTypeId /*BGTypeID*/, uint8 /*joinAsGroup*/, uint8 /*IsRated*/, GroupJoinBattlegroundResult& /*err*/) { return true; }
+
+    // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
+    // Called by WorldSession::HandleBattlemasterJoinArena right after the packet is read,
+    // before the battlemaster lookup. Return true if a script handled the request: the
+    // handler then returns without doing anything else.
+    [[nodiscard]] virtual bool OnPlayerBeforeBattlemasterJoinArena(Player* /*player*/, ObjectGuid /*BattlemasterGuid*/, uint8 /*arenaslot*/, uint8 /*asGroup*/, uint8 /*isRated*/) { return false; }
 
     [[nodiscard]] virtual bool OnPlayerCanBattleFieldPort(Player* /*player*/, uint8 /*arenaType*/, BattlegroundTypeId /*BGTypeID*/, uint8 /*action*/) { return true; }
 

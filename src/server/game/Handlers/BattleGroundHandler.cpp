@@ -706,6 +706,10 @@ void WorldSession::HandleBattlemasterJoinArena(WorldPacket& recvData)
 
     recvData >> guid >> arenaslot >> asGroup >> isRated;
 
+    // CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
+    if (sScriptMgr->OnPlayerBeforeBattlemasterJoinArena(_player, guid, arenaslot, asGroup, isRated))
+        return;
+
     // can't queue for rated without a group
     if (isRated && !asGroup)
         return;

@@ -507,6 +507,12 @@ bool ScriptMgr::OnPlayerCanJoinInArenaQueue(Player* player, ObjectGuid Battlemas
     CALL_ENABLED_BOOLEAN_HOOKS(PlayerScript, PLAYERHOOK_CAN_JOIN_IN_ARENA_QUEUE, !script->OnPlayerCanJoinInArenaQueue(player, BattlemasterGuid, arenaslot, BGTypeID, joinAsGroup, IsRated, err));
 }
 
+// CoA (10/10/2026) arene 1v1 depuis l'interface JcJ
+bool ScriptMgr::OnPlayerBeforeBattlemasterJoinArena(Player* player, ObjectGuid BattlemasterGuid, uint8 arenaslot, uint8 asGroup, uint8 isRated)
+{
+    CALL_ENABLED_BOOLEAN_HOOKS_WITH_DEFAULT_FALSE(PlayerScript, PLAYERHOOK_ON_BEFORE_BATTLEMASTER_JOIN_ARENA, script->OnPlayerBeforeBattlemasterJoinArena(player, BattlemasterGuid, arenaslot, asGroup, isRated));
+}
+
 bool ScriptMgr::OnPlayerCanBattleFieldPort(Player* player, uint8 arenaType, BattlegroundTypeId BGTypeID, uint8 action)
 {
     CALL_ENABLED_BOOLEAN_HOOKS(PlayerScript, PLAYERHOOK_CAN_BATTLEFIELD_PORT, !script->OnPlayerCanBattleFieldPort(player, arenaType, BGTypeID, action));
