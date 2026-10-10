@@ -157,7 +157,12 @@ class aura_ascension_xoroth_lifecycle : public AuraScript
             player->RemoveAurasDueToSpell(804787);
             player->RemoveAurasDueToSpell(805746);
         }
-        Refresh(player);
+        // P-194 (10/10/2026) : jamais de Refresh synchrone depuis un retrait d'aura. Refresh repose
+        // des auras (707666 depuis P-162, 805916, les auras d'echelle) ; appele pendant une boucle de
+        // retrait du coeur (Unit::RemoveArenaAuras a l'entree en arene, qui repart du debut apres
+        // chaque retrait), il remettait l'aura que la boucle venait d'oter : boucle sans fin, fil
+        // monde fige. On rend l'evenement 1 echu : OnPlayerUpdate fait le Refresh au tick suivant.
+        State(player).timers.CancelEvent(1);
     }
     void Register() override
     {
