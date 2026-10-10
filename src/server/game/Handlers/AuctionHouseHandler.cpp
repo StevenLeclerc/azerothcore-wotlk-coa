@@ -274,29 +274,12 @@ void WorldSession::HandleAuctionSellItem(WorldPacket& recvData)
         AuctionEntry* AH = new AuctionEntry;
         AH->Id = sObjectMgr->GenerateAuctionID();
 
-        if (sWorld->getBoolConfig(CONFIG_ALLOW_TWO_SIDE_INTERACTION_AUCTION))
-            AH->houseId = AuctionHouseId::Neutral;
-        else
-        {
-            CreatureData const* auctioneerData = sObjectMgr->GetCreatureData(creature->GetSpawnId());
-            if (!auctioneerData)
-            {
-                LOG_ERROR("network.opcode", "Data for auctioneer not found ({})", auctioneer.ToString());
-                delete AH;
-                return;
-            }
-
-            CreatureTemplate const* auctioneerInfo = sObjectMgr->GetCreatureTemplate(auctioneerData->id);
-            if (!auctioneerInfo)
-            {
-                LOG_ERROR("network.opcode", "Non existing auctioneer ({})", auctioneer.ToString());
-                delete AH;
-                return;
-            }
-
-            AuctionHouseEntry const* AHEntry = sAuctionMgr->GetAuctionHouseEntryFromFactionTemplate(auctioneerInfo->faction);
-            AH->houseId = AuctionHouseId(AHEntry->houseId);
-        }
+        // CoA (10/10/2026) -- la maison se deduit de la faction EN JEU du commissaire, comme
+        // `auctionHouse` et `auctionHouseEntry` plus haut (AllowTwoSide compris : l'entree rendue
+        // est alors la neutre). L'ancien code relisait `creature_template.faction` par le spawnId :
+        // un commissaire INVOQUE (Caravan Auctioneer 499960 de la Brutosaure) n'a pas de spawnId,
+        // la caution etait deja debitee et la mise en vente avortait sans enchere.
+        AH->houseId = AuctionHouseId(auctionHouseEntry->houseId);
 
         // Required stack size of auction matches to current item stack size, just move item to auctionhouse
         if (itemsCount == 1 && item->GetCount() == count[i])
