@@ -6257,6 +6257,21 @@ void ApplyAscensionExperienceContracts(SpellInfo* info)
     // carry aura 200 in it, 100 effects are convertible, and no spell outside the
     // Adventure Mode family falls in the range.
     //
+    // Healing: the companion aura of tiers 2 to 100 ("Adventure Mode N SLS")
+    // carries SPELL_AURA_MOD_HEALING_DONE (135, flat healing power: -15 to -25
+    // points) while its tooltip reads "Reduces Healing Done by $s2%" and tier
+    // 1 carries the percentage aura 136. Measured against Spell.dbc on
+    // 2026-10-08: 99 such effects in 302053-302884, all on spells named
+    // "Adventure Mode", school mask 126. The range also holds unrelated
+    // spells, hence the name test. Like tier 1's own aura 136, it also scales
+    // the carrier's percent-of-health heals (food, SpellAuraEffects.cpp "Arena
+    // / BG Dampening") and heals of every school.
+    if (info->Id >= 302053 && info->Id <= 302884 && info->SpellName[0] &&
+        std::string_view(info->SpellName[0]).starts_with("Adventure Mode"))
+        for (SpellEffectInfo& effect : info->Effects)
+            if (effect.ApplyAuraName == SPELL_AURA_MOD_HEALING_DONE)
+                effect.ApplyAuraName = SPELL_AURA_MOD_HEALING_DONE_PERCENT;
+
     // The test is `MiscValue & 2`, not `== 2`: tier 1 carries 18.
     if (info->Id >= 302053 && info->Id <= 302882)
     {
@@ -6781,19 +6796,10 @@ class spell_ascension_local_mount : public SpellScript
             GetCaster()->IsPlayer() && Validate(GetSpellInfo());
     }
 
-    void HandleMount(SpellEffIndex effIndex)
+    // 0 when the wrapper keeps its own aura (no variant for this riding skill).
+    uint32 SelectVariant(Player* player) const
     {
-        PreventHitDefaultEffect(effIndex);
-        Player* player = GetHitPlayer();
-        if (!player || !_mount)
-            return;
-
         uint16 riding = player->GetBaseSkillValue(SKILL_RIDING);
-        if (riding < 75)
-        {
-            PreventHitAura();
-            return;
-        }
         uint32 selected = riding >= 150 ? _mount->Ground100 : _mount->Ground60;
         uint32 map = GetVirtualMapForMapAndZone(player->GetMapId(), player->GetZoneId());
         bool canFly = map == MAP_OUTLAND || (map == MAP_NORTHREND && player->HasSpell(SPELL_COLD_WEATHER_FLYING));
@@ -6815,6 +6821,37 @@ class spell_ascension_local_mount : public SpellScript
                 selected = flying;
         }
 
+        return selected;
+    }
+
+    // The wrapper's own SPELL_AURA_MOUNTED (EFFECT_0) would mount the player for a moment before
+    // HandleMount swaps in the variant: a mount whose creature is a vehicle then seats and ejects
+    // its accessories (Mighty Caravan Brutosaur dropped two NPCs on the ground). Skip it whenever
+    // HandleMount is going to discard the aura anyway.
+    void PreventWrapperMount(SpellEffIndex effIndex)
+    {
+        Player* player = GetHitPlayer();
+        if (!player || !_mount)
+            return;
+
+        if (player->GetBaseSkillValue(SKILL_RIDING) < 75 || SelectVariant(player))
+            PreventHitDefaultEffect(effIndex);
+    }
+
+    void HandleMount(SpellEffIndex effIndex)
+    {
+        PreventHitDefaultEffect(effIndex);
+        Player* player = GetHitPlayer();
+        if (!player || !_mount)
+            return;
+
+        if (player->GetBaseSkillValue(SKILL_RIDING) < 75)
+        {
+            PreventHitAura();
+            return;
+        }
+
+        uint32 selected = SelectVariant(player);
         if (!selected)
             return;
 
@@ -6829,6 +6866,7 @@ class spell_ascension_local_mount : public SpellScript
 
     void Register() override
     {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_local_mount::PreventWrapperMount, EFFECT_0, SPELL_EFFECT_APPLY_AURA);
         OnEffectHitTarget += SpellEffectFn(spell_ascension_local_mount::HandleMount, EFFECT_2, SPELL_EFFECT_SCRIPT_EFFECT);
     }
 };
@@ -7131,6 +7169,8 @@ std::vector<AscensionClassAbility> GetAscensionClassAbilities(uint8 classId)
 }
 
 class AscensionCompatAllCreatureScript : public AllCreatureScript {
+  static constexpr uint32 CARAVAN_AUCTIONEER_ENTRY = 499960;
+
 public:
   AscensionCompatAllCreatureScript()
       : AllCreatureScript("AscensionCompatAllCreatureScript") {}
@@ -7140,6 +7180,27 @@ public:
       return;
     if (sAscensionPresets->HasPreset(creature->GetEntry())) {
       creature->SetUnitFlag2(UNIT_FLAG2_MIRROR_IMAGE);
+    }
+
+    // CoA (10/10/2026) -- le commissaire-priseur de la Mighty Caravan Brutosaur (accessoire
+    // 499960, faction 35) ouvrait l'hotel des ventes NEUTRE : avec AllowTwoSide.Interaction.Auction
+    // = 0, la maison se deduit de la faction du PNJ (AuctionHouseMgr::GetAuctionHouseEntryFromFactionTemplate),
+    // et le masque de la 35 n'est ni Alliance ni Horde. On lui donne la faction de son cavalier :
+    // il ouvre alors l'hotel de son camp, celui ou deposent les bots. Le summoner est connu ici
+    // (garde dans le constructeur de TempSummon, avant AddToMap). On prend le camp (GetTeamId)
+    // et non GetFaction() : une aura SPELL_AURA_MOD_FACTION active au moment de monter serait
+    // sinon copiee. 1732/1735 sont les factions des vendeurs du Traveler's Tundra Mammoth
+    // (32638/32639 et 32641/32642) ; masque Alliance/Horde, unit_flags IMMUNE_TO_PC|NPC gardes.
+    if (creature->GetEntry() == CARAVAN_AUCTIONEER_ENTRY && creature->IsSummon()) {
+      if (Unit* summoner = creature->ToTempSummon()->GetSummonerUnit()) {
+        if (Player* rider = summoner->ToPlayer()) {
+          TeamId const team = rider->GetTeamId();
+          if (team == TEAM_ALLIANCE)
+            creature->SetFaction(FACTION_ALLIANCE_GENERIC_WG);
+          else if (team == TEAM_HORDE)
+            creature->SetFaction(FACTION_HORDE_GENERIC_WG);
+        }
+      }
     }
   }
 

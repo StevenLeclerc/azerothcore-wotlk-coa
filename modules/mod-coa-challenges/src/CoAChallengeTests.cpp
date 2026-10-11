@@ -938,12 +938,13 @@ namespace CoAChallenges
             return 0;
         }
 
-        uint32 RuleTestFirstFetchQuest()
+        // First quest with no objective (the tooltip's "quests with no
+        // objectives") when <noObjective>, else first quest with one.
+        uint32 RuleTestFirstQuestByObjective(bool noObjective)
         {
             for (auto const& pair : sObjectMgr->GetQuestTemplates())
-                for (uint32 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
-                    if (pair.second->RequiredItemId[i])
-                        return pair.first;
+                if (QuestHasNoObjective(pair.second) == noObjective)
+                    return pair.first;
             return 0;
         }
 
@@ -1445,12 +1446,15 @@ namespace CoAChallenges
         RUN("CHALLENGE_RULES_TYPE_NO_EXPERIENCE_EXCEPT_PROFESSIONS", [](Player* p) {
             uint32 amt = 1000; sScriptMgr->OnPlayerGiveXP(p, amt, nullptr, XPSOURCE_KILL); return amt == 0; });
         RUN("CHALLENGE_RULES_TYPE_NO_FETCH_QUEST_EXPERIENCE", [](Player* p) {
-            uint32 qid = RuleTestFirstFetchQuest();
-            Quest const* q = qid ? sObjectMgr->GetQuestTemplate(qid) : nullptr;
-            if (!q) return true;
-            uint32 xp = 1000;
-            sScriptMgr->OnPlayerQuestComputeXP(p, q, xp);
-            return xp == 0; });
+            // Both ways: a quest with no objective loses its experience, a
+            // quest with one keeps it (the rule did the opposite until 2026-10-08).
+            Quest const* none = sObjectMgr->GetQuestTemplate(RuleTestFirstQuestByObjective(true));
+            Quest const* some = sObjectMgr->GetQuestTemplate(RuleTestFirstQuestByObjective(false));
+            if (!none || !some) return false;
+            uint32 xpNone = 1000, xpSome = 1000;
+            sScriptMgr->OnPlayerQuestComputeXP(p, none, xpNone);
+            sScriptMgr->OnPlayerQuestComputeXP(p, some, xpSome);
+            return xpNone == 0 && xpSome == 1000; });
 
         // ---- 6. Quests (color) ----
         RUN("CHALLENGE_RULES_TYPE_NO_QUESTS", [](Player* p) {

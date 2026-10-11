@@ -223,6 +223,18 @@ CoAChallenges.RequireSameChallengeToGroup = 1
 # Default: 1
 CoAChallenges.SyncChallengesWithGroup = 1
 
+# CoAChallenges.Adventure.CreatureDamageMultiplier
+#     Adventure Mode: damage dealt by creatures to an Adventure player, on top
+#     of the tier's own damage-taken auras (melee, direct spells, periodic
+#     ticks; percent-of-health ticks excepted). CoA classes outclass the
+#     AzerothCore creature tables: at 1, a level 2 character at tier 10 lost
+#     15% of his health per monster (2026-10-07). 1 = the tier tooltip and
+#     nothing more (6 was tried on 2026-10-07: far too much). Range 0.1-50,
+#     ".reload config" applies it live.
+# Default: 1.0
+
+CoAChallenges.Adventure.CreatureDamageMultiplier = 1.0
+
 
 ############################################################################
 # Hunger / thirst (Survivalist; coa_challenge_definition.survivalist)

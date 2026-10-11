@@ -195,6 +195,8 @@ namespace CoAChallenges
         }
         BuildGameModeBaseMap();
         RegisterCreatureOnlyDamageTakenSpells();
+        RegisterPveDamageDoneChallengeSpells();
+        CheckAdventureHealthTable();
 
         LOG_INFO("module.coa_challenges",
             "Challenge definitions loaded from world DB: {} definition(s), "

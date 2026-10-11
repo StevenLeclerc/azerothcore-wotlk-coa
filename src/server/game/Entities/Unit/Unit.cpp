@@ -19,6 +19,7 @@
 #include "AbstractFollower.h"
 #include "AreaDefines.h"
 #include "ArenaSpectator.h"
+#include "AscensionChallengePveDamageDone.h"
 #include "AscensionCreatureOnlyDamageTaken.h"
 #include "Battlefield.h"
 #include "BattlefieldMgr.h"
@@ -9375,20 +9376,58 @@ static bool DamageTakenPctAppliesToSource(AuraEffect const* effect, Unit const* 
     return true;
 }
 
+// Player whose challenge PvE damage-done malus (aura 341, registry spells only)
+// also covers the damage of this unit: the charmer/owner player of a pet, a
+// guardian, a totem, a charmed creature or a vehicle (followed through owner
+// chains, GetAffectingPlayer), or the player summoner of a wild summon that is
+// not hostile to him. nullptr for a player (his own auras already count) and
+// for a creature on no player's side.
+static Player const* GetChallengePveMalusOwner(Unit const* unit)
+{
+    if (unit->IsPlayer())
+        return nullptr;
+    if (Player const* owner = unit->GetAffectingPlayer())
+        return owner;
+    if (TempSummon const* summon = unit->ToTempSummon())
+        if (Unit* summoner = summon->GetSummonerUnit())
+            if (summoner != unit && !unit->IsHostileTo(summoner))
+                return summoner->GetAffectingPlayer();
+    return nullptr;
+}
+
 float Unit::GetAscensionNormalTuningDamageMultiplier(Unit const* victim, uint32 schoolMask) const
 {
     // Copied aura 341 means damage against monsters (e.g. Frozen Waters 271942
-    // and Fire and Ice 1582385). Enable only the reviewed normal tuning records;
-    // aura 322 and the separately authored PvP tuning remain independent.
+    // and Fire and Ice 1582385). Enable only the reviewed normal tuning records
+    // and the challenge tier spells registered by mod-coa-challenges
+    // (AscensionChallengePveDamageDone.h: Adventure Mode malus); aura 322 and
+    // the separately authored PvP tuning remain independent.
     if (!victim || victim->IsCharmedOwnedByPlayerOrPlayer())
         return 1.0f;
 
-    return GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_PVE_DAMAGE_DONE_PCT,
+    float multiplier = GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_PVE_DAMAGE_DONE_PCT,
         [schoolMask](AuraEffect const* effect)
         {
+            if (!(effect->GetMiscValue() & schoolMask))
+                return false;
             uint32 const id = effect->GetId();
-            return id >= 887000 && id <= 887090 && (effect->GetMiscValue() & schoolMask);
+            return (id >= 887000 && id <= 887090) || AscensionChallengePveDamageDone::IsChallengeSpell(id);
         });
+
+    // The challenge malus also covers what the challenger controls or summons
+    // (pets, guardians, wild summons). The class tuning 887000-887090 does not:
+    // it stays on the player alone. Totems and Dancing Rune Weapon never get
+    // here (SpellPctDamageModsDone / MeleeDamageBonusDone hand them to the
+    // owner), so nothing is counted twice.
+    if (Player const* owner = GetChallengePveMalusOwner(this))
+        multiplier *= owner->GetTotalAuraMultiplier(SPELL_AURA_ASCENSION_MOD_PVE_DAMAGE_DONE_PCT,
+            [schoolMask](AuraEffect const* effect)
+            {
+                return (effect->GetMiscValue() & schoolMask) &&
+                    AscensionChallengePveDamageDone::IsChallengeSpell(effect->GetId());
+            });
+
+    return multiplier;
 }
 
 float Unit::GetHealthBasedDamageTakenMultiplier() const

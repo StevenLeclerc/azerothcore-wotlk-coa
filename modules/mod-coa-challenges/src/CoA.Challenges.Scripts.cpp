@@ -1327,22 +1327,19 @@ namespace CoAChallenges
             return true;
         }
 
-        // NO_FETCH_QUEST_EXPERIENCE: fetch/collection quests (those requiring
-        // items) grant no experience; other rewards stay.
+        // NO_FETCH_QUEST_EXPERIENCE: the Adventure Mode tooltip reads "You will
+        // not get experience from quests with no objectives" (talk-to and
+        // delivery quests). Quests with an objective keep their experience;
+        // other rewards always stay. Until 2026-10-08 this zeroed the quests
+        // that required items, the opposite of the tooltip.
         void OnPlayerQuestComputeXP(Player* player, Quest const* quest, uint32& xpValue) override
         {
             if (!player || !quest)
                 return;
             if (!PlayerHasRule(player, "CHALLENGE_RULES_TYPE_NO_FETCH_QUEST_EXPERIENCE"))
                 return;
-            for (uint32 i = 0; i < QUEST_ITEM_OBJECTIVES_COUNT; ++i)
-            {
-                if (quest->RequiredItemId[i])
-                {
-                    xpValue = 0;
-                    return;
-                }
-            }
+            if (QuestHasNoObjective(quest))
+                xpValue = 0;
         }
 
         // ---- Rules: experience source / talents / items ----------------------
@@ -1893,7 +1890,15 @@ namespace CoAChallenges
     class CoAChallengesWorld : public WorldScript
     {
     public:
-        CoAChallengesWorld() : WorldScript("CoAChallengesWorld", { WORLDHOOK_ON_UPDATE, WORLDHOOK_ON_STARTUP }) { }
+        CoAChallengesWorld() : WorldScript("CoAChallengesWorld",
+            { WORLDHOOK_ON_UPDATE, WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_AFTER_CONFIG_LOAD }) { }
+
+        // Startup load (World::LoadConfigSettings, after ScriptMgr::Initialize)
+        // and ".reload config".
+        void OnAfterConfigLoad(bool /*reload*/) override
+        {
+            LoadAdventureCreatureDamageConfig();
+        }
 
         void OnStartup() override
         {
@@ -2465,6 +2470,43 @@ namespace CoAChallenges
                 probe(nearest, "creature");
             else
                 handler->PSendSysMessage("  no living creature within 100 yd of {}", victim->GetName());
+
+            // Damage DONE by the victim (aura 341, challenge tiers and class
+            // tuning): Unit::GetAscensionNormalTuningDamageMultiplier, which
+            // MeleeDamageBonusDone and SpellPctDamageModsDone start from.
+            // Against a player-controlled target it is 1 by design.
+            handler->PSendSysMessage("  {} deals (aura 341): vs attacker {} physical x{:.3f}, spell school x{:.3f}",
+                victim->GetName(), attacker->GetName(),
+                victim->GetAscensionNormalTuningDamageMultiplier(attacker, SPELL_SCHOOL_MASK_NORMAL),
+                victim->GetAscensionNormalTuningDamageMultiplier(attacker, spell->GetSchoolMask()));
+            if (nearest)
+            {
+                handler->PSendSysMessage("  {} deals (aura 341): vs creature {} physical x{:.3f}, spell school x{:.3f}",
+                    victim->GetName(), nearest->GetName(),
+                    victim->GetAscensionNormalTuningDamageMultiplier(nearest, SPELL_SCHOOL_MASK_NORMAL),
+                    victim->GetAscensionNormalTuningDamageMultiplier(nearest, spell->GetSchoolMask()));
+                // Pets, guardians and other controlled units share the
+                // challenge part of the malus (not the class tuning).
+                for (Unit* controlled : victim->m_Controlled)
+                    // Totems and Dancing Rune Weapon deal their damage through the
+                    // owner's full multiplier: not listed.
+                    if (controlled && controlled->IsInWorld() && !controlled->IsTotem() && controlled->GetEntry() != 27893)
+                        handler->PSendSysMessage("  controlled {} (entry {}) deals (aura 341): vs creature {} physical x{:.3f}, spell school x{:.3f}",
+                            controlled->GetName(), controlled->GetEntry(), nearest->GetName(),
+                            controlled->GetAscensionNormalTuningDamageMultiplier(nearest, SPELL_SCHOOL_MASK_NORMAL),
+                            controlled->GetAscensionNormalTuningDamageMultiplier(nearest, spell->GetSchoolMask()));
+                // Adventure monster health: what the victim's tier promises and
+                // what the creature currently carries (0 until it fights an
+                // Adventure player).
+                handler->PSendSysMessage("  Adventure monster health: {} promises +{}%, creature {} carries +{}% (health {}/{})",
+                    victim->GetName(), AdventureExtraHealthPct(victim), nearest->GetName(),
+                    AdventureHealthAppliedPct(nearest), nearest->GetHealth(), nearest->GetMaxHealth());
+                // Applied by the ModifyMeleeDamage / ModifySpellDamageTaken /
+                // ModifyPeriodicDamageAurasTick hooks, on top of the lines above.
+                handler->PSendSysMessage("  Adventure creature damage: {} takes x{:.2f} from {}, x{:.2f} from {}",
+                    victim->GetName(), AdventureCreatureDamageMultiplier(victim, nearest), nearest->GetName(),
+                    AdventureCreatureDamageMultiplier(victim, attacker), attacker->GetName());
+            }
             return true;
         }
 
@@ -3145,7 +3187,59 @@ namespace CoAChallenges
     {
     public:
         CoAChallengesUnit() : UnitScript("CoAChallengesUnit", true,
-            { UNITHOOK_ON_DAMAGE, UNITHOOK_ON_HEAL, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_BEFORE_ROLL_MELEE_OUTCOME_AGAINST, UNITHOOK_CAN_UNIT_ATTACK }) { }
+            { UNITHOOK_ON_DAMAGE, UNITHOOK_ON_HEAL, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_BEFORE_ROLL_MELEE_OUTCOME_AGAINST, UNITHOOK_CAN_UNIT_ATTACK,
+              UNITHOOK_ON_UNIT_ENTER_COMBAT, UNITHOOK_ON_UNIT_EXIT_COMBAT, UNITHOOK_ON_UNIT_DEATH,
+              UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
+              UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK }) { }
+
+        // Adventure Mode creature damage (AdventureCreatureDamageMultiplier). The
+        // three hooks run before armor and absorbs, so the hit the client
+        // displays is the scaled one. Melee: after MeleeDamageBonusTaken.
+        void ModifyMeleeDamage(Unit* target, Unit* attacker, uint32& damage) override
+        {
+            ScaleAdventureCreatureDamage(target, attacker, damage);
+        }
+
+        // Direct spell damage, weapon spells included (CalculateSpellDamageTaken).
+        void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* /*spellInfo*/) override
+        {
+            if (damage <= 0)
+                return;
+            uint32 scaled = uint32(damage);
+            ScaleAdventureCreatureDamage(target, attacker, scaled);
+            damage = int32(scaled);
+        }
+
+        // Periodic damage and leech ticks. The core also calls this hook for
+        // periodic heals (HandlePeriodicHealAurasTick): positive spells are left
+        // alone. Ticks in percent of max health are not scaled (a 5% tick would
+        // become 30%).
+        void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
+        {
+            if (!spellInfo || spellInfo->IsPositive() || spellInfo->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT))
+                return;
+            ScaleAdventureCreatureDamage(target, attacker, damage);
+        }
+
+        // Adventure Mode monster health (CoA.Challenges.Spells.cpp): set at
+        // engage from the threat list and on every hit by an Adventure player
+        // (only ever raised), dropped on leaving combat and on death.
+        // OnUnitEnterCombat is only called by Creature::AtEngage.
+        void OnUnitEnterCombat(Unit* unit, Unit* victim) override
+        {
+            if (Creature* creature = unit ? unit->ToCreature() : nullptr)
+                ApplyAdventureHealthOnEngage(creature, victim);
+        }
+
+        void OnUnitExitCombat(Unit* unit) override
+        {
+            RestoreAdventureHealth(unit);
+        }
+
+        void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+        {
+            RestoreAdventureHealth(unit);
+        }
 
         // Open-world PvP range rules (from the client localization):
         //  - ONLY_PVP_IN_5_LEVEL_RANGE: "You can only PvP with players 5 levels
@@ -3197,7 +3291,13 @@ namespace CoAChallenges
 
         void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
         {
-            if (!attacker || !victim || !damage)
+            if (!attacker || !victim)
+                return;
+            // Before the hit lands (DealDamage reads the health afterwards): the
+            // first Adventure hit no longer one-shots a monster sized for 1x.
+            // Fully absorbed hits count too.
+            ApplyAdventureHealthOnDamage(attacker, victim);
+            if (!damage)
                 return;
             // Resolve the controlling player: a pet/guardian must not be able to
             // bypass NO_DAMAGE / NO_KILL_* by dealing the damage itself.
@@ -3268,8 +3368,32 @@ namespace CoAChallenges
 
 } // namespace CoAChallenges
 
+namespace CoAChallenges
+{
+    // Safety net for the Adventure monster health modifier: a creature that
+    // got it from a hit without ever entering combat, or kept it on a path
+    // that ends combat without AtExitCombat, loses it once out of combat
+    // (CustomData::Get returns at once on an empty map: cheap per update).
+    class CoAChallengesCreature : public AllCreatureScript
+    {
+    public:
+        CoAChallengesCreature() : AllCreatureScript("CoAChallengesCreature") { }
+
+        void OnAllCreatureUpdate(Creature* creature, uint32 /*diff*/) override
+        {
+            if (!creature || !AdventureHealthAppliedPct(creature))
+                return;
+            if (creature->IsInCombat())
+                ResyncAdventureHealth(creature);
+            else
+                RestoreAdventureHealth(creature);
+        }
+    };
+}
+
 void Addmod_coa_challengesScripts()
 {
+    new CoAChallenges::CoAChallengesCreature();
     new CoAChallenges::CoAChallengesPlayer();
     new CoAChallenges::CoAChallengesWorld();
     new CoAChallenges::CoAChallengesServer();
