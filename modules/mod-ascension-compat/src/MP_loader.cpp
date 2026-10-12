@@ -22,6 +22,7 @@ void AddAscensionTravelPermitScripts();
 void AddSC_AscensionRulesets();
 void AddSC_AscensionClosestResurrection();
 void AddSC_AscensionThreatRedirect();
+void AddAscensionArtisanatScripts();
 void AddAscensionStockCoefficientScripts();
 void AddAscensionScalingBaseScripts();
 void AddCoABugReportScripts();
@@ -365,4 +366,5 @@ void Addmod_ascension_compatScripts()
     AddSC_AscensionRulesets();
     AddSC_AscensionClosestResurrection();
     AddSC_AscensionThreatRedirect();
+    AddAscensionArtisanatScripts();
 }
