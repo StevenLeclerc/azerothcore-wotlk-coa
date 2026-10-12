@@ -42,12 +42,20 @@ void RASession::Start()
     if (_socket.available() > 0)
     {
         // Handle subnegotiation
+        // CoA (Armageddon, 12/10/2026) : jamais d'appel qui leve une exception sur une socket que le client a pu
+        // fermer : une boost::system::system_error non rattrapee termine le processus (core dump du 12/10 16:04:44
+        // Paris, pile World::ProcessCliCommands -> RASession::Send -> std::terminate).
         char buf[1024] = { };
-        _socket.read_some(boost::asio::buffer(buf));
+        boost::system::error_code ec;
+        _socket.read_some(boost::asio::buffer(buf), ec);
+        if (ec)
+            return;
 
         // Send the end-of-negotiation packet
         uint8 const reply[2] = { 0xFF, 0xF0 };
-        _socket.write_some(boost::asio::buffer(reply));
+        _socket.write_some(boost::asio::buffer(reply), ec);
+        if (ec)
+            return;
     }
 
     Send("Authentication Required\r\n");
@@ -69,7 +77,7 @@ void RASession::Start()
     if (!CheckAccessLevel(username) || !CheckPassword(username, password))
     {
         Send("Authentication failed\r\n");
-        _socket.close();
+        { boost::system::error_code ecClose; _socket.close(ecClose); }
         return;
     }
 
@@ -88,14 +96,22 @@ void RASession::Start()
             break;
     }
 
-    _socket.close();
+    { boost::system::error_code ecClose; _socket.close(ecClose); }
 }
 
 int RASession::Send(std::string_view data)
 {
     std::ostream os(&_writeBuffer);
     os << data;
-    std::size_t written = _socket.send(_writeBuffer.data());
+    // CoA : le client RA peut etre parti pendant que le monde executait la commande (sonde-ra.py abandonne apres
+    // 15 s). L'ecriture dans une socket fermee ne doit pas lever d'exception : elle est perdue, rien de plus.
+    boost::system::error_code ec;
+    std::size_t written = _socket.send(_writeBuffer.data(), 0, ec);
+    if (ec)
+    {
+        _writeBuffer.consume(_writeBuffer.size());
+        return 0;
+    }
     _writeBuffer.consume(written);
     return written;
 }
@@ -106,7 +122,7 @@ std::string RASession::ReadString()
     std::size_t read = boost::asio::read_until(_socket, _readBuffer, "\r\n", error);
     if (!read)
     {
-        _socket.close();
+        { boost::system::error_code ecClose; _socket.close(ecClose); }
         return "";
     }
 
