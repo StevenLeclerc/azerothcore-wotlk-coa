@@ -14,8 +14,8 @@
 //    deux crochets. Rien ne se recopie si l'ancienne piece n'a pas ete consommee (pas de duplication).
 // 2. Bonus de set qui suivent le niveau (D-PO-07). Player::GiveLevel ne recalcule pas les auras deja posees :
 //    au passage de niveau, on recalcule les auras de set 63001-63015 avec le niveau courant.
-// 3. Eveil par message d'addon (D-PO-01, piste de repli). INERTE tant que CoaArtisanat.EveilParMessage = 0 :
-//    on ne l'allume que sur verdict du PO apres l'epreuve du lot 0 (critere 8).
+// 3. Eveil par message d'addon COA_ATL « EVEIL » (D-PO-10 : voie retenue, la voie par sort est ecartee ; format
+//    D-PO-09). Allume par defaut ; CoaArtisanat.EveilParMessage = 0 le coupe (reponse EVEIL_ERR:DESACTIVE).
 
 #include "Chat.h"
 #include "Config.h"
@@ -572,7 +572,7 @@ namespace
             if (maintenant < delai->prochain)
                 return false;
             delai->prochain = maintenant + DELAI_EVEIL;
-            if (!sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", false))
+            if (!sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", true))
                 Repondre(joueur, "EVEIL_ERR:DESACTIVE");
             else
                 TraiterEveil(joueur, corps.substr(6));
