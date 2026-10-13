@@ -16,14 +16,25 @@
 //    au passage de niveau, on recalcule les auras de set 63001-63015 avec le niveau courant.
 // 3. Eveil par message d'addon COA_ATL « EVEIL » (D-PO-10 : voie retenue, la voie par sort est ecartee ; format
 //    D-PO-09). Allume par defaut ; CoaArtisanat.EveilParMessage = 0 le coupe (reponse EVEIL_ERR:DESACTIVE).
+// 4. Paliers et eveil payants (D-PO-24) : message COA_ATL « AMELIORER » (paliers) et « EVEIL », etapes et couts lus dans
+//    acore_world.coa_artisanat_etape (ecrite par PartB). Reactifs et or verifies avant, preleves apres la creation.
+//    CoaArtisanat.AmeliorerParMessage = 0 coupe AMELIORER. Sans table : eveil gratuit par grille, AMELIORER refuse.
+// 5. Materiaux de monde (D-PO-19, D-PO-23) : vert, rare, epique ajoutes au butin des creatures qui ont une table de
+//    butin et rapportent de l'experience au detenteur du butin. Taux en configuration (CoaArtisanat.Monde.*), 0 par
+//    defaut ; bots exclus sauf CoaArtisanat.Monde.TauxBots.
 
 #include "Chat.h"
 #include "CommandScript.h"
 #include "Config.h"
 #include "DataMap.h"
 #include "DBCStores.h"
+#include "DatabaseEnv.h"
 #include "GameTime.h"
+#include "Formulas.h"
+#include "Group.h"
 #include "Item.h"
+#include "LootMgr.h"
+#include "Map.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -52,7 +63,7 @@ namespace
 {
     // Plages reservees (CONCEPTION-artisanat-A-cadre.md, « Plages d'ids reservees »).
     constexpr uint32 ARTISANAT_OBJET_MIN = 9101200;
-    constexpr uint32 ARTISANAT_OBJET_MAX = 9102999;
+    constexpr uint32 ARTISANAT_OBJET_MAX = 9104999;   // D-PO-22
     constexpr uint32 ARTISANAT_SET_MIN = 63001;
     constexpr uint32 ARTISANAT_SET_MAX = 63015;
     constexpr uint32 ARTISANAT_GRILLE_MIN = 708;
@@ -387,61 +398,205 @@ namespace
         return false;
     }
 
-    // Refus de l'eveil : la cause (repondue a l'addon) et l'avis montre au joueur (vide : aucun).
+    // ---- Etapes payantes : paliers (AMELIORER) et eveil (EVEIL), table coa_artisanat_etape (D-PO-24) ----------------
+
+    // Une ligne de coa_artisanat_etape, ecrite par PartB (monde.sql). `de` : la piece de depart, une etape au plus.
+    struct EtapeArtisanat
+    {
+        uint32 vers = 0;
+        bool eveil = false;                           // type 'eveil' ; sinon 'palier'
+        uint8 niveau = 0;
+        uint32 orCuivre = 0;
+        std::array<std::pair<uint32, uint32>, 4> objets{};   // (entree, nombre), entree 0 : aucun
+    };
+    std::unordered_map<uint32, EtapeArtisanat> Etapes;
+
+    // Absente ou vide : le monde demarre, l'eveil retombe sur l'appariement par grille (gratuit), AMELIORER refuse.
+    void ChargerEtapes()
+    {
+        Etapes.clear();
+        if (!WorldDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_artisanat_etape'"))
+        {
+            LOG_INFO("module", "coa artisanat: table coa_artisanat_etape absente : eveil gratuit par grille, AMELIORER refuse");
+            return;
+        }
+        uint32 paliers = 0, eveils = 0, rejetees = 0;
+        if (QueryResult r = WorldDatabase.Query("SELECT de, vers, CAST(type AS CHAR), niveau, or_cuivre, objet1, nombre1, objet2, "
+            "nombre2, objet3, nombre3, objet4, nombre4 FROM coa_artisanat_etape"))
+        {
+            do
+            {
+                Field* f = r->Fetch();
+                uint32 const de = f[0].Get<uint32>();
+                EtapeArtisanat e;
+                e.vers = f[1].Get<uint32>();
+                std::string const type = f[2].Get<std::string>();
+                e.eveil = type == "eveil";
+                e.niveau = f[3].Get<uint8>();
+                e.orCuivre = f[4].Get<uint32>();
+                bool valide = (type == "eveil" || type == "palier")
+                    && EstPieceArtisanat(sObjectMgr->GetItemTemplate(de)) && EstPieceArtisanat(sObjectMgr->GetItemTemplate(e.vers))
+                    && de != e.vers && e.niveau >= 1 && e.niveau <= DEFAULT_MAX_LEVEL;
+                if (e.orCuivre > MAX_MONEY_AMOUNT)
+                    valide = false;
+                for (std::size_t i = 0; i < e.objets.size(); ++i)
+                {
+                    uint32 const objet = f[5 + 2 * i].Get<uint32>();
+                    uint32 const nombre = f[6 + 2 * i].Get<uint16>();
+                    if (!objet || !nombre)
+                        continue;
+                    if (objet == de || objet == e.vers || !sObjectMgr->GetItemTemplate(objet))
+                        valide = false;
+                    // Un meme objet sur deux colonnes : refuse (le controle colonne par colonne sous-compterait).
+                    for (std::size_t k = 0; k < i; ++k)
+                        if (e.objets[k].first == objet)
+                            valide = false;
+                    e.objets[i] = { objet, nombre };
+                }
+                if (!valide)
+                {
+                    ++rejetees;
+                    LOG_ERROR("module", "coa artisanat: etape rejetee de={} vers={} type={} niveau={} (piece, objet ou niveau invalide)",
+                        de, e.vers, type, uint32(e.niveau));
+                    continue;
+                }
+                if (e.eveil)
+                {
+                    ++eveils;
+                    auto it = VersionEveillee.find(de);
+                    if (it != VersionEveillee.end() && it->second != e.vers)
+                        LOG_WARN("module", "coa artisanat: eveil de {} : la table dit {}, l'appariement par grille {} ; la table l'emporte",
+                            de, e.vers, it->second);
+                }
+                else
+                    ++paliers;
+                Etapes[de] = e;
+            } while (r->NextRow());
+        }
+        LOG_INFO("module", "coa artisanat: coa_artisanat_etape : {} paliers, {} eveils, {} rejetees", paliers, eveils, rejetees);
+    }
+
+    enum class SorteEtape { Eveil, Palier };
+
+    // Refus : la cause (repondue a l'addon) et l'avis montre au joueur (vide : aucun).
     struct RefusEveil
     {
-        char const* cause = nullptr;
-        std::string_view avis;
+        std::string cause;
+        std::string avis;
     };
 
-    // L'eveil lui-meme, commun au message d'addon et au banc d'essai (.artisanat banc). Rend la piece neuve, ou
-    // nullptr et la cause du refus.
-    Item* Eveiller(Player* joueur, Item* piece, RefusEveil& refus, char const* voie)
+    // L'etape elle-meme, commune aux messages d'addon (EVEIL, AMELIORER) et au banc d'essai. Rend la piece neuve, ou
+    // nullptr et la cause du refus. Rien n'est pris avant que la piece neuve existe : pas de perte sur un refus.
+    Item* Avancer(Player* joueur, Item* piece, SorteEtape sorte, RefusEveil& refus, char const* voie)
     {
+        auto refuser = [&](std::string cause, std::string avis = {}) -> Item*
+        {
+            refus = { std::move(cause), std::move(avis) };
+            return nullptr;
+        };
+        bool const eveil = sorte == SorteEtape::Eveil;
+        if (joueur->GetTradeData())
+            return refuser("ECHANGE", "Fermez la fenêtre d'échange d'abord.");
         if (piece->IsInTrade())
-            return refus = { "PIECE", {} }, nullptr;
-        auto it = VersionEveillee.find(piece->GetEntry());
-        if (it == VersionEveillee.end())
-            return refus = { "PIECE", "Cette pièce ne peut pas être éveillée." }, nullptr;
-        if (joueur->GetLevel() < NIVEAU_EVEIL)
-            return refus = { "NIVEAU", "Il faut être niveau 80 pour éveiller une pièce." }, nullptr;
-        if (!joueur->IsAlive())
-            return refus = { "MORT", "Impossible d'éveiller une pièce en étant mort." }, nullptr;
-        if (joueur->IsInCombat())
-            return refus = { "COMBAT", "Impossible d'éveiller une pièce en combat." }, nullptr;
+            return refuser("PIECE");
 
-        uint32 const nouvelle = it->second;
+        // L'etape : la table d'abord ; pour l'eveil seulement, l'appariement par grille (gratuit) en repli.
+        EtapeArtisanat const* etape = nullptr;
+        EtapeArtisanat repli;
+        if (auto it = Etapes.find(piece->GetEntry()); it != Etapes.end() && it->second.eveil == eveil)
+            etape = &it->second;
+        else if (eveil && it == Etapes.end())
+            if (auto v = VersionEveillee.find(piece->GetEntry()); v != VersionEveillee.end())
+            {
+                repli.vers = v->second;
+                repli.eveil = true;
+                repli.niveau = NIVEAU_EVEIL;
+                etape = &repli;
+            }
+        if (!etape)
+            return refuser("PIECE", eveil ? "Cette pièce ne peut pas être éveillée." : "Cette pièce ne peut pas être améliorée.");
+        if (joueur->GetLevel() < etape->niveau)
+            return refuser("NIVEAU", Acore::StringFormat("Il faut être niveau {} pour {} cette pièce.", uint32(etape->niveau),
+                eveil ? "éveiller" : "améliorer"));
+        if (!joueur->IsAlive())
+            return refuser("MORT", "Impossible en étant mort.");
+        if (joueur->IsInCombat())
+            return refuser("COMBAT", "Impossible en combat.");
+
+        // Reactifs et or, banque exclue. DestroyItemCount puise la banque en dernier recours seulement : le controle
+        // ci-dessous garantit assez hors banque, et ChargerEtapes refuse un meme objet sur deux colonnes.
+        std::string manques, noms;
+        for (auto const& [objet, nombre] : etape->objets)
+        {
+            if (!objet)
+                continue;
+            uint32 const tenus = joueur->GetItemCount(objet, false);
+            if (tenus >= nombre)
+                continue;
+            manques += Acore::StringFormat("{}{}={}", manques.empty() ? "" : ",", objet, nombre - tenus);
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(objet);
+            noms += Acore::StringFormat("{}{} x{}", noms.empty() ? "" : ", ", proto ? proto->Name1 : std::to_string(objet), nombre - tenus);
+        }
+        if (joueur->GetMoney() < etape->orCuivre)
+        {
+            uint32 const manque = etape->orCuivre - uint32(joueur->GetMoney());
+            manques += Acore::StringFormat("{}or={}", manques.empty() ? "" : ",", manque);
+            noms += Acore::StringFormat("{}{} po {} pa {} pc", noms.empty() ? "" : ", ", manque / 10000, (manque / 100) % 100, manque % 100);
+        }
+        if (!manques.empty())
+            return refuser("REACTIFS:" + manques, "Il manque : " + noms + ".");
+
         ItemPosCountVec dest;
-        InventoryResult const place = joueur->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, nouvelle, 1);
+        InventoryResult const place = joueur->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, etape->vers, 1);
         if (place != EQUIP_ERR_OK)
         {
-            joueur->SendEquipError(place, nullptr, nullptr, nouvelle);
-            return refus = { "SACS", {} }, nullptr;
+            joueur->SendEquipError(place, nullptr, nullptr, etape->vers);
+            return refuser("SACS");
         }
 
         // Creer d'abord, detruire ensuite : un echec a la creation ne coute rien au joueur.
         Chasses const c = Photographier(joueur, piece);
-        Item* neuve = joueur->StoreNewItem(dest, nouvelle, true);
+        Item* neuve = joueur->StoreNewItem(dest, etape->vers, true);
         if (!neuve)
-            return refus = { "SACS", {} }, nullptr;
+            return refuser("SACS");
         uint32 perdus = 0;
         uint32 const recopies = Recopier(joueur, neuve, c, perdus);
         joueur->SendNewItem(neuve, 1, true, false);
         uint32 const ancienne = piece->GetEntry();
         uint64 const ancienGuid = piece->GetGUID().GetCounter();
         joueur->DestroyItem(piece->GetBagSlot(), piece->GetSlot(), true);
+        std::string cout;
+        for (auto const& [objet, nombre] : etape->objets)
+            if (objet)
+            {
+                joueur->DestroyItemCount(objet, nombre, true);
+                cout += Acore::StringFormat(" {}x{}", objet, nombre);
+            }
+        if (etape->orCuivre)
+        {
+            joueur->ModifyMoney(-int32(etape->orCuivre));
+            cout += Acore::StringFormat(" or={}", etape->orCuivre);
+        }
 
-        LOG_INFO("module", "coa artisanat: eveil par {} joueur={} piece={} ({}) -> {} ({}) emplacements={} perdus={}",
-            voie, joueur->GetGUID().GetCounter(), ancienGuid, ancienne, neuve->GetGUID().GetCounter(), nouvelle, recopies, perdus);
+        LOG_INFO("module", "coa artisanat: {} par {} joueur={} piece={} ({}) -> {} ({}) emplacements={} perdus={} cout={}",
+            eveil ? "eveil" : "palier", voie, joueur->GetGUID().GetCounter(), ancienGuid, ancienne,
+            neuve->GetGUID().GetCounter(), etape->vers, recopies, perdus, cout.empty() ? " gratuit" : cout);
         return neuve;
     }
 
-    // Message : « EVEIL:<sac>:<case>:<entree> ». Reponses : « EVEIL_OK:<entree eveillee> » ou « EVEIL_ERR:<cause> ».
-    void TraiterEveil(Player* joueur, std::string_view corps)
+    Item* Eveiller(Player* joueur, Item* piece, RefusEveil& refus, char const* voie)
     {
-        auto refuser = [&](char const* cause, std::string_view avis)
+        return Avancer(joueur, piece, SorteEtape::Eveil, refus, voie);
+    }
+
+    // Messages : « EVEIL:<sac>:<case>:<entree> » et « AMELIORER:<sac>:<case>:<entree> ».
+    // Reponses : « <NOM>_OK:<entree creee> » ou « <NOM>_ERR:<cause> » (REACTIFS:<id>=<manque>,...,or=<cuivre>).
+    void TraiterMessage(Player* joueur, std::string_view corps, SorteEtape sorte)
+    {
+        std::string const nom = sorte == SorteEtape::Eveil ? "EVEIL" : "AMELIORER";
+        auto refuser = [&](std::string const& cause, std::string const& avis)
         {
-            Repondre(joueur, std::string("EVEIL_ERR:") + cause);
+            Repondre(joueur, nom + "_ERR:" + cause);
             if (!avis.empty())
                 ChatHandler(joueur->GetSession()).SendNotification(avis);
         };
@@ -466,15 +621,16 @@ namespace
         if (!piece || int32(piece->GetEntry()) != entree || piece->IsInTrade())
             return refuser("PIECE", {});
         RefusEveil refus;
-        Item* neuve = Eveiller(joueur, piece, refus, "message");
+        Item* neuve = Avancer(joueur, piece, sorte, refus, "message");
         if (!neuve)
             return refuser(refus.cause, refus.avis);
-        Repondre(joueur, "EVEIL_OK:" + std::to_string(neuve->GetEntry()));
+        Repondre(joueur, nom + "_OK:" + std::to_string(neuve->GetEntry()));
     }
 
     struct DelaiEveil final : public DataMap::Base
     {
         Milliseconds prochain{ 0 };
+        bool delaiRepondu = false;   // une seule reponse DELAI par fenetre
     };
 
     // ---- Recolte des bots (preuve de l'exclusion des noeuds 9101000-9101099, mod-playerbots IsLootPossible) -------
@@ -513,9 +669,17 @@ namespace
     constexpr uint32 RECETTE_MAX = 9113999;
     constexpr uint32 OR_MINIMUM = 1000000;           // 100 po
 
-    constexpr uint32 HEAUME_BASE = 9101510;
-    constexpr uint32 HEAUME_EVEILLE = 9101511;
-    constexpr uint32 GARDE_POIGNETS_BASE = 9101468;
+    // Ids v2 (artisanat/ids-figes-v2.json, D-PO-24) : le Heaume du Rempart (FAI-P2-07) et ses Garde-poignets (FAI-P2-01).
+    // « BASE » : la piece qu'on eveille, le palier 70.
+    constexpr uint32 HEAUME_PALIER10 = 9101690;
+    constexpr uint32 HEAUME_BASE = 9101696;
+    constexpr uint32 HEAUME_EVEILLE = 9101697;
+    constexpr uint32 GARDE_POIGNETS_BASE = 9101618;
+    // Etape 5 (fiche) : le set 63004 a versions melangees, 5 pieces au niveau 80 (Heaume palier 70, Gantelets palier 70,
+    // Ceinture palier 10, Garde-poignets 213, Solerets 213), et le set 820 (45377, 46154).
+    constexpr std::array<uint32, 7> PIECES_ETAPE5 = { HEAUME_BASE, 9101644, 9101651, 9101619, 9101632, 45377, 46154 };
+    // .artisanat banc set : 4 pieces palier 10 du set 63004 (niveau requis 10), portees par un bot de niveau 20-78.
+    constexpr std::array<uint32, 4> PIECES_BANC_SET = { 9101625, 9101638, 9101651, 9101612 };
     constexpr uint32 GEMME_META = 41398;              // Relentless Earthsiege Diamond
     constexpr uint32 GEMME_ROUGE = 40111;             // Bold Cardinal Ruby
     constexpr uint32 ARCANE = 44878;                  // Arcanum of the Stalwart Protector
@@ -735,16 +899,200 @@ namespace
     // Bonus de set suspendu : temoin du banc, pour mesurer ce que le cœur fait seul au passage de niveau.
     bool RecalculSuspendu = false;
 
+
+    // ---- Materiaux de monde (D-PO-19, D-PO-23, D-PO-24) : chute sur toute creature qui rapporte de l'experience ----
+
+    // Categorie de la victime, dans l'ordre de priorite de la proposition de PartB (PROPOSITION-artisanat-paliers-
+    // D-PO-19.md, § 4) : boss, rare elite, rare, instance (hors boss), elite, ordinaire.
+    enum CategorieMonde : uint8 { CAT_ORDINAIRE, CAT_ELITE, CAT_RARE, CAT_RARE_ELITE, CAT_INSTANCE, CAT_BOSS, CAT_NOMBRE };
+    constexpr std::array<char const*, CAT_NOMBRE> NOMS_CATEGORIES = { "Ordinaire", "Elite", "Rare", "RareElite", "Instance", "Boss" };
+    constexpr std::array<char const*, 3> NOMS_QUALITES = { "Vert", "Rare", "Epique" };
+
+    struct ReglesMonde
+    {
+        std::array<uint32, 3> objets{};                               // vert, rare, epique ; 0 : coupe
+        std::array<std::array<float, 3>, CAT_NOMBRE> chances{};       // en pour cent
+        std::array<std::pair<uint8, uint8>, CAT_NOMBRE> nombreVert{}; // min, max
+        float tauxBots = 0.0f;                                        // en pour cent des chances ; 0 : bots exclus
+        bool actif = false;
+    };
+    ReglesMonde Monde;
+
+    // Lu au demarrage et a chaque .reload config. Tout est a 0 par defaut : rien ne tombe sans configuration.
+    void ChargerReglesMonde()
+    {
+        ReglesMonde r;
+        for (std::size_t q = 0; q < 3; ++q)
+            r.objets[q] = sConfigMgr->GetOption<uint32>(Acore::StringFormat("CoaArtisanat.Monde.Objet.{}", NOMS_QUALITES[q]), 0, false);
+        for (std::size_t c = 0; c < CAT_NOMBRE; ++c)
+        {
+            for (std::size_t q = 0; q < 3; ++q)
+                r.chances[c][q] = std::clamp(sConfigMgr->GetOption<float>(Acore::StringFormat("CoaArtisanat.Monde.Chance.{}.{}",
+                    NOMS_CATEGORIES[c], NOMS_QUALITES[q]), 0.0f, false), 0.0f, 100.0f);
+            uint32 const mini = std::clamp<uint32>(sConfigMgr->GetOption<uint32>(Acore::StringFormat("CoaArtisanat.Monde.Vert.{}.Min",
+                NOMS_CATEGORIES[c]), 1, false), 1, 20);
+            uint32 const maxi = std::clamp<uint32>(sConfigMgr->GetOption<uint32>(Acore::StringFormat("CoaArtisanat.Monde.Vert.{}.Max",
+                NOMS_CATEGORIES[c]), mini, false), mini, 20);
+            r.nombreVert[c] = { uint8(mini), uint8(maxi) };
+        }
+        r.tauxBots = std::clamp(sConfigMgr->GetOption<float>("CoaArtisanat.Monde.TauxBots", 0.0f, false), 0.0f, 100.0f);
+        for (std::size_t q = 0; q < 3; ++q)
+        {
+            if (r.objets[q] && !sObjectMgr->GetItemTemplate(r.objets[q]))
+            {
+                LOG_ERROR("module", "coa artisanat: CoaArtisanat.Monde.Objet.{} = {} : objet inconnu, qualite coupee", NOMS_QUALITES[q], r.objets[q]);
+                r.objets[q] = 0;
+            }
+            for (std::size_t c = 0; c < CAT_NOMBRE; ++c)
+                r.actif = r.actif || (r.objets[q] && r.chances[c][q] > 0.0f);
+        }
+        Monde = r;
+        LOG_INFO("module", "coa artisanat: materiaux de monde {} (objets {}/{}/{}, bots {} %)", r.actif ? "actifs" : "coupes",
+            r.objets[0], r.objets[1], r.objets[2], r.tauxBots);
+    }
+
+    std::atomic<uint32> ChutesMonde{ 0 };      // objets de monde poses dans un butin depuis le demarrage
+    std::atomic<uint32> ButinsMonde{ 0 };      // butins de creature examines (regles actives)
+    std::atomic<uint32> EcartesGris{ 0 };      // ... ecartes : victime sans experience (grise, NO_XP...)
+    std::atomic<uint32> EcartesBots{ 0 };      // ... ecartes : detenteur bot (TauxBots = 0)
+
+    // Un objet du butin d'un detenteur bot est-il accessible a un humain du groupe ? Chacun pour soi : oui. Tour par
+    // tour : non (seul le detenteur). Tirage (groupe, besoin avant cupidite) : oui au-dessus du seuil, sinon non (sous le
+    // seuil, l'objet suit le tour). Maitre du butin : au-dessus du seuil si le maitre est humain (un bot ne distribue
+    // jamais), sinon non.
+    bool AccessibleAuxHumains(Group const* groupe, uint32 objet)
+    {
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(objet);
+        if (!proto)
+            return false;
+        bool const auDessusDuSeuil = proto->Quality >= uint32(groupe->GetLootThreshold());
+        switch (groupe->GetLootMethod())
+        {
+            case FREE_FOR_ALL:
+                return true;
+            case GROUP_LOOT:
+            case NEED_BEFORE_GREED:
+                return auDessusDuSeuil;
+            case MASTER_LOOT:
+            {
+                Player* maitre = ObjectAccessor::FindPlayer(groupe->GetMasterLooterGuid());
+                return auDessusDuSeuil && maitre && maitre->GetSession() && !maitre->GetSession()->IsBot();
+            }
+            default:
+                return false;
+        }
+    }
+
+    class ArtisanatButinMonde final : public MiscScript
+    {
+    public:
+        ArtisanatButinMonde() : MiscScript("CoaArtisanatButinMonde", { MISCHOOK_ON_AFTER_LOOT_TEMPLATE_PROCESS }) { }
+
+        // Appele par Loot::FillLoot apres le tirage du modele, avant les droits de groupe : un objet ajoute ici suit
+        // les regles normales (maitre du butin, seuil). Les creatures sans table de butin (lootid 0) n'y passent pas
+        // (D-PO-23 : accepte, 9,1 % des hostiles et neutres tuables).
+        void OnAfterLootTemplateProcess(Loot* butin, LootTemplate const* /*modele*/, LootStore const& magasin, Player* detenteur,
+            bool /*personnel*/, bool /*sansErreur*/, uint16 mode) override
+        {
+            ReglesMonde const& r = Monde;
+            if (!r.actif || !butin || !detenteur || !mode || &magasin != &LootTemplates_Creature || !detenteur->IsInWorld())
+                return;
+            Creature* victime = detenteur->GetMap()->GetCreature(butin->sourceWorldObjectGUID);
+            if (!victime)
+                return;
+            ++ButinsMonde;
+
+            // Le personnage de reference : le detenteur du butin. Si c'est un bot (premier a frapper, tour de ramassage)
+            // et qu'un joueur de son groupe a droit au butin, c'est ce joueur (le plus haut niveau, le plus exigeant) :
+            // un humain entoure de bots ne perd pas ses chances. Les bots ne ramassent ni ne tirent ces objets
+            // (mod-playerbots, StoreLootAction::IsLootAllowed et LootRollAction).
+            Player* reference = detenteur;
+            Group* groupeBot = nullptr;   // non nul : detenteur bot, objet destine a un humain de son groupe
+            float facteur = 1.0f;
+            auto estBot = [](Player const* p) { return p->GetSession() && p->GetSession()->IsBot(); };
+            if (estBot(detenteur))
+            {
+                Player* humain = nullptr;
+                if (Group* groupe = detenteur->GetGroup())
+                    for (GroupReference* ref = groupe->GetFirstMember(); ref; ref = ref->next())
+                        if (Player* membre = ref->GetSource())
+                            if (!estBot(membre) && membre->IsInWorld() && membre->IsAtLootRewardDistance(victime)
+                                && (!humain || membre->GetLevel() > humain->GetLevel()))
+                                humain = membre;
+                if (humain)
+                {
+                    reference = humain;
+                    groupeBot = detenteur->GetGroup();
+                }
+                else
+                    facteur = r.tauxBots / 100.0f;
+            }
+            if (facteur <= 0.0f)
+            {
+                ++EcartesBots;
+                return;
+            }
+
+            // Seulement si la victime rapporte de l'experience au personnage de reference (D-PO-23 : gris juge pour
+            // lui) : meme calcul que le cœur (Acore::XP::Gain : gris, NO_XP, totem, familier, bestiole, ModExperience).
+            if (!Acore::XP::Gain(reference, victime))
+            {
+                ++EcartesGris;
+                return;
+            }
+
+            CategorieMonde categorie;
+            switch (victime->GetCreatureTemplate()->rank)
+            {
+                case CREATURE_ELITE_WORLDBOSS: categorie = CAT_BOSS; break;
+                case CREATURE_ELITE_RAREELITE: categorie = CAT_RARE_ELITE; break;
+                case CREATURE_ELITE_RARE:      categorie = CAT_RARE; break;
+                case CREATURE_ELITE_ELITE:     categorie = CAT_ELITE; break;
+                case CREATURE_ELITE_NORMAL:    categorie = CAT_ORDINAIRE; break;
+                default: return;   // CREATURE_UNKNOWN (rang 5) : rien
+            }
+            if ((categorie == CAT_ELITE || categorie == CAT_ORDINAIRE) && victime->GetMap()->IsDungeon())
+                categorie = CAT_INSTANCE;
+
+            for (std::size_t q = 0; q < 3; ++q)
+            {
+                if (!r.objets[q])
+                    continue;
+                // Detenteur bot : l'objet n'est pose que si l'humain peut l'obtenir (tirage, chacun pour soi, maitre
+                // humain). Sinon seul le bot y aurait acces, et il le laisse : l'objet serait perdu.
+                if (groupeBot && !AccessibleAuxHumains(groupeBot, r.objets[q]))
+                    continue;
+                if (!roll_chance_f(r.chances[categorie][q] * facteur))
+                    continue;
+                uint8 const mini = q == 0 ? r.nombreVert[categorie].first : 1;
+                uint8 const maxi = q == 0 ? r.nombreVert[categorie].second : 1;
+                std::size_t const avant = butin->items.size();
+                butin->AddItem(LootStoreItem(r.objets[q], 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, mini, maxi));
+                if (butin->items.size() > avant)   // MAX_NR_LOOT_ITEMS atteint : rien n'est pose
+                    ++ChutesMonde;
+            }
+        }
+    };
+
     // ---- Scripts --------------------------------------------------------------------------------------------------
 
     class ArtisanatWorld final : public WorldScript
     {
     public:
-        ArtisanatWorld() : WorldScript("CoaArtisanatWorld", { WORLDHOOK_ON_STARTUP }) { }
+        ArtisanatWorld() : WorldScript("CoaArtisanatWorld", { WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_AFTER_CONFIG_LOAD }) { }
 
         void OnStartup() override
         {
             ChargerVersionsEveillees();
+            ChargerEtapes();
+            ChargerReglesMonde();
+        }
+
+        // Au demarrage, ce crochet passe avant le chargement des objets : les regles se lisent alors dans OnStartup.
+        void OnAfterConfigLoad(bool rechargement) override
+        {
+            if (rechargement)
+                ChargerReglesMonde();
         }
     };
 
@@ -878,9 +1226,10 @@ namespace
         {
             if (type != CHAT_MSG_WHISPER || langue != LANG_ADDON || !message.starts_with(PREFIXE_ADDON))
                 return true;
-            // Seul « EVEIL: » est a ce script ; les autres messages du canal COA_ATL suivent leur chemin.
+            // Seuls « EVEIL: » et « AMELIORER: » sont a ce script ; les autres messages du canal COA_ATL suivent leur chemin.
             std::string_view corps = std::string_view(message).substr(PREFIXE_ADDON.size());
-            if (!corps.starts_with("EVEIL:"))
+            bool const eveil = corps.starts_with("EVEIL:");
+            if (!eveil && !corps.starts_with("AMELIORER:"))
                 return true;
             // Consomme meme desactive ; jamais relaye a un autre joueur.
             if (destinataire != joueur || message.size() > 255)
@@ -889,12 +1238,21 @@ namespace
             Milliseconds const maintenant = GameTime::GetGameTimeMS();
             DelaiEveil* delai = joueur->CustomData.GetDefault<DelaiEveil>(CLE_DELAI);
             if (maintenant < delai->prochain)
+            {
+                // Reponse explicite (l'atelier grise le bouton jusqu'a la reponse), une seule par fenetre.
+                if (!delai->delaiRepondu)
+                    Repondre(joueur, eveil ? "EVEIL_ERR:DELAI" : "AMELIORER_ERR:DELAI");
+                delai->delaiRepondu = true;
                 return false;
+            }
             delai->prochain = maintenant + DELAI_EVEIL;
-            if (!sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", true))
+            delai->delaiRepondu = false;
+            if (eveil && !sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", true))
                 Repondre(joueur, "EVEIL_ERR:DESACTIVE");
+            else if (!eveil && !sConfigMgr->GetOption<bool>("CoaArtisanat.AmeliorerParMessage", true))
+                Repondre(joueur, "AMELIORER_ERR:DESACTIVE");
             else
-                TraiterEveil(joueur, corps.substr(6));
+                TraiterMessage(joueur, corps.substr(eveil ? 6 : 10), eveil ? SorteEtape::Eveil : SorteEtape::Palier);
             return false;
         }
     };
@@ -914,12 +1272,38 @@ namespace
         { "Maître", "comme 1, recettes de Forge du lot 1 désapprises" },
         { "Fabriquer", "niveau 80, Forge 450/450, recettes apprises, marteau, ingrédients, 100 po" },
         { "Récolte", "niveau 80, Forge 450/450, recettes, Pic 5384, griffe 5059" },
-        { "Niveau", "niveau 20 (redescendre efface les talents) ; en sac : Heaume, Solerets, Gantelets, Ceinture de base, Garde-poignets et Solerets 213, 45377, 46154" },
-        { "Éveil", "niveau 80 ; Heaume de base porté + 2 en sac ; Garde-poignets de base" },
-        { "Châsses", "niveau 80 ; Heaume de base « Fabriqué par » vous ; gemmes 41398 et 40111 ; arcane 44878 ; Garde-poignets de base ; parchemin 38771" },
+        { "Améliorer", "niveau 19 (redescendre efface les talents) ; Heaume palier 10 porté, coût des paliers 20 et 30 ; en sac : Heaume et Gantelets palier 70, Ceinture palier 10, Garde-poignets et Solerets 213, 45377, 46154" },
+        { "Éveil", "niveau 80 ; Heaume palier 70 porté + 1 en sac ; Garde-poignets palier 70 ; coût de 2 éveils" },
+        { "Châsses", "niveau 80 ; Heaume palier 70 « Fabriqué par » vous ; gemmes 41398 et 40111 ; arcane 44878 ; Garde-poignets palier 70 ; parchemin 38771 ; coût de 2 éveils" },
         { "Rangs", "niveau 80 ; Heaume éveillé porté, serti, arcane posée, « Fabriqué par » vous ; réactifs des 5 rangs" },
         { "Bascule", "niveau 80, Forge 450/450, recettes apprises" },
     }};
+
+    // Cout cumule des etapes (eveils, ou paliers) de ces pieces (table coa_artisanat_etape), pour que le banc le
+    // fournisse sans cumuler.
+    std::vector<Quantite> CoutsEtapes(std::initializer_list<uint32> pieces, bool eveil, uint32& orCuivre)
+    {
+        std::vector<Quantite> couts;
+        orCuivre = 0;
+        for (uint32 piece : pieces)
+        {
+            auto it = Etapes.find(piece);
+            if (it == Etapes.end() || it->second.eveil != eveil)
+                continue;
+            orCuivre += it->second.orCuivre;
+            for (auto const& [objet, nombre] : it->second.objets)
+            {
+                if (!objet)
+                    continue;
+                auto q = std::find_if(couts.begin(), couts.end(), [&](Quantite const& c) { return c.entree == objet; });
+                if (q != couts.end())
+                    q->nombre += nombre;
+                else
+                    couts.push_back({ objet, nombre });
+            }
+        }
+        return couts;
+    }
 
     // Cases de sac que prend l'etape `etape` de .artisanat essai : meme logique que HandleEssai, sans rien donner.
     // Une piece creee puis portee prend une case (l'ancienne piece revient a sa place) ; une piece tenue, aucune.
@@ -943,21 +1327,33 @@ namespace
                 cases += CasesPour(joueur, 5384, 1) + CasesPour(joueur, 5059, 1);
                 break;
             case 5:
-                for (uint32 entree : { HEAUME_BASE, 9101475u, 9101482u, 9101489u, 9101469u, 9101476u, 45377u, 46154u })
+            {
+                Item const* teteP10 = tete && tete->GetEntry() == HEAUME_PALIER10 ? tete : nullptr;
+                cases += teteP10 ? 0 : 1;
+                for (uint32 entree : PIECES_ETAPE5)
                     cases += CasesPour(joueur, entree, 1);
+                uint32 orCuivre = 0;
+                liste(CoutsEtapes({ HEAUME_PALIER10, HEAUME_PALIER10 + 1 }, false, orCuivre));
                 break;
+            }
             case 6:
             {
                 bool const basePortee = tete && tete->GetEntry() == HEAUME_BASE;
                 uint32 const enSac = joueur->GetItemCount(HEAUME_BASE, false) - (basePortee ? 1 : 0);
-                cases += (basePortee ? 0 : 1) + (enSac < 2 ? 2 - enSac : 0) + CasesPour(joueur, GARDE_POIGNETS_BASE, 1);
+                cases += (basePortee ? 0 : 1) + (enSac < 1 ? 1 - enSac : 0) + CasesPour(joueur, GARDE_POIGNETS_BASE, 1);
+                uint32 orCuivre = 0;
+                liste(CoutsEtapes({ HEAUME_BASE, GARDE_POIGNETS_BASE }, true, orCuivre));
                 break;
             }
             case 7:
+            {
                 cases += PremierTenu(joueur, HEAUME_BASE) ? 0 : 1;
                 for (uint32 entree : { GEMME_META, GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })
                     cases += CasesPour(joueur, entree, 1);
+                uint32 orCuivre = 0;
+                liste(CoutsEtapes({ HEAUME_BASE, GARDE_POIGNETS_BASE }, true, orCuivre));
                 break;
+            }
             case 8:
                 cases += PremierTenu(joueur, HEAUME_EVEILLE) ? 0 : 1;
                 liste(REACTIFS_RANGS);
@@ -1054,6 +1450,15 @@ namespace
                         joueur->removeSpell(id, SPEC_MASK_ALL, false);
                 }
             };
+            // Ce que coutent les eveils de la seance (Heaume et Garde-poignets), et l'or qui va avec.
+            auto coutsEveil = [&]
+            {
+                uint32 orCuivre = 0;
+                for (Quantite const& q : CoutsEtapes({ HEAUME_BASE, GARDE_POIGNETS_BASE }, true, orCuivre))
+                    completer(q.entree, q.nombre);
+                if (joueur->GetMoney() < OR_MINIMUM + orCuivre)
+                    joueur->ModifyMoney(int32(OR_MINIMUM + orCuivre - joueur->GetMoney()));
+            };
             auto ingredients = [&]
             {
                 for (Quantite const& q : INGREDIENTS_SEANCE)
@@ -1088,22 +1493,34 @@ namespace
                     completer(5059, 1);
                     break;
                 case 5:
-                    niveau(20);
-                    for (uint32 entree : { HEAUME_BASE, 9101475u, 9101482u, 9101489u, 9101469u, 9101476u, 45377u, 46154u })
+                {
+                    // Ameliorer : Heaume palier 10 porte, cout des paliers 20 et 30 ; puis les pieces du set (fiche).
+                    niveau(19);   // fiche : refus NIVEAU a 19, puis .character level 20
+                    Item* porte = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+                    if (!porte || porte->GetEntry() != HEAUME_PALIER10)
+                        porter(creer(HEAUME_PALIER10));
+                    for (uint32 entree : PIECES_ETAPE5)
                         completer(entree, 1);
+                    uint32 orCuivre = 0;
+                    for (Quantite const& q : CoutsEtapes({ HEAUME_PALIER10, HEAUME_PALIER10 + 1 }, false, orCuivre))
+                        completer(q.entree, q.nombre);
+                    if (joueur->GetMoney() < OR_MINIMUM + orCuivre)
+                        joueur->ModifyMoney(int32(OR_MINIMUM + orCuivre - joueur->GetMoney()));
                     break;
+                }
                 case 6:
                 {
                     niveau(80);
                     Item* porte = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
                     if (!porte || porte->GetEntry() != HEAUME_BASE)
                         porter(creer(HEAUME_BASE));
-                    // Le double : deux Heaumes de base en sac en plus de celui qui est porte.
+                    // Le double : un Heaume palier 70 en sac en plus de celui qui est porte.
                     uint32 const enSac = joueur->GetItemCount(HEAUME_BASE, false) - (joueur->GetItemByPos(INVENTORY_SLOT_BAG_0,
                         EQUIPMENT_SLOT_HEAD) && joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD)->GetEntry() == HEAUME_BASE ? 1 : 0);
-                    for (uint32 i = enSac; i < 2; ++i)
+                    for (uint32 i = enSac; i < 1; ++i)
                         creer(HEAUME_BASE);
                     completer(GARDE_POIGNETS_BASE, 1);
+                    coutsEveil();
                     break;
                 }
                 case 7:
@@ -1114,6 +1531,7 @@ namespace
                             SignerPar(joueur, heaume);
                     for (uint32 entree : { GEMME_META, GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })
                         completer(entree, 1);
+                    coutsEveil();
                     break;
                 case 8:
                 {
@@ -1172,13 +1590,105 @@ namespace
             handler->PSendSysMessage("banc etat: depuis le demarrage, bots : {} butins de gameobjects ouverts (dont noeuds {}-{} : {}), {} objets pris (dont noeuds : {}) ; joueurs : {} objets pris sur ces noeuds",
                 OuverturesBots.load(), NOEUD_MIN, NOEUD_MAX, OuverturesBotsNoeuds.load(), RecoltesBots.load(),
                 RecoltesBotsNoeuds.load(), RecoltesJoueursNoeuds.load());
+            handler->PSendSysMessage("banc etat: materiaux de monde {} : {} butins de creature examines, {} ecartes (gris ou sans XP), {} ecartes (bot), {} objets poses",
+                Monde.actif ? "actifs" : "coupes", ButinsMonde.load(), EcartesGris.load(), EcartesBots.load(), ChutesMonde.load());
             return true;
         }
 
-        // Phase 1 : Heaume de base fabrique par le personnage, serti, enchantement permanent (parchemin) et temporaire
-        // (huile, 30 min). Phase 2 : eveil (refus au niveau 79, puis eveil). Phase 3 : rangs 1-5 depuis la piece portee
-        // (refus sans reactifs et au niveau 79, puis cout preleve et recopie a chaque rang). Chaque phase sauvegarde
-        // le personnage : item_instance se lit entre deux phases.
+        // Une etape payante sur le banc (palier ou eveil), avec ses preuves : refus sans reactifs puis au niveau
+        // requis - 1 (pour la premiere etape), cout fourni a l'exact, prelevement verifie, recopie verifiee. L'or du
+        // personnage est rendu a la fin. Rend la piece neuve, ou nullptr.
+        static Item* EtapeBanc(ChatHandler* handler, Player* j, Item* piece, SorteEtape sorte, std::string const& tag, bool refus)
+        {
+            bool const eveil = sorte == SorteEtape::Eveil;
+            auto it = Etapes.find(piece->GetEntry());
+            if (it == Etapes.end() || it->second.eveil != eveil)
+            {
+                handler->PSendSysMessage("{}: aucune etape {} en table pour {}.", tag, eveil ? "d'eveil" : "de palier", piece->GetEntry());
+                return nullptr;
+            }
+            EtapeArtisanat const& etape = it->second;
+            uint32 const de = piece->GetEntry();
+            Chasses const avant = Photographier(j, piece);
+            uint32 const bonusAvant = piece->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT);
+            uint32 const orOrigine = j->GetMoney();
+            uint8 const niveauOrigine = j->GetLevel();
+            RefusEveil r;
+            auto fournir = [&]
+            {
+                for (auto const& [objet, nombre] : etape.objets)
+                    if (objet)
+                        if (uint32 const reste = Completer(j, objet, nombre))
+                            handler->PSendSysMessage("{}: sacs pleins, {} x{} non donnes.", tag, objet, reste);
+                j->SetMoney(etape.orCuivre + 10000);
+            };
+            auto intacte = [&] { return j->GetItemByGuid(avant.source) ? "oui" : "non"; };
+
+            if (refus)
+            {
+                for (auto const& [objet, nombre] : etape.objets)
+                    if (objet)
+                        j->DestroyItemCount(objet, j->GetItemCount(objet, false), true);
+                j->SetMoney(0);
+                Item* x = Avancer(j, piece, sorte, r, "banc");
+                handler->PSendSysMessage("{}: sans reactifs -> {} (attendu REACTIFS:...), piece intacte={}", tag,
+                    x ? std::string("PASSE") : r.cause, intacte());
+                if (x)
+                    return j->SetMoney(orOrigine), x;
+                fournir();
+                j->SetLevel(etape.niveau - 1);
+                x = Avancer(j, piece, sorte, r, "banc");
+                j->SetLevel(niveauOrigine);
+                bool reactifsIntacts = j->GetMoney() == etape.orCuivre + 10000;
+                for (auto const& [objet, nombre] : etape.objets)
+                    reactifsIntacts = reactifsIntacts && (!objet || j->GetItemCount(objet, false) >= nombre);
+                handler->PSendSysMessage("{}: niveau {} -> {} (attendu NIVEAU), piece intacte={}, reactifs intacts={}", tag,
+                    uint32(etape.niveau - 1), x ? std::string("PASSE") : r.cause, intacte(), reactifsIntacts ? "oui" : "non");
+                if (x)
+                    return j->SetMoney(orOrigine), x;
+            }
+
+            fournir();
+            std::vector<std::pair<uint32, uint32>> avantCouts;
+            for (auto const& [objet, nombre] : etape.objets)
+                if (objet)
+                    avantCouts.emplace_back(objet, j->GetItemCount(objet, false));
+            uint32 const orAvant = j->GetMoney();
+            Item* neuve = Avancer(j, piece, sorte, r, "banc");
+            if (!neuve)
+            {
+                handler->PSendSysMessage("{}: {} refuse : {}", tag, de, r.cause);
+                j->SetMoney(orOrigine);
+                return nullptr;
+            }
+            std::string couts;
+            bool justes = true;
+            for (auto const& [objet, avantN] : avantCouts)
+            {
+                uint32 attendu = 0;
+                for (auto const& [o, n] : etape.objets)
+                    if (o == objet)
+                        attendu += n;
+                uint32 const apres = j->GetItemCount(objet, false);
+                uint32 const pris = avantN >= apres ? avantN - apres : 0;
+                justes = justes && pris == attendu;
+                couts += Acore::StringFormat(" {}:{}/{}", objet, pris, attendu);
+            }
+            uint32 const orPris = orAvant >= j->GetMoney() ? orAvant - uint32(j->GetMoney()) : 0;
+            justes = justes && orPris == etape.orCuivre;
+            couts += Acore::StringFormat(" or:{}/{}", orPris, etape.orCuivre);
+            handler->PSendSysMessage("{}: {} -> {} niveau d'objet {} ; recopie {} ; ancienne detruite={} ; couts{} {}", tag, de,
+                Decrire(neuve), neuve->GetTemplate()->ItemLevel, Conforme(avant, bonusAvant, neuve) ? "CONFORME" : "ECART",
+                j->GetItemByGuid(avant.source) ? "non" : "oui", couts, justes ? "JUSTES" : "FAUX");
+            j->SetMoney(orOrigine);
+            return neuve;
+        }
+
+        // Phase 1 : Heaume palier 10 fabrique par le personnage (sans chasse), enchantement permanent (parchemin) et
+        // temporaire (huile, 30 min). Phase 2 : les 6 paliers 10 -> 70 (AMELIORER). Phase 3 : eveil du palier 70. Phase 4 : rangs
+        // 1-5 depuis la piece portee. Chaque etape payante : refus sans reactifs et au niveau requis - 1 (premiere
+        // etape), puis cout preleve et recopie verifies. Chaque phase sauvegarde le personnage : item_instance se lit
+        // entre deux phases.
         static bool HandleBancRecopie(ChatHandler* handler, std::string nom, uint32 phase)
         {
             if (!BancPermis(handler))
@@ -1194,7 +1704,7 @@ namespace
 
             if (phase == 1)
             {
-                Item* heaume = CreerEnSac(j, HEAUME_BASE);
+                Item* heaume = CreerEnSac(j, HEAUME_PALIER10);
                 if (!heaume)
                     return handler->SendSysMessage("banc recopie 1: sacs pleins."), true;
                 SignerPar(j, heaume);
@@ -1202,41 +1712,46 @@ namespace
                 PoserEnchantement(j, heaume, PERM_ENCHANTMENT_SLOT, EnchantementDeObjet(PARCHEMIN), 0);
                 PoserEnchantement(j, heaume, TEMP_ENCHANTMENT_SLOT, EnchantementDeObjet(HUILE), 30 * MINUTE * IN_MILLISECONDS);
                 j->SaveToDB(false, false);
-                handler->PSendSysMessage("banc recopie 1: base {} ; joueur guid {}", Decrire(heaume), j->GetGUID().GetCounter());
+                handler->PSendSysMessage("banc recopie 1: palier 10 {} ; joueur guid {}", Decrire(heaume), j->GetGUID().GetCounter());
                 return true;
             }
 
             if (phase == 2)
             {
-                Item* heaume = PremierTenu(j, HEAUME_BASE);
-                if (!heaume)
-                    return handler->SendSysMessage("banc recopie 2: aucun Heaume de base (phase 1 d'abord)."), true;
-                Chasses const avant = Photographier(j, heaume);
-                uint32 const bonusAvant = heaume->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT);
-                RefusEveil refus;
-                j->SetLevel(NIVEAU_EVEIL - 1);
-                Item* rate = Eveiller(j, heaume, refus, "banc");
-                j->SetLevel(NIVEAU_EVEIL);
-                handler->PSendSysMessage("banc recopie 2: niveau 79 -> {} (attendu NIVEAU), piece intacte={}",
-                    rate ? "EVEILLE" : refus.cause, j->GetItemByGuid(avant.source) ? "oui" : "non");
-                Item* neuve = rate ? rate : Eveiller(j, heaume, refus, "banc");
-                if (!neuve)
-                    return handler->PSendSysMessage("banc recopie 2: eveil refuse : {}", refus.cause), true;
-                handler->PSendSysMessage("banc recopie 2: eveillee {} ; recopie {} ; base detruite={}", Decrire(neuve),
-                    Conforme(avant, bonusAvant, neuve) ? "CONFORME" : "ECART", j->GetItemByGuid(avant.source) ? "non" : "oui");
+                Item* piece = PremierTenu(j, HEAUME_PALIER10);
+                if (!piece)
+                    return handler->SendSysMessage("banc recopie 2: aucun Heaume palier 10 (phase 1 d'abord)."), true;
+                for (uint32 n = 0; piece && piece->GetEntry() != HEAUME_BASE && n < 6; ++n)
+                    piece = EtapeBanc(handler, j, piece, SorteEtape::Palier, Acore::StringFormat("banc recopie 2: palier {}", n + 1), n == 0);
+                handler->PSendSysMessage("banc recopie 2: fin sur {} (attendu {}).", piece ? piece->GetEntry() : 0, HEAUME_BASE);
                 j->SaveToDB(false, false);
                 return true;
             }
 
             if (phase == 3)
             {
+                Item* heaume = PremierTenu(j, HEAUME_BASE);
+                if (!heaume)
+                    return handler->SendSysMessage("banc recopie 3: aucun Heaume palier 70 (phases 1 et 2 d'abord)."), true;
+                // Les paliers n'ont pas de chasse : on sertit la 213 apres l'eveil, pour que les rangs recopient des gemmes.
+                if (Item* eveillee = EtapeBanc(handler, j, heaume, SorteEtape::Eveil, "banc recopie 3: eveil", true))
+                {
+                    Sertir(j, eveillee);
+                    handler->PSendSysMessage("banc recopie 3: 213 sertie {}", Decrire(eveillee));
+                }
+                j->SaveToDB(false, false);
+                return true;
+            }
+
+            if (phase == 4)
+            {
                 Item* depart = PremierTenu(j, HEAUME_EVEILLE);
                 if (!depart)
-                    return handler->SendSysMessage("banc recopie 3: aucun Heaume eveille (phases 1 et 2 d'abord)."), true;
+                    return handler->SendSysMessage("banc recopie 4: aucun Heaume eveille (phases 1 a 3 d'abord)."), true;
                 // Le casque d'origine prend la place du Heaume en sac ; il revient a la fin, sur tous les chemins.
                 uint16 const placeOrigine = depart->IsEquipped() ? uint16(0) : depart->GetPos();
                 if (!depart->IsEquipped() && !Porter(j, depart))
-                    return handler->SendSysMessage("banc recopie 3: le Heaume eveille ne se porte pas."), true;
+                    return handler->SendSysMessage("banc recopie 4: le Heaume eveille ne se porte pas."), true;
                 auto remettre = [&]
                 {
                     if (placeOrigine)
@@ -1270,7 +1785,7 @@ namespace
                         j->DestroyItemCount(q.entree, n, true);
                 SpellCastResult r = lancer();
                 bool intacte = j->GetItemByGuid(courant) != nullptr;
-                handler->PSendSysMessage("banc recopie 3: sans reactifs -> resultat {} (attendu {} REAGENTS), piece intacte={}",
+                handler->PSendSysMessage("banc recopie 4: sans reactifs -> resultat {} (attendu {} REAGENTS), piece intacte={}",
                     uint32(r), uint32(SPELL_FAILED_REAGENTS), intacte ? "oui" : "NON");
                 if (!intacte)
                     return remettre(), true;
@@ -1280,7 +1795,7 @@ namespace
                 r = lancer();
                 j->SetLevel(NIVEAU_EVEIL);
                 intacte = j->GetItemByGuid(courant) != nullptr;
-                handler->PSendSysMessage("banc recopie 3: niveau 79 -> resultat {} (condition : 172), piece intacte={}, reactifs intacts={}",
+                handler->PSendSysMessage("banc recopie 4: niveau 79 -> resultat {} (condition : 172), piece intacte={}, reactifs intacts={}",
                     uint32(r), intacte ? "oui" : "NON", j->GetItemCount(9100101, false) == 24 ? "oui" : "NON");
                 if (!intacte)
                     return remettre(), true;
@@ -1290,9 +1805,9 @@ namespace
                     Item* piece = j->GetItemByGuid(courant);
                     SpellInfo const* sort = piece ? sSpellMgr->GetSpellInfo(piece->GetTemplate()->Spells[0].SpellId) : nullptr;
                     if (!sort)
-                        return handler->PSendSysMessage("banc recopie 3: rang {} sans piece ou sans sort de renforcement.", rang), remettre(), true;
+                        return handler->PSendSysMessage("banc recopie 4: rang {} sans piece ou sans sort de renforcement.", rang), remettre(), true;
                     if (!piece->IsEquipped() && !Porter(j, piece))
-                        return handler->PSendSysMessage("banc recopie 3: rang {} : la piece ne se porte pas.", rang), remettre(), true;
+                        return handler->PSendSysMessage("banc recopie 4: rang {} : la piece ne se porte pas.", rang), remettre(), true;
                     uint32 const attendu = EntreeCreeeArtisanat(sort);
                     std::vector<ObjectGuid> dejaLa;
                     PourChaquePieceTenue(j, attendu, [&](Item* o) { dejaLa.push_back(o->GetGUID()); });
@@ -1320,9 +1835,9 @@ namespace
                         couts += Acore::StringFormat(" {}:{}/{}", sort->Reagent[i], pris, sort->ReagentCount[i]);
                     }
                     if (r != SPELL_CAST_OK || !neuve)
-                        return handler->PSendSysMessage("banc recopie 3: rang {} sort {} -> resultat {}, piece {} absente ; couts{}",
+                        return handler->PSendSysMessage("banc recopie 4: rang {} sort {} -> resultat {}, piece {} absente ; couts{}",
                             rang, sort->Id, uint32(r), attendu, couts), remettre(), true;
-                    handler->PSendSysMessage("banc recopie 3: rang {} sort {} -> {} niveau d'objet {} ; recopie {} ; ancienne detruite={} ; couts{} {}",
+                    handler->PSendSysMessage("banc recopie 4: rang {} sort {} -> {} niveau d'objet {} ; recopie {} ; ancienne detruite={} ; couts{} {}",
                         rang, sort->Id, Decrire(neuve), neuve->GetTemplate()->ItemLevel,
                         Conforme(avant, bonusAvant, neuve) ? "CONFORME" : "ECART", j->GetItemByGuid(avant.source) ? "non" : "oui",
                         couts, coutJuste ? "JUSTES" : "FAUX");
@@ -1331,7 +1846,7 @@ namespace
                 remettre();
                 return true;
             }
-            handler->SendSysMessage("banc recopie <nom> <1|2|3>");
+            handler->SendSysMessage("banc recopie <nom> <1|2|3|4>");
             return true;
         }
 
@@ -1361,7 +1876,7 @@ namespace
                 return handler->PSendSysMessage("banc set: {} doit etre entre les niveaux 20 et 78 (il est {}).", nom, uint32(n)), true;
             // Suivies par guid : un passage de niveau peut faire agir d'autres scripts sur l'inventaire.
             std::vector<std::pair<ObjectGuid, uint16>> pieces;   // piece, sa place en sac avant d'etre portee
-            for (uint32 entree : { 9101475u, 9101482u, 9101489u, GARDE_POIGNETS_BASE })
+            for (uint32 entree : PIECES_BANC_SET)
                 if (Item* objet = CreerEnSac(j, entree))
                     pieces.emplace_back(objet->GetGUID(), objet->GetPos());
             uint32 portees = 0;
@@ -1448,5 +1963,6 @@ void AddAscensionArtisanatScripts()
 {
     new ArtisanatWorld();
     new ArtisanatPlayer();
+    new ArtisanatButinMonde();
     new ArtisanatCommandes();
 }

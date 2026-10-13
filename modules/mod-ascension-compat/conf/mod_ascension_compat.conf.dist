@@ -206,3 +206,93 @@ AscensionCompat.HighRiskSettleDelayMs = 2000
 #                     0 - (leave the corpse as it is)
 
 AscensionCompat.DeadPlayerHealthGuard = 1
+
+###################################################################################################
+# ARTISANAT (refonte, lot 1) - AscensionArtisanat.cpp
+#
+#    CoaArtisanat.EveilParMessage
+#    CoaArtisanat.AmeliorerParMessage
+#        Description: Messages d'addon COA_ATL « EVEIL » et « AMELIORER » de l'atelier (D-PO-10, D-PO-24).
+#                     Etapes et couts : table acore_world.coa_artisanat_etape. Coupe : reponse <NOM>_ERR:DESACTIVE.
+#        Default:     1
+
+CoaArtisanat.EveilParMessage = 1
+CoaArtisanat.AmeliorerParMessage = 1
+
+#    CoaArtisanat.Monde.Objet.Vert / .Rare / .Epique
+#        Description: Materiaux de monde (D-PO-19) ajoutes au butin des creatures qui ont une table de butin et
+#                     rapportent de l'experience au detenteur du butin (ni grises pour lui, ni NO_XP).
+#                     0 coupe la qualite. Ids du lot 1 (PartB) : 9101212, 9101213, 9101214.
+#                     « Rapporte de l'experience » = Acore::XP::Gain > 0 : Rate.XP.Kill = 0 coupe donc tout,
+#                     et une creature a ModExperience 0 ne lache rien. Detenteur bot dans le groupe d'un joueur :
+#                     l'objet n'est pose que si le joueur peut l'obtenir (pas en tour par tour, ni sous le seuil,
+#                     ni avec un bot maitre du butin). Les bots ne ramassent ni ne tirent ces objets (mod-playerbots).
+#        Default:     0
+#
+#    CoaArtisanat.Monde.Chance.<Categorie>.<Qualite>
+#        Description: Chance en pour cent, un tirage independant par qualite. Categories, par priorite :
+#                     Boss (rang 3), RareElite (2), Rare (4), Instance (donjon ou raid, rangs 0 et 1),
+#                     Elite (1), Ordinaire (0). Rang 5 : rien.
+#                     Proposition de PartB validee (D-PO-24), donnee en commentaire a cote de chaque cle.
+#        Default:     0
+#
+#    CoaArtisanat.Monde.Vert.<Categorie>.Min / .Max
+#        Description: Nombre de verts poses quand le tirage reussit (rare et epique : 1).
+#        Default:     1
+#
+#    CoaArtisanat.Monde.TauxBots
+#        Description: Pour cent des chances quand le detenteur du butin est un bot. 0 : bots exclus (D-PO-23).
+#        Default:     0
+
+CoaArtisanat.Monde.Objet.Vert = 0
+CoaArtisanat.Monde.Objet.Rare = 0
+CoaArtisanat.Monde.Objet.Epique = 0
+#    proposition : 4
+CoaArtisanat.Monde.Chance.Ordinaire.Vert = 0
+#    proposition : 0.3
+CoaArtisanat.Monde.Chance.Ordinaire.Rare = 0
+#    proposition : 0
+CoaArtisanat.Monde.Chance.Ordinaire.Epique = 0
+#    proposition : 15
+CoaArtisanat.Monde.Chance.Elite.Vert = 0
+#    proposition : 2
+CoaArtisanat.Monde.Chance.Elite.Rare = 0
+#    proposition : 0.1
+CoaArtisanat.Monde.Chance.Elite.Epique = 0
+#    proposition : 100
+CoaArtisanat.Monde.Chance.Rare.Vert = 0
+#    proposition : 25
+CoaArtisanat.Monde.Chance.Rare.Rare = 0
+#    proposition : 1
+CoaArtisanat.Monde.Chance.Rare.Epique = 0
+#    proposition : 100
+CoaArtisanat.Monde.Chance.RareElite.Vert = 0
+#    proposition : 100
+CoaArtisanat.Monde.Chance.RareElite.Rare = 0
+#    proposition : 5
+CoaArtisanat.Monde.Chance.RareElite.Epique = 0
+#    proposition : 10
+CoaArtisanat.Monde.Chance.Instance.Vert = 0
+#    proposition : 1.5
+CoaArtisanat.Monde.Chance.Instance.Rare = 0
+#    proposition : 0.1
+CoaArtisanat.Monde.Chance.Instance.Epique = 0
+#    proposition : 100
+CoaArtisanat.Monde.Chance.Boss.Vert = 0
+#    proposition : 50
+CoaArtisanat.Monde.Chance.Boss.Rare = 0
+#    proposition : 10
+CoaArtisanat.Monde.Chance.Boss.Epique = 0
+#    proposition : 1
+CoaArtisanat.Monde.Vert.Rare.Min = 1
+#    proposition : 2
+CoaArtisanat.Monde.Vert.Rare.Max = 1
+#    proposition : 2
+CoaArtisanat.Monde.Vert.RareElite.Min = 1
+#    proposition : 3
+CoaArtisanat.Monde.Vert.RareElite.Max = 1
+#    proposition : 2
+CoaArtisanat.Monde.Vert.Boss.Min = 1
+#    proposition : 4
+CoaArtisanat.Monde.Vert.Boss.Max = 1
+CoaArtisanat.Monde.TauxBots = 0
