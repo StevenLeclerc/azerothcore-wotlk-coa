@@ -869,13 +869,47 @@ namespace
         return joueur->GetLevel() == niveau;
     }
 
-    void Forge(Player* joueur, uint16 valeur)
+    // Les 6 rangs de chaque metier de l'artisanat (lus par .lookup spell sur le PTR : « <Metier>, rank 1..6 »). Le
+    // livre des metiers lance le rang de la competence max (P-236) : on les apprend tous.
+    struct RangsMetier
     {
-        for (uint32 rang : RANGS_FORGE)
+        uint32 competence;
+        std::array<uint32, 6> rangs;
+    };
+    constexpr std::array<RangsMetier, 6> METIERS =
+    {{
+        { SKILL_FORGE, RANGS_FORGE },
+        { 197, { 3908, 3909, 3910, 12180, 26790, 51309 } },    // Couture
+        { 165, { 2108, 3104, 3811, 10662, 32549, 51302 } },    // Travail du cuir
+        { 171, { 2259, 3101, 3464, 11611, 28596, 51304 } },    // Alchimie
+        { 333, { 7411, 7412, 7413, 13920, 28029, 51313 } },    // Enchantement
+        { 755, { 25229, 25230, 28894, 28895, 28897, 51311 } }, // Joaillerie
+    }};
+    // Les outils de recolte des 12 noeuds de la salle (item_template.RequiredSkill, rang 1), plus la griffe du coffre.
+    constexpr std::array<uint32, 7> OUTILS_RECOLTE = { 5384, 5916, 5937, 16308, 23581, 23674, 5059 };
+
+    // Apprend les 6 rangs du metier et met la competence a `valeur`/450. Un rang dont le sort n'enseigne pas cette
+    // competence (SpellLearnSkill) est saute et journalise.
+    void Metier(Player* joueur, RangsMetier const& m, uint16 valeur)
+    {
+        for (uint32 rang : m.rangs)
+        {
+            SpellLearnSkillNode const* noeud = sSpellMgr->GetSpellLearnSkill(rang);
+            if (!noeud || noeud->skill != m.competence)
+            {
+                LOG_ERROR("module", "coa artisanat: banc : le sort {} n'enseigne pas la competence {}, saute", rang, m.competence);
+                continue;
+            }
             if (!joueur->HasSpell(rang))
                 joueur->learnSpell(rang);
+        }
         // Rang 6 (max 450) en dur : apprendre un rang inferieur a un rang connu laisse GetSkillStep sur ce rang-la.
-        joueur->SetSkill(SKILL_FORGE, uint16(RANGS_FORGE.size()), valeur, 450);
+        joueur->SetSkill(m.competence, uint16(m.rangs.size()), valeur, 450);
+    }
+
+    void Forge(Player* joueur, uint16 valeur)
+    {
+        Metier(joueur, METIERS[0], valeur);
     }
 
     // Texte d'une piece pour les comptes rendus : entree, guid, fabricant, emplacements non vides.
@@ -1271,7 +1305,7 @@ namespace
         { "Préparer", "niveau 80, Forge 1/450, 100 po, marteau et ingrédients du § 1" },
         { "Maître", "comme 1, recettes de Forge du lot 1 désapprises" },
         { "Fabriquer", "niveau 80, Forge 450/450, recettes apprises, marteau, ingrédients, 100 po" },
-        { "Récolte", "niveau 80, Forge 450/450, recettes, Pic 5384, griffe 5059" },
+        { "Récolte", "niveau 80 ; Forge, Couture, Cuir, Alchimie, Enchantement, Joaillerie à 450 (ou « .artisanat essai 4 <compétence> ») ; les 6 outils et la griffe 5059" },
         { "Améliorer", "niveau 19 (redescendre efface les talents) ; Heaume palier 10 porté, coût des paliers 20 et 30 ; en sac : Heaume et Gantelets palier 70, Ceinture palier 10, Garde-poignets et Solerets 213, 45377, 46154" },
         { "Éveil", "niveau 80 ; Heaume palier 70 porté + 1 en sac ; Garde-poignets palier 70 ; coût de 2 éveils" },
         { "Châsses", "niveau 80 ; Heaume palier 70 « Fabriqué par » vous ; gemmes 41398 et 40111 ; arcane 44878 ; Garde-poignets palier 70 ; parchemin 38771 ; coût de 2 éveils" },
@@ -1324,7 +1358,8 @@ namespace
                 liste(INGREDIENTS_SEANCE);
                 break;
             case 4:
-                cases += CasesPour(joueur, 5384, 1) + CasesPour(joueur, 5059, 1);
+                for (uint32 outil : OUTILS_RECOLTE)
+                    cases += CasesPour(joueur, outil, 1);
                 break;
             case 5:
             {
@@ -1387,13 +1422,13 @@ namespace
 
         // ---- .artisanat essai [etape] ----------------------------------------------------------------------------
 
-        static bool HandleEssai(ChatHandler* handler, Optional<uint32> etape)
+        static bool HandleEssai(ChatHandler* handler, Optional<uint32> etape, Optional<uint32> competence)
         {
             if (!BancPermis(handler))
                 return true;
             if (!etape || *etape < 1 || *etape > ETAPES.size())
             {
-                handler->SendSysMessage("Banc d'essai de l'artisanat : .artisanat essai <étape>, puis téléportation dans la salle d'essai.");
+                handler->SendSysMessage("Banc d'essai de l'artisanat : .artisanat essai <étape> [compétence, étape 4], puis téléportation dans la salle d'essai.");
                 for (std::size_t i = 0; i < ETAPES.size(); ++i)
                     handler->PSendSysMessage("  {} — {} : {}", i + 1, ETAPES[i].titre, ETAPES[i].prepare);
                 return true;
@@ -1486,12 +1521,18 @@ namespace
                         ingredients();
                     break;
                 case 4:
+                {
+                    // Les 6 metiers de recolte a la meme competence (450 par defaut, ou celle donnee pour tester les
+                    // seuils de butin : 1, 150, 300, 425), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
+                    uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(450), 1, 450));
                     niveau(80);
-                    Forge(joueur, 450);
+                    for (RangsMetier const& m : METIERS)
+                        Metier(joueur, m, valeur);
                     recettes(true);
-                    completer(5384, 1);
-                    completer(5059, 1);
+                    for (uint32 outil : OUTILS_RECOLTE)
+                        completer(outil, 1);
                     break;
+                }
                 case 5:
                 {
                     // Ameliorer : Heaume palier 10 porte, cout des paliers 20 et 30 ; puis les pieces du set (fiche).
