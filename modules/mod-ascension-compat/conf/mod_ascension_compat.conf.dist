@@ -219,6 +219,12 @@ AscensionCompat.DeadPlayerHealthGuard = 1
 CoaArtisanat.EveilParMessage = 1
 CoaArtisanat.AmeliorerParMessage = 1
 
+#    CoaArtisanat.TalentsParMessage
+#        Description: Messages COA_ATL « TALENT », « METIER » et « TALENTS? » (lot T0, D-PO-34). Coupe : <NOM>_ERR:DESACTIVE.
+#        Default:     1
+
+CoaArtisanat.TalentsParMessage = 1
+
 #    CoaArtisanat.Monde.Objet.Vert / .Rare / .Epique
 #        Description: Materiaux de monde (D-PO-19) ajoutes au butin des creatures qui ont une table de butin et
 #                     rapportent de l'experience au detenteur du butin (ni grises pour lui, ni NO_XP).

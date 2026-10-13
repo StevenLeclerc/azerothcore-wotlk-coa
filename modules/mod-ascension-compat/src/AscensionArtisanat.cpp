@@ -53,6 +53,8 @@
 #include <array>
 #include <atomic>
 #include <charconv>
+#include <map>
+#include <set>
 #include <string_view>
 #include <unordered_map>
 #include <vector>
@@ -76,12 +78,13 @@ namespace
     std::string const CLE_DELAI = "CoaArtisanatDelai";
     constexpr Milliseconds DELAI_EVEIL{ 500 };
 
-    // Emplacements recopies. Les PROP_ENCHANTMENT_SLOT_* (suffixe aleatoire) appartiennent au gabarit de la piece
-    // et ne se transportent pas ; BONUS_ENCHANTMENT_SLOT (bonus de chasse) se recalcule sur la piece neuve.
-    constexpr std::array<EnchantmentSlot, 6> EMPLACEMENTS_RECOPIES =
+    // Emplacements recopies. BONUS_ENCHANTMENT_SLOT (bonus de chasse) se recalcule sur la piece neuve. Les
+    // PROP_ENCHANTMENT_SLOT_* servent aux suffixes aleatoires, que nos pieces n'ont pas : le premier porte la signature
+    // de l'artisan (lot T, D-PO-34), qui suit la piece aux paliers, a l'eveil et aux rangs.
+    constexpr std::array<EnchantmentSlot, 7> EMPLACEMENTS_RECOPIES =
     {
         PERM_ENCHANTMENT_SLOT, TEMP_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT_2,
-        SOCK_ENCHANTMENT_SLOT_3, PRISMATIC_ENCHANTMENT_SLOT
+        SOCK_ENCHANTMENT_SLOT_3, PRISMATIC_ENCHANTMENT_SLOT, PROP_ENCHANTMENT_SLOT_0
     };
 
     bool EstObjetArtisanat(uint32 entry)
@@ -1108,6 +1111,547 @@ namespace
         }
     };
 
+    // ---- Talents d'artisanat et signatures (lot T0, D-PO-34) ----------------------------------------------------------
+    //
+    // Donnees (PartB, acore_world) : coa_artisanat_talent_def (une ligne par rang, cle = sort marqueur) et
+    // coa_artisanat_signature (une ligne par enchantement de signature). Etat par personnage (ce module,
+    // acore_characters) : coa_artisanat_personnage (metiers principaux, points gagnes) et coa_artisanat_talent (sorts
+    // marqueurs connus). Regles : docs/PROPOSITION-artisanat-arbres-detail.md §§ 0, 1, 2, 6 et arbitrages.
+
+    constexpr std::array<uint32, 3> METIERS_RECOLTE = { 186, 182, 393 };   // Minage, Herboristerie, Depecage
+    constexpr uint32 POINTS_ETAGE_PRECEDENT = 5;
+    std::string const CLE_TALENTS = "CoaArtisanatTalents";
+    std::string const CLE_SIGNATURES = "CoaArtisanatSignatures";
+
+    bool EstRecolte(uint32 metier)
+    {
+        return std::find(METIERS_RECOLTE.begin(), METIERS_RECOLTE.end(), metier) != METIERS_RECOLTE.end();
+    }
+
+    // Plafonds cumules par tranche de niveau (§ 1) : 10-19, 20-29, ..., 70-79, 80.
+    uint32 Plafond(uint8 niveau, bool recolte)
+    {
+        static constexpr std::array<uint8, 8> CREATION = { 6, 13, 20, 28, 36, 44, 50, 72 };
+        static constexpr std::array<uint8, 8> RECOLTE = { 4, 9, 14, 20, 26, 32, 37, 48 };
+        if (niveau < 10)
+            return 0;
+        std::size_t const tranche = niveau >= 80 ? 7 : std::size_t(niveau / 10 - 1);
+        return recolte ? RECOLTE[tranche] : CREATION[tranche];
+    }
+
+    struct TalentDef
+    {
+        uint32 sort = 0;
+        uint32 metier = 0;
+        uint32 prerequis = 0;
+        uint8 etage = 0;
+        uint8 niveau = 0;
+        uint8 rang = 0;
+        uint8 cout = 0;
+        uint8 signatureRang = 0;
+        std::string talent;
+        std::string groupe;
+        std::string voie;
+        std::string forme;
+        std::string requis;   // '' ou un talent (code) ou un groupe dont un talent doit etre connu (D-PO-37)
+    };
+    std::unordered_map<uint32, TalentDef> Talents;           // par sort marqueur
+    std::unordered_map<uint32, uint32> MarqueursMetier;       // SkillLine -> sort du marqueur « metier principal »
+
+    struct SignatureDef
+    {
+        uint32 enchant = 0;
+        uint32 metier = 0;
+        uint32 valeur = 0;
+        uint32 valeurArene = 0;
+        uint32 rechargeMs = 0;
+        uint32 sortEffet = 0;
+        uint32 pieceMasque = 0;
+        uint8 rang = 0;
+        uint8 seuilPct = 0;
+        uint8 groupeSursaut = 0;
+        uint8 pieceClasse = 0;
+        std::string voie;
+        std::string forme;
+        std::string effet;
+    };
+    std::unordered_map<uint32, SignatureDef> Signatures;      // par enchantement
+    bool TablesPersonnages = false;
+
+    bool TableExiste(DatabaseWorkerPool<WorldDatabaseConnection>& base, std::string_view nom)
+    {
+        return bool(base.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}'", nom));
+    }
+
+    void ChargerTalents()
+    {
+        Talents.clear();
+        MarqueursMetier.clear();
+        Signatures.clear();
+        TablesPersonnages = bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'coa_artisanat_personnage'")) && bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_artisanat_talent'"));
+
+        uint32 rejetes = 0;
+        // La colonne « requis » (D-PO-37) peut manquer dans un jeu plus ancien : on la lit si elle existe.
+        bool const avecRequis = bool(WorldDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'coa_artisanat_talent_def' AND COLUMN_NAME = 'requis'"));
+        if (TableExiste(WorldDatabase, "coa_artisanat_talent_def"))
+            if (QueryResult r = WorldDatabase.Query("SELECT sort, metier, etage, niveau, talent, rang, cout, groupe, voie, prerequis, "
+                "forme, signature_rang, {} FROM coa_artisanat_talent_def", avecRequis ? "requis" : "''"))
+                do
+                {
+                    Field* f = r->Fetch();
+                    TalentDef d;
+                    d.sort = f[0].Get<uint32>();
+                    d.metier = f[1].Get<uint32>();
+                    d.etage = f[2].Get<uint8>();
+                    d.niveau = f[3].Get<uint8>();
+                    d.talent = f[4].Get<std::string>();
+                    d.rang = f[5].Get<uint8>();
+                    d.cout = f[6].Get<uint8>();
+                    d.groupe = f[7].Get<std::string>();
+                    d.voie = f[8].Get<std::string>();
+                    d.prerequis = f[9].Get<uint32>();
+                    d.forme = f[10].Get<std::string>();
+                    d.signatureRang = f[11].Get<uint8>();
+                    d.requis = f[12].Get<std::string>();
+                    if (!sSpellMgr->GetSpellInfo(d.sort) || !d.metier)
+                    {
+                        ++rejetes;
+                        LOG_ERROR("module", "coa artisanat: talent rejete sort={} metier={} (sort inconnu ou metier nul)", d.sort, d.metier);
+                        continue;
+                    }
+                    if (d.talent == "metier")
+                        MarqueursMetier[d.metier] = d.sort;
+                    Talents[d.sort] = d;
+                } while (r->NextRow());
+        // Un prerequis doit etre un talent charge, du meme arbre.
+        for (auto it = Talents.begin(); it != Talents.end();)
+        {
+            auto p = it->second.prerequis ? Talents.find(it->second.prerequis) : Talents.end();
+            if (it->second.prerequis && (p == Talents.end() || p->second.metier != it->second.metier))
+            {
+                ++rejetes;
+                LOG_ERROR("module", "coa artisanat: talent rejete sort={} : prerequis {} absent ou d'un autre arbre", it->first, it->second.prerequis);
+                it = Talents.erase(it);
+            }
+            else
+                ++it;
+        }
+
+        uint32 signaturesRejetees = 0;
+        if (TableExiste(WorldDatabase, "coa_artisanat_signature"))
+            if (QueryResult r = WorldDatabase.Query("SELECT enchant, metier, voie, forme, rang, effet, valeur, valeur_arene, recharge_ms, "
+                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet FROM coa_artisanat_signature"))
+                do
+                {
+                    Field* f = r->Fetch();
+                    SignatureDef s;
+                    s.enchant = f[0].Get<uint32>();
+                    s.metier = f[1].Get<uint32>();
+                    s.voie = f[2].Get<std::string>();
+                    s.forme = f[3].Get<std::string>();
+                    s.rang = f[4].Get<uint8>();
+                    s.effet = f[5].Get<std::string>();
+                    s.valeur = f[6].Get<uint32>();
+                    s.valeurArene = f[7].Get<uint32>();
+                    s.rechargeMs = f[8].Get<uint32>();
+                    s.seuilPct = f[9].Get<uint8>();
+                    s.groupeSursaut = f[10].Get<uint8>();
+                    s.pieceClasse = f[11].Get<uint8>();
+                    s.pieceMasque = f[12].Get<uint32>();
+                    s.sortEffet = f[13].Get<uint32>();
+                    if (!sSpellItemEnchantmentStore.LookupEntry(s.enchant) || (s.sortEffet && !sSpellMgr->GetSpellInfo(s.sortEffet))
+                        || s.forme.empty() || !s.rang || s.seuilPct > 100)
+                    {
+                        ++signaturesRejetees;
+                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} (enchantement ou sort d'effet inconnu, forme ou rang vide)", s.enchant);
+                        continue;
+                    }
+                    Signatures[s.enchant] = s;
+                } while (r->NextRow());
+
+        LOG_INFO("module", "coa artisanat: talents : {} sorts ({} marqueurs de metier), {} rejetes ; signatures : {}, {} rejetees ; tables personnages {}",
+            uint32(Talents.size()), uint32(MarqueursMetier.size()), rejetes, uint32(Signatures.size()), signaturesRejetees,
+            TablesPersonnages ? "presentes" : "ABSENTES");
+    }
+
+    struct EtatTalents final : public DataMap::Base
+    {
+        bool charge = false;
+        uint32 metierC = 0;
+        uint32 metierR = 0;
+        uint32 gagnesC = 0;
+        uint32 gagnesR = 0;
+        std::set<uint32> sorts;
+    };
+
+    EtatTalents* Etat(Player* joueur)
+    {
+        EtatTalents* e = joueur->CustomData.GetDefault<EtatTalents>(CLE_TALENTS);
+        if (e->charge || !TablesPersonnages)
+            return e;
+        e->charge = true;
+        uint32 const guid = joueur->GetGUID().GetCounter();
+        if (QueryResult r = CharacterDatabase.Query("SELECT metier_creation, metier_recolte, points_creation, points_recolte "
+            "FROM coa_artisanat_personnage WHERE guid = {}", guid))
+        {
+            Field* f = r->Fetch();
+            e->metierC = f[0].Get<uint32>();
+            e->metierR = f[1].Get<uint32>();
+            e->gagnesC = f[2].Get<uint32>();
+            e->gagnesR = f[3].Get<uint32>();
+        }
+        if (QueryResult r = CharacterDatabase.Query("SELECT sort FROM coa_artisanat_talent WHERE guid = {}", guid))
+            do
+                e->sorts.insert(r->Fetch()[0].Get<uint32>());
+            while (r->NextRow());
+        return e;
+    }
+
+    void SauverPersonnage(Player* joueur, EtatTalents const& e)
+    {
+        if (TablesPersonnages)
+            CharacterDatabase.Execute("REPLACE INTO coa_artisanat_personnage (guid, metier_creation, metier_recolte, points_creation, "
+                "points_recolte) VALUES ({}, {}, {}, {}, {})", joueur->GetGUID().GetCounter(), e.metierC, e.metierR, e.gagnesC, e.gagnesR);
+    }
+
+    uint32 Depenses(EtatTalents const& e, uint32 metier, int32 etage = -1)
+    {
+        uint32 total = 0;
+        for (uint32 sort : e.sorts)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier
+                && (etage < 0 || it->second.etage == uint8(etage)))
+                total += it->second.cout;
+        return total;
+    }
+
+    uint32 Disponibles(Player* joueur, EtatTalents const& e, bool recolte)
+    {
+        uint32 const metier = recolte ? e.metierR : e.metierC;
+        if (!metier)
+            return 0;
+        uint32 const plafond = std::min(recolte ? e.gagnesR : e.gagnesC, Plafond(joueur->GetLevel(), recolte));
+        uint32 const depenses = Depenses(e, metier);
+        return plafond > depenses ? plafond - depenses : 0;
+    }
+
+    // Les sorts marqueurs suivent la table : appris s'ils manquent, retires s'ils n'y sont plus (connexion, oubli).
+    void SynchroniserMarqueurs(Player* joueur, EtatTalents const& e)
+    {
+        auto marqueur = [](uint32 metier) -> uint32
+        {
+            auto it = metier ? MarqueursMetier.find(metier) : MarqueursMetier.end();
+            return it != MarqueursMetier.end() ? it->second : 0;
+        };
+        uint32 const marqueurC = marqueur(e.metierC), marqueurR = marqueur(e.metierR);
+        for (auto const& [sort, d] : Talents)
+        {
+            bool const voulu = d.talent == "metier" ? (sort == marqueurC || sort == marqueurR) : e.sorts.count(sort) != 0;
+            if (voulu && !joueur->HasSpell(sort))
+                joueur->learnSpell(sort);
+            else if (!voulu && joueur->HasSpell(sort))
+                joueur->removeSpell(sort, SPEC_MASK_ALL, false);
+        }
+    }
+
+    // Rend la cause du refus, vide si le talent est appris.
+    std::string ApprendreTalent(Player* joueur, uint32 sort)
+    {
+        auto it = Talents.find(sort);
+        if (it == Talents.end() || it->second.talent == "metier")
+            return "INCONNU";
+        TalentDef const& d = it->second;
+        EtatTalents* e = Etat(joueur);
+        bool const recolte = EstRecolte(d.metier);
+        uint32 const principal = recolte ? e->metierR : e->metierC;
+        if (!principal || principal != d.metier)
+            return "METIER";
+        if (e->sorts.count(sort))
+            return "MAX";
+        if (d.prerequis && !e->sorts.count(d.prerequis))
+            return "REQUIS";
+        // Un talent d'une voie exige la voie elle-meme (talent « voie:<voie> ») : pas de Forme ni de Savoir sans voie.
+        if (!d.voie.empty() && d.talent != "voie:" + d.voie)
+        {
+            bool voie = false;
+            for (uint32 connu : e->sorts)
+                if (auto c = Talents.find(connu); c != Talents.end() && c->second.metier == d.metier && c->second.talent == "voie:" + d.voie)
+                    voie = true;
+            if (!voie)
+                return "REQUIS";
+        }
+        // Prerequis d'un autre talent (D-PO-37) : un talent connu du meme arbre dont le code ou le groupe vaut « requis »
+        // (signature rang 2 : groupe 'forme' ; Savoir : groupe 'voie' ; variante : 'voie:orage'...).
+        if (!d.requis.empty())
+        {
+            bool trouve = false;
+            for (uint32 connu : e->sorts)
+                if (auto c = Talents.find(connu); c != Talents.end() && c->second.metier == d.metier
+                    && (c->second.talent == d.requis || c->second.groupe == d.requis))
+                    trouve = true;
+            if (!trouve)
+                return "REQUIS";
+        }
+        if (joueur->GetLevel() < d.niveau)
+            return "NIVEAU";
+        if (d.etage >= 2 && Depenses(*e, d.metier, d.etage - 1) < POINTS_ETAGE_PRECEDENT)
+            return "ETAGE";
+        if (!d.groupe.empty())
+            for (uint32 connu : e->sorts)
+                if (auto c = Talents.find(connu); c != Talents.end() && c->second.metier == d.metier
+                    && c->second.groupe == d.groupe && c->second.talent != d.talent)
+                    return "EXCLUSIF";
+        if (Disponibles(joueur, *e, recolte) < d.cout)
+            return "PLAFOND";
+        e->sorts.insert(sort);
+        if (!joueur->HasSpell(sort))
+            joueur->learnSpell(sort);
+        if (TablesPersonnages)
+            CharacterDatabase.Execute("INSERT IGNORE INTO coa_artisanat_talent (guid, sort) VALUES ({}, {})", joueur->GetGUID().GetCounter(), sort);
+        LOG_INFO("module", "coa artisanat: talent appris joueur={} sort={} talent={} rang={} metier={} reste={}",
+            joueur->GetGUID().GetCounter(), sort, d.talent, uint32(d.rang), d.metier, Disponibles(joueur, *e, recolte));
+        return {};
+    }
+
+    // Choix du metier principal (C : creation, R : recolte). Le changement payant viendra au lot T.
+    std::string ChoisirMetier(Player* joueur, char arbre, uint32 metier)
+    {
+        if ((arbre != 'C' && arbre != 'R') || EstRecolte(metier) != (arbre == 'R') || !MarqueursMetier.count(metier))
+            return "INCONNU";
+        if (!joueur->HasSkill(metier))
+            return "INCONNU";
+        EtatTalents* e = Etat(joueur);
+        uint32& choix = arbre == 'R' ? e->metierR : e->metierC;
+        if (choix)
+            return "DEJA";
+        choix = metier;
+        SauverPersonnage(joueur, *e);
+        SynchroniserMarqueurs(joueur, *e);
+        LOG_INFO("module", "coa artisanat: metier principal joueur={} arbre={} metier={}", joueur->GetGUID().GetCounter(), arbre, metier);
+        return {};
+    }
+
+    void OublierTalents(Player* joueur)
+    {
+        EtatTalents* e = Etat(joueur);
+        e->sorts.clear();
+        e->metierC = e->metierR = 0;
+        e->gagnesC = e->gagnesR = 0;
+        SynchroniserMarqueurs(joueur, *e);
+        if (TablesPersonnages)
+        {
+            CharacterDatabase.Execute("DELETE FROM coa_artisanat_talent WHERE guid = {}", joueur->GetGUID().GetCounter());
+            CharacterDatabase.Execute("DELETE FROM coa_artisanat_personnage WHERE guid = {}", joueur->GetGUID().GetCounter());
+        }
+    }
+
+    // Etat pour l'atelier : « TALENTS:<metC>:<metR>:<dispoC>:<dispoR>:<plafC>:<plafR>:<gagC>:<gagR> », puis la liste
+    // des sorts connus en « TALENTS_APPRIS:<k>/<n>:<sort>,... » (decoupee sous 255 caracteres).
+    void EnvoyerEtat(Player* joueur)
+    {
+        EtatTalents* e = Etat(joueur);
+        Repondre(joueur, Acore::StringFormat("TALENTS:{}:{}:{}:{}:{}:{}:{}:{}", e->metierC, e->metierR, Disponibles(joueur, *e, false),
+            Disponibles(joueur, *e, true), Plafond(joueur->GetLevel(), false), Plafond(joueur->GetLevel(), true), e->gagnesC, e->gagnesR));
+        std::vector<std::string> morceaux(1);
+        for (uint32 sort : e->sorts)
+        {
+            std::string const s = std::to_string(sort);
+            if (morceaux.back().size() + s.size() + 1 > 200)
+                morceaux.emplace_back();
+            morceaux.back() += (morceaux.back().empty() ? "" : ",") + s;
+        }
+        for (std::size_t k = 0; k < morceaux.size(); ++k)
+            Repondre(joueur, Acore::StringFormat("TALENTS_APPRIS:{}/{}:{}", k + 1, morceaux.size(), morceaux[k]));
+    }
+
+    // Messages de l'atelier : « TALENT:<sort> », « METIER:<C|R>:<skill> », « TALENTS? ». Reponses : TALENT_OK:<sort>:<rang>
+    // ou TALENT_ERR:<cause> ; METIER_OK:<C|R>:<skill> ou METIER_ERR:<cause> ; l'etat (EnvoyerEtat).
+    void TraiterTalentMessage(Player* joueur, std::string_view corps)
+    {
+        if (!sConfigMgr->GetOption<bool>("CoaArtisanat.TalentsParMessage", true))
+            return Repondre(joueur, corps.starts_with("METIER:") ? "METIER_ERR:DESACTIVE" : "TALENT_ERR:DESACTIVE");
+        if (corps == "TALENTS?")
+            return EnvoyerEtat(joueur);
+        int32 n = 0;
+        if (corps.starts_with("TALENT:"))
+        {
+            if (!LireEntier(corps.substr(7), n) || n <= 0)
+                return Repondre(joueur, "TALENT_ERR:FORMAT");
+            std::string const cause = ApprendreTalent(joueur, uint32(n));
+            if (!cause.empty())
+                return Repondre(joueur, "TALENT_ERR:" + cause);
+            auto it = Talents.find(uint32(n));
+            return Repondre(joueur, Acore::StringFormat("TALENT_OK:{}:{}", n, it != Talents.end() ? uint32(it->second.rang) : 0));
+        }
+        // METIER:<C|R>:<skill>
+        std::string_view reste = corps.substr(7);
+        if (reste.size() < 3 || reste[1] != ':' || !LireEntier(reste.substr(2), n) || n <= 0)
+            return Repondre(joueur, "METIER_ERR:FORMAT");
+        std::string const cause = ChoisirMetier(joueur, reste[0], uint32(n));
+        if (!cause.empty())
+            return Repondre(joueur, "METIER_ERR:" + cause);
+        Repondre(joueur, Acore::StringFormat("METIER_OK:{}:{}", reste[0], n));
+    }
+
+    // Signature a la fabrication : le specialiste (metier principal de creation = metier de la recette) qui connait une
+    // Forme pose l'enchantement de sa forme a son rang dans PROP_ENCHANTMENT_SLOT_0, si la piece est de sa voie.
+    void SignerALaFabrication(Player* joueur, Item* objet, uint32 recette)
+    {
+        if (Signatures.empty() || !TablesPersonnages)
+            return;
+        EtatTalents* e = Etat(joueur);
+        if (!e->metierC)
+            return;
+        uint32 metierRecette = 0;
+        auto bornes = sSpellMgr->GetSkillLineAbilityMapBounds(recette);
+        for (auto it = bornes.first; it != bornes.second; ++it)
+            metierRecette = it->second->SkillLine;
+        if (metierRecette != e->metierC)
+            return;
+        std::string forme, voie;
+        uint8 rang = 0;
+        for (uint32 sort : e->sorts)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == e->metierC)
+            {
+                if (!it->second.forme.empty())
+                {
+                    forme = it->second.forme;
+                    voie = it->second.voie;
+                }
+                rang = std::max(rang, it->second.signatureRang);
+            }
+        if (forme.empty() || !rang)
+            return;
+        ItemTemplate const* proto = objet->GetTemplate();
+        for (auto const& [enchant, s] : Signatures)
+        {
+            if (s.metier != e->metierC || s.forme != forme || (!voie.empty() && s.voie != voie) || s.rang != rang
+                || proto->Class != s.pieceClasse
+                || proto->SubClass >= 32 || !(s.pieceMasque & (1u << proto->SubClass)))
+                continue;
+            objet->SetEnchantment(PROP_ENCHANTMENT_SLOT_0, enchant, 0, 0, joueur->GetGUID());
+            objet->SetState(ITEM_CHANGED, joueur);
+            LOG_INFO("module", "coa artisanat: signature posee joueur={} piece={} ({}) forme={} rang={} enchant={}",
+                joueur->GetGUID().GetCounter(), objet->GetGUID().GetCounter(), objet->GetEntry(), forme, uint32(rang), enchant);
+            return;
+        }
+    }
+
+    // Signatures actives : la meilleure de chaque (voie, forme) portee, 3 au plus (ordre des emplacements), sans cumul.
+    struct SignaturesActives final : public DataMap::Base
+    {
+        std::vector<SignatureDef const*> actives;
+        bool sale = true;                   // equipement change depuis le dernier calcul
+        Milliseconds sursaut{ 0 };          // fin de la recharge partagee des sursauts de survie
+        std::map<uint32, Milliseconds> recharges;   // autres signatures, par enchantement
+    };
+    std::atomic<uint32> DeclenchementsSignatures{ 0 };
+
+    void RecalculerSignatures(Player* joueur)
+    {
+        SignaturesActives* a = joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+        a->actives.clear();
+        a->sale = false;
+        if (Signatures.empty())
+            return;
+        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
+        {
+            Item* objet = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (!objet || objet->IsBroken())
+                continue;
+            auto it = Signatures.find(objet->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0));
+            if (it == Signatures.end())
+                continue;
+            SignatureDef const* s = &it->second;
+            auto meme = std::find_if(a->actives.begin(), a->actives.end(), [&](SignatureDef const* x)
+            {
+                return x->metier == s->metier && x->voie == s->voie && x->forme == s->forme;
+            });
+            if (meme != a->actives.end())
+            {
+                if (s->rang > (*meme)->rang)
+                    *meme = s;
+            }
+            else if (a->actives.size() < 3)
+                a->actives.push_back(s);
+        }
+    }
+
+    // Egide (et tout effet « absorbe_sous_seuil ») : le coup qui ferait passer sous le seuil est absorbe a hauteur de la
+    // valeur (au niveau 80, x niveau / 80 ; valeur d'arene en arene), le reste devient un bouclier (sort d'effet).
+    // Recharge partagee par les sursauts de survie (groupe_sursaut).
+    // Les crochets d'equipement ne couvrent pas tous les retraits (piece portee detruite) : on marque, et on recalcule
+    // au premier coup suivant.
+    void MarquerSignatures(Player* joueur)
+    {
+        joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES)->sale = true;
+    }
+
+    void DeclencherSignatures(Player* joueur, uint32& degats)
+    {
+        if (Signatures.empty() || !joueur->IsAlive())
+            return;
+        SignaturesActives* a = joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+        if (a->sale)
+            RecalculerSignatures(joueur);
+        if (a->actives.empty())
+            return;
+        Milliseconds const maintenant = GameTime::GetGameTimeMS();
+        for (SignatureDef const* s : a->actives)
+        {
+            if (s->effet != "absorbe_sous_seuil" && s->effet != "egide")
+                continue;
+            uint64 const pv = joueur->GetHealth();
+            uint64 const apres = pv > degats ? pv - degats : 0;
+            if (apres * 100 >= uint64(joueur->GetMaxHealth()) * s->seuilPct)
+                continue;
+            Milliseconds& recharge = s->groupeSursaut ? a->sursaut : a->recharges[s->enchant];
+            if (maintenant < recharge)
+                continue;
+            bool const arene = joueur->GetMap() && joueur->GetMap()->IsBattleArena();
+            uint32 const valeur = uint32(uint64(arene ? s->valeurArene : s->valeur) * joueur->GetLevel() / DEFAULT_MAX_LEVEL);
+            // Un coup mortel meme apres absorption : rien ne se declenche, la recharge n'est pas consommee.
+            if (uint64(degats) >= pv + valeur)
+                continue;
+            recharge = maintenant + Milliseconds(s->rechargeMs);
+            uint32 const absorbe = std::min(degats, valeur);
+            degats -= absorbe;
+            if (uint32 const reste = valeur - absorbe; reste && s->sortEffet)
+            {
+                int32 const bp = int32(reste);
+                joueur->CastCustomSpell(joueur, s->sortEffet, &bp, nullptr, nullptr, true);
+                // La valeur d'une signature est fixe : pas de multiplicateur d'absorption des classes
+                // (SPELL_AURA_ASCENSION_MOD_ABSORB_AMOUNT_PCT, SpellAuraEffects.cpp:629-645).
+                if (AuraEffect* bouclier = joueur->GetAuraEffect(s->sortEffet, EFFECT_0, joueur->GetGUID()))
+                    bouclier->ChangeAmount(bp);
+            }
+            ++DeclenchementsSignatures;
+            LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} absorbe={} reste={}",
+                joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, absorbe, valeur - absorbe);
+            return;   // un seul sursaut par coup
+        }
+    }
+
+    // Signatures a declencher (Egide : sursaut de survie) sur les degats subis par un joueur.
+    class ArtisanatUnit final : public UnitScript
+    {
+    public:
+        ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true) { }
+
+        // UnitScript::DealDamage (appele pour tous les UnitScript, en tete de Unit::DealDamage, avant la soustraction des
+        // PV) recoit le type de degats, contrairement a OnDamage : on exclut la mort instantanee (NODAMAGE, sorts
+        // d'execution a GetHealth()), les couts en PV et les chutes (SELF_DAMAGE, attaquant = victime).
+        uint32 DealDamage(Unit* attaquant, Unit* victime, uint32 degats, DamageEffectType type) override
+        {
+            if (degats && attaquant && victime && attaquant != victime && victime->IsPlayer() && type != NODAMAGE
+                && type != SELF_DAMAGE && type != HEAL)
+                DeclencherSignatures(victime->ToPlayer(), degats);
+            return degats;
+        }
+    };
+
     // ---- Scripts --------------------------------------------------------------------------------------------------
 
     class ArtisanatWorld final : public WorldScript
@@ -1120,6 +1664,7 @@ namespace
             ChargerVersionsEveillees();
             ChargerEtapes();
             ChargerReglesMonde();
+            ChargerTalents();
         }
 
         // Au demarrage, ce crochet passe avant le chargement des objets : les regles se lisent alors dans OnStartup.
@@ -1134,7 +1679,42 @@ namespace
     {
     public:
         ArtisanatPlayer() : PlayerScript("CoaArtisanatPlayer", { PLAYERHOOK_ON_SPELL_CAST, PLAYERHOOK_ON_CREATE_ITEM,
-            PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT }) { }
+            PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT,
+            PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_EQUIP, PLAYERHOOK_ON_UNEQUIP_ITEM, PLAYERHOOK_ON_AFTER_SET_VISIBLE_ITEM_SLOT,
+            PLAYERHOOK_ON_DELETE_FROM_DB }) { }
+
+        // Personnage supprime : son etat d'artisan part avec lui (le guid peut etre repris apres un redemarrage).
+        void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
+        {
+            if (!TablesPersonnages)
+                return;
+            trans->Append("DELETE FROM coa_artisanat_talent WHERE guid = {}", guid);
+            trans->Append("DELETE FROM coa_artisanat_personnage WHERE guid = {}", guid);
+        }
+
+        // Talents : les marqueurs suivent la table. Signatures : a recalculer.
+        void OnPlayerLogin(Player* joueur) override
+        {
+            // Les bots n'ont pas d'arbre (T0) : pas de requetes a leur connexion.
+            if (!Talents.empty() && !(joueur->GetSession() && joueur->GetSession()->IsBot()))
+                SynchroniserMarqueurs(joueur, *Etat(joueur));
+            MarquerSignatures(joueur);
+        }
+
+        void OnPlayerEquip(Player* joueur, Item* /*objet*/, uint8 /*sac*/, uint8 /*emplacement*/, bool /*maj*/) override
+        {
+            MarquerSignatures(joueur);
+        }
+
+        void OnPlayerUnequip(Player* joueur, Item* /*objet*/) override
+        {
+            MarquerSignatures(joueur);
+        }
+
+        void OnPlayerAfterSetVisibleItemSlot(Player* joueur, uint8 /*emplacement*/, Item* /*objet*/) override
+        {
+            MarquerSignatures(joueur);
+        }
 
         void OnPlayerSpellCast(Player* joueur, Spell* sort, bool /*skipCheck*/) override
         {
@@ -1216,6 +1796,9 @@ namespace
                 objet->SetGuidValue(ITEM_FIELD_CREATOR, source->fabricant);
                 objet->SetState(ITEM_CHANGED, joueur);
             }
+            // Fabrication (aucune piece consommee) : la signature du specialiste (lot T).
+            if (!attente->objetDeLancement && attente->candidats.empty())
+                SignerALaFabrication(joueur, objet, attente->sort);
             attente->Vider();
         }
 
@@ -1263,7 +1846,8 @@ namespace
             // Seuls « EVEIL: » et « AMELIORER: » sont a ce script ; les autres messages du canal COA_ATL suivent leur chemin.
             std::string_view corps = std::string_view(message).substr(PREFIXE_ADDON.size());
             bool const eveil = corps.starts_with("EVEIL:");
-            if (!eveil && !corps.starts_with("AMELIORER:"))
+            bool const talent = corps.starts_with("TALENT:") || corps.starts_with("METIER:") || corps == "TALENTS?";
+            if (!eveil && !talent && !corps.starts_with("AMELIORER:"))
                 return true;
             // Consomme meme desactive ; jamais relaye a un autre joueur.
             if (destinataire != joueur || message.size() > 255)
@@ -1275,12 +1859,18 @@ namespace
             {
                 // Reponse explicite (l'atelier grise le bouton jusqu'a la reponse), une seule par fenetre.
                 if (!delai->delaiRepondu)
-                    Repondre(joueur, eveil ? "EVEIL_ERR:DELAI" : "AMELIORER_ERR:DELAI");
+                    Repondre(joueur, talent ? (corps.starts_with("METIER:") ? "METIER_ERR:DELAI" : "TALENT_ERR:DELAI")
+                        : eveil ? "EVEIL_ERR:DELAI" : "AMELIORER_ERR:DELAI");
                 delai->delaiRepondu = true;
                 return false;
             }
             delai->prochain = maintenant + DELAI_EVEIL;
             delai->delaiRepondu = false;
+            if (talent)
+            {
+                TraiterTalentMessage(joueur, corps);
+                return false;
+            }
             if (eveil && !sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", true))
                 Repondre(joueur, "EVEIL_ERR:DESACTIVE");
             else if (!eveil && !sConfigMgr->GetOption<bool>("CoaArtisanat.AmeliorerParMessage", true))
@@ -1410,10 +2000,12 @@ namespace
                 { "recopie", HandleBancRecopie, SEC_ADMINISTRATOR, Console::Yes },
                 { "set", HandleBancSet, SEC_ADMINISTRATOR, Console::Yes },
                 { "nettoyer", HandleBancNettoyer, SEC_ADMINISTRATOR, Console::Yes },
+                { "talent", HandleBancTalent, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
             {
                 { "essai", HandleEssai, SEC_GAMEMASTER, Console::No },
+                { "talent", HandleTalent, SEC_GAMEMASTER, Console::No },
                 { "banc", banc },
             };
             static ChatCommandTable racine = { { "artisanat", artisanat } };
@@ -1908,7 +2500,171 @@ namespace
             return true;
         }
 
-        // Les emplacements gardes : PERM, TEMP (id), SOCK1-3, bonus de chasse, fabricant.
+        // ---- Talents : .artisanat talent (MJ, sur soi) et .artisanat banc talent (bots, preuves) -------------------
+
+        // Actions communes : etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier.
+        static bool ActionTalent(ChatHandler* handler, Player* j, std::string const& action, Optional<std::string> const& a,
+            Optional<std::string> const& b)
+        {
+            EtatTalents* e = Etat(j);
+            auto etat = [&]
+            {
+                handler->PSendSysMessage("talent: metiers C={} R={} ; gagnes C={} R={} ; disponibles C={} R={} ; plafonds C={} R={} (niveau {}) ; {} sorts connus",
+                    e->metierC, e->metierR, e->gagnesC, e->gagnesR, Disponibles(j, *e, false), Disponibles(j, *e, true),
+                    Plafond(j->GetLevel(), false), Plafond(j->GetLevel(), true), uint32(j->GetLevel()), uint32(e->sorts.size()));
+            };
+            int32 n = 0;
+            if (action == "etat")
+            {
+                etat();
+                std::string liste;
+                for (uint32 sort : e->sorts)
+                    liste += " " + std::to_string(sort);
+                handler->PSendSysMessage("talent: sorts{}", liste.empty() ? " (aucun)" : liste);
+                return true;
+            }
+            if (action == "points" && a && b && LireEntier(*b, n) && n >= 0 && (*a == "C" || *a == "R"))
+            {
+                (*a == "C" ? e->gagnesC : e->gagnesR) = uint32(n);
+                SauverPersonnage(j, *e);
+                etat();
+                return true;
+            }
+            if (action == "metier" && a && b && LireEntier(*b, n) && n > 0 && a->size() == 1)
+            {
+                std::string const r = ChoisirMetier(j, (*a)[0], uint32(n));
+                handler->PSendSysMessage("talent: metier {} {} -> {}", *a, n, r.empty() ? "OK" : r);
+                return true;
+            }
+            if (action == "apprendre" && a && LireEntier(*a, n) && n > 0)
+            {
+                std::string const r = ApprendreTalent(j, uint32(n));
+                handler->PSendSysMessage("talent: apprendre {} -> {} ; disponibles C={} R={}", n, r.empty() ? "OK" : r,
+                    Disponibles(j, *e, false), Disponibles(j, *e, true));
+                return true;
+            }
+            if (action == "oublier")
+            {
+                OublierTalents(j);
+                etat();
+                return true;
+            }
+            return false;
+        }
+
+        static bool HandleTalent(ChatHandler* handler, std::string action, Optional<std::string> a, Optional<std::string> b)
+        {
+            if (!BancPermis(handler))
+                return true;
+            Player* j = handler->GetPlayer();
+            if (!j || !ActionTalent(handler, j, action, a, b))
+                handler->SendSysMessage("talent etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier");
+            return true;
+        }
+
+        // Fabrique, par la recette (sort declenche, enclume et forge invoquees a cote), la piece `entree` ; rend la piece
+        // neuve ou nullptr.
+        static Item* FabriquerBanc(ChatHandler* handler, Player* j, uint32 entree)
+        {
+            uint32 recette = 0;
+            for (uint32 id : RecettesForge())
+                if (SpellInfo const* info = sSpellMgr->GetSpellInfo(id); info && EntreeCreeeArtisanat(info) == entree)
+                    recette = id;
+            if (!recette)
+                return handler->PSendSysMessage("banc talent: aucune recette ne cree {}.", entree), nullptr;
+            for (uint32 focus : { 192628u, 1685u })   // enclume, forge (salle d'essai)
+                j->SummonGameObject(focus, j->GetPositionX() + 1.5f, j->GetPositionY(), j->GetPositionZ(), 0.0f, 0, 0, 0, 0, 60);
+            std::set<ObjectGuid> avant;
+            PourChaquePieceTenue(j, entree, [&](Item* o) { avant.insert(o->GetGUID()); });
+            SpellCastResult const res = j->CastSpell(j, recette, TriggerCastFlags(TRIGGERED_FULL_MASK));
+            Item* neuve = nullptr;
+            PourChaquePieceTenue(j, entree, [&](Item* o) { if (!avant.count(o->GetGUID())) neuve = o; });
+            if (!neuve)
+                handler->PSendSysMessage("banc talent: recette {} -> resultat {}, aucune piece {} creee.", recette, uint32(res), entree);
+            return neuve;
+        }
+
+        // .artisanat banc talent <bot> <action> : les actions communes, plus
+        //   signature : fabrique le Heaume palier 10 et les Garde-poignets palier 10, et lit la signature posee ;
+        //   egide : porte les deux pieces signees, recalcule (une seule Egide active), puis deux coups qui passent sous le
+        //           seuil : le premier est absorbe, le second non (recharge partagee).
+        static bool HandleBancTalent(ChatHandler* handler, std::string nom, std::string action, Optional<std::string> a,
+            Optional<std::string> b)
+        {
+            if (!BancPermis(handler))
+                return true;
+            Player* j = Cible(handler, nom);
+            if (!j)
+                return true;
+            if (ActionTalent(handler, j, action, a, b))
+                return true;
+
+            if (action == "signature")
+            {
+                Forge(j, 450);
+                for (uint32 entree : { HEAUME_PALIER10, uint32(PIECES_BANC_SET[3]) })   // Heaume et Garde-poignets, palier 10
+                    if (Item* piece = FabriquerBanc(handler, j, entree))
+                    {
+                        uint32 const enchant = piece->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0);
+                        auto s = Signatures.find(enchant);
+                        handler->PSendSysMessage("banc talent: fabrique {} (guid {}) ; emplacement 7 = {} ({}) ; fabricant={}",
+                            entree, piece->GetGUID().GetCounter(), enchant,
+                            s != Signatures.end() ? Acore::StringFormat("{} rang {}", s->second.forme, uint32(s->second.rang)) : std::string("aucune signature"),
+                            piece->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter());
+                    }
+                j->SaveToDB(false, false);
+                return true;
+            }
+
+            if (action == "egide")
+            {
+                uint32 portees = 0;
+                for (uint32 entree : { HEAUME_PALIER10, uint32(PIECES_BANC_SET[3]) })
+                {
+                    Item* signee = nullptr;
+                    PourChaquePieceTenue(j, entree, [&](Item* o)
+                    {
+                        if (!signee && Signatures.count(o->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0)))
+                            signee = o;
+                    });
+                    if (signee && (signee->IsEquipped() || Porter(j, signee)))
+                        ++portees;
+                }
+                RecalculerSignatures(j);
+                SignaturesActives* sa = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+                handler->PSendSysMessage("banc talent: {} pieces signees portees ; {} signature(s) active(s){}", portees,
+                    uint32(sa->actives.size()), sa->actives.empty() ? std::string() : Acore::StringFormat(" : {} rang {} valeur {} au 80",
+                    sa->actives[0]->forme, uint32(sa->actives[0]->rang), sa->actives[0]->valeur));
+                if (sa->actives.empty())
+                    return true;
+                sa->sursaut = Milliseconds(0);
+                // L'attaquant doit etre un autre que la victime (les degats qu'on s'inflige sont exclus) : un mannequin.
+                TempSummon* frappeur = j->SummonCreature(32666, j->GetPositionX() + 2.0f, j->GetPositionY(), j->GetPositionZ(), 0.0f,
+                    TEMPSUMMON_TIMED_DESPAWN, 15 * IN_MILLISECONDS);
+                if (!frappeur)
+                    return handler->SendSysMessage("banc talent: impossible d'invoquer le mannequin 32666."), true;
+                for (uint32 coup = 1; coup <= 2; ++coup)
+                {
+                    j->SetHealth(j->GetMaxHealth() / 2);
+                    uint32 const degats = j->GetMaxHealth() / 4;          // de 50 % a 25 % : passe sous 35 %
+                    uint32 const pvAvant = j->GetHealth();
+                    uint32 const avant = DeclenchementsSignatures.load();
+                    Unit::DealDamage(frappeur, j, degats, nullptr, DIRECT_DAMAGE, SPELL_SCHOOL_MASK_NORMAL, nullptr, false);
+                    uint32 const perdus = pvAvant > j->GetHealth() ? pvAvant - j->GetHealth() : 0;
+                    handler->PSendSysMessage("banc talent: coup {} : {} degats, {} PV perdus, declenchement={} (attendu {})", coup, degats,
+                        perdus, DeclenchementsSignatures.load() - avant, coup == 1 ? 1 : 0);
+                }
+                if (uint32 const effet = sa->actives[0]->sortEffet)
+                    j->RemoveAurasDueToSpell(effet);
+                j->SetHealth(j->GetMaxHealth());
+                return true;
+            }
+
+            handler->SendSysMessage("banc talent <bot> etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier | signature | egide");
+            return true;
+        }
+
+        // Les emplacements gardes : PERM, TEMP (id), SOCK1-3, prismatique, signature (PROP 0), bonus de chasse, fabricant.
         static bool Conforme(Chasses const& avant, uint32 bonusAvant, Item const* apres)
         {
             for (std::size_t i = 0; i < EMPLACEMENTS_RECOPIES.size(); ++i)
@@ -2022,5 +2778,6 @@ void AddAscensionArtisanatScripts()
     new ArtisanatWorld();
     new ArtisanatPlayer();
     new ArtisanatButinMonde();
+    new ArtisanatUnit();
     new ArtisanatCommandes();
 }
