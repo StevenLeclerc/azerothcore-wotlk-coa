@@ -1693,6 +1693,14 @@ namespace
         {
             if (!BancPermis(handler))
                 return true;
+            // Phase 0 : les phases 1 a 4 d'une traite (P-238 : un bot aleatoire peut etre reinitialise entre deux
+            // commandes, et son inventaire part avec).
+            if (phase == 0)
+            {
+                for (uint32 p = 1; p <= 4; ++p)
+                    HandleBancRecopie(handler, nom, p);
+                return true;
+            }
             Player* j = Cible(handler, nom);
             if (!j)
                 return true;
@@ -1748,6 +1756,15 @@ namespace
                 Item* depart = PremierTenu(j, HEAUME_EVEILLE);
                 if (!depart)
                     return handler->SendSysMessage("banc recopie 4: aucun Heaume eveille (phases 1 a 3 d'abord)."), true;
+                // P-238 : un bot en vol ne lance rien (SPELL_FAILED_NOT_ON_TAXI) ; monte, on le fait descendre
+                // (SPELL_FAILED_NOT_MOUNTED).
+                if (j->IsInFlight())
+                    return handler->SendSysMessage("banc recopie 4: le bot est en vol, relancer quand il sera pose."), true;
+                if (j->IsMounted())
+                {
+                    j->Dismount();
+                    j->RemoveAurasByType(SPELL_AURA_MOUNTED);
+                }
                 // Le casque d'origine prend la place du Heaume en sac ; il revient a la fin, sur tous les chemins.
                 uint16 const placeOrigine = depart->IsEquipped() ? uint16(0) : depart->GetPos();
                 if (!depart->IsEquipped() && !Porter(j, depart))
@@ -1846,7 +1863,7 @@ namespace
                 remettre();
                 return true;
             }
-            handler->SendSysMessage("banc recopie <nom> <1|2|3|4>");
+            handler->SendSysMessage("banc recopie <nom> <0|1|2|3|4> (0 : les quatre d'une traite)");
             return true;
         }
 
