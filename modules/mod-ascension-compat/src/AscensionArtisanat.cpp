@@ -910,7 +910,7 @@ namespace
     // Une etape par section de docs/LOT1-artisanat-seance.md.
     constexpr std::array<Etape, 9> ETAPES =
     {{
-        { "Préparer", "niveau 80, Forge 50/450, 100 po, marteau et ingrédients du § 1" },
+        { "Préparer", "niveau 80, Forge 1/450, 100 po, marteau et ingrédients du § 1" },
         { "Maître", "comme 1, recettes de Forge du lot 1 désapprises" },
         { "Fabriquer", "niveau 80, Forge 450/450, recettes apprises, marteau, ingrédients, 100 po" },
         { "Récolte", "niveau 80, Forge 450/450, recettes, Pic 5384, griffe 5059" },
@@ -1067,7 +1067,7 @@ namespace
                 case 1:
                 case 2:
                     niveau(80);
-                    Forge(joueur, 50);
+                    Forge(joueur, 1);
                     ingredients();
                     if (*etape == 2)
                         recettes(false);
