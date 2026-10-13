@@ -506,7 +506,9 @@ namespace
     constexpr float SALLE_X = 16226.2f, SALLE_Y = 16257.0f, SALLE_Z = 13.2f, SALLE_O = 1.65f;
 
     constexpr uint32 SKILL_FORGE = 164;
-    constexpr uint32 SORT_FORGE = 2018;
+    // Les 6 rangs de la Forge (Apprenti 2018 ... Grand maitre 51300). Le livre des metiers d'Ascension lance le sort du
+    // rang de la competence max (Ranks[450] = 51300, patch-B ProfessionUtil.lua) : sans lui, la Forge ne s'ouvre pas (P-236).
+    constexpr std::array<uint32, 6> RANGS_FORGE = { 2018, 3100, 3538, 9785, 29844, 51300 };
     constexpr uint32 RECETTE_MIN = 9111000;
     constexpr uint32 RECETTE_MAX = 9113999;
     constexpr uint32 OR_MINIMUM = 1000000;           // 100 po
@@ -519,6 +521,7 @@ namespace
     constexpr uint32 ARCANE = 44878;                  // Arcanum of the Stalwart Protector
     constexpr uint32 PARCHEMIN = 38771;               // Scroll of Enchant Bracer - Minor Stamina
     constexpr uint32 HUILE = 20748;                   // Brilliant Mana Oil : enchantement temporaire du banc
+    constexpr uint32 SAC_VIDE = 41599;                // Frostweave Bag, 20 cases
 
     struct Quantite
     {
@@ -545,10 +548,55 @@ namespace
         if (tenus >= nombre)
             return 0;
         uint32 const manque = nombre - tenus;
-        if (joueur->AddItem(entree, manque))
-            return 0;
+        // AddItem range ce qui tient et rend vrai meme si tout n'a pas tenu : on recompte toujours.
+        joueur->AddItem(entree, manque);
         uint32 const apres = joueur->GetItemCount(entree, false);
         return apres >= nombre ? 0 : nombre - apres;
+    }
+
+    // Cases libres des sacs ordinaires (sac a dos et sacs sans specialite), la ou Completer et CreerEnSac rangent.
+    uint32 CasesLibres(Player* joueur)
+    {
+        uint32 libres = 0;
+        for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+            if (!joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                ++libres;
+        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+            if (Bag* sac = joueur->GetBagByPos(slot))
+                if (!sac->GetTemplate()->BagFamily)
+                    libres += sac->GetFreeSlots();
+        return libres;
+    }
+
+    // Cases que prend le complement de `entree` jusqu'a `nombre` (sans compter les piles entamees : par exces).
+    uint32 CasesPour(Player* joueur, uint32 entree, uint32 nombre)
+    {
+        uint32 const tenus = joueur->GetItemCount(entree, false);
+        if (tenus >= nombre)
+            return 0;
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
+        uint32 const pile = proto ? std::max<uint32>(1, proto->GetMaxStackSize()) : 1;
+        return (nombre - tenus + pile - 1) / pile;
+    }
+
+    // Pose des sacs vides (SAC_VIDE) dans les emplacements de sac libres tant qu'il manque des cases. Rend le nombre pose.
+    uint32 PoserSacs(Player* joueur, uint32 besoin)
+    {
+        uint32 poses = 0;
+        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END && CasesLibres(joueur) < besoin; ++slot)
+        {
+            if (joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                continue;
+            uint16 dest = 0;
+            if (joueur->CanEquipNewItem(slot, dest, SAC_VIDE, false) != EQUIP_ERR_OK)
+                continue;
+            if (Item* sac = joueur->EquipNewItem(dest, SAC_VIDE, true))
+            {
+                joueur->SendNewItem(sac, 1, true, false);
+                ++poses;
+            }
+        }
+        return poses;
     }
 
     Item* CreerEnSac(Player* joueur, uint32 entree)
@@ -659,10 +707,11 @@ namespace
 
     void Forge(Player* joueur, uint16 valeur)
     {
-        if (!joueur->HasSpell(SORT_FORGE))
-            joueur->learnSpell(SORT_FORGE);
-        // Comme .setskill.
-        joueur->SetSkill(SKILL_FORGE, joueur->HasSkill(SKILL_FORGE) ? joueur->GetSkillStep(SKILL_FORGE) : 1, valeur, 450);
+        for (uint32 rang : RANGS_FORGE)
+            if (!joueur->HasSpell(rang))
+                joueur->learnSpell(rang);
+        // Rang 6 (max 450) en dur : apprendre un rang inferieur a un rang connu laisse GetSkillStep sur ce rang-la.
+        joueur->SetSkill(SKILL_FORGE, uint16(RANGS_FORGE.size()), valeur, 450);
     }
 
     // Texte d'une piece pour les comptes rendus : entree, guid, fabricant, emplacements non vides.
@@ -872,6 +921,51 @@ namespace
         { "Bascule", "niveau 80, Forge 450/450, recettes apprises" },
     }};
 
+    // Cases de sac que prend l'etape `etape` de .artisanat essai : meme logique que HandleEssai, sans rien donner.
+    // Une piece creee puis portee prend une case (l'ancienne piece revient a sa place) ; une piece tenue, aucune.
+    uint32 CasesEssai(Player* joueur, uint32 etape)
+    {
+        uint32 cases = 0;
+        auto liste = [&](auto const& quantites)
+        {
+            for (Quantite const& q : quantites)
+                cases += CasesPour(joueur, q.entree, q.nombre);
+        };
+        Item const* tete = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
+        switch (etape)
+        {
+            case 1:
+            case 2:
+            case 3:
+                liste(INGREDIENTS_SEANCE);
+                break;
+            case 4:
+                cases += CasesPour(joueur, 5384, 1) + CasesPour(joueur, 5059, 1);
+                break;
+            case 5:
+                for (uint32 entree : { HEAUME_BASE, 9101475u, 9101482u, 9101489u, 9101469u, 9101476u, 45377u, 46154u })
+                    cases += CasesPour(joueur, entree, 1);
+                break;
+            case 6:
+            {
+                bool const basePortee = tete && tete->GetEntry() == HEAUME_BASE;
+                uint32 const enSac = joueur->GetItemCount(HEAUME_BASE, false) - (basePortee ? 1 : 0);
+                cases += (basePortee ? 0 : 1) + (enSac < 2 ? 2 - enSac : 0) + CasesPour(joueur, GARDE_POIGNETS_BASE, 1);
+                break;
+            }
+            case 7:
+                cases += PremierTenu(joueur, HEAUME_BASE) ? 0 : 1;
+                for (uint32 entree : { GEMME_META, GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })
+                    cases += CasesPour(joueur, entree, 1);
+                break;
+            case 8:
+                cases += PremierTenu(joueur, HEAUME_EVEILLE) ? 0 : 1;
+                liste(REACTIFS_RANGS);
+                break;
+        }
+        return cases;
+    }
+
     class ArtisanatCommandes final : public CommandScript
     {
     public:
@@ -912,6 +1006,18 @@ namespace
             if (!joueur || joueur->IsInCombat() || !joueur->IsAlive())
             {
                 handler->SendSysMessage("Hors combat et en vie seulement.");
+                return true;
+            }
+
+            // Avant de rien donner : les cases qu'il faut, des sacs vides s'il en manque, sinon refus (rien n'est change).
+            uint32 const besoin = CasesEssai(joueur, *etape);
+            uint32 const sacs = CasesLibres(joueur) < besoin ? PoserSacs(joueur, besoin) : 0;
+            if (sacs)
+                handler->PSendSysMessage("{} sac(s) vide(s) de 20 cases posé(s) pour faire de la place.", sacs);
+            if (uint32 const libres = CasesLibres(joueur); libres < besoin)
+            {
+                handler->PSendSysMessage(sacs ? "Faites de la place : il faut {} cases ({} libres, sacs posés compris). Rien d'autre n'a été donné."
+                    : "Faites de la place : il faut {} cases ({} libres). Rien n'a été donné.", besoin, libres);
                 return true;
             }
 
