@@ -2572,6 +2572,8 @@ namespace
                     recette = id;
             if (!recette)
                 return handler->PSendSysMessage("banc talent: aucune recette ne cree {}.", entree), nullptr;
+            // Les recettes de Forge exigent le marteau (TotemCategory : SPELL_FAILED_TOTEM_CATEGORY = 130 sans lui).
+            Completer(j, 5956, 1);
             for (uint32 focus : { 192628u, 1685u })   // enclume, forge (salle d'essai)
                 j->SummonGameObject(focus, j->GetPositionX() + 1.5f, j->GetPositionY(), j->GetPositionZ(), 0.0f, 0, 0, 0, 0, 60);
             std::set<ObjectGuid> avant;
