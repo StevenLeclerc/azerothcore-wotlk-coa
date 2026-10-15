@@ -60,6 +60,7 @@
 #include <atomic>
 #include <charconv>
 #include <map>
+#include <mutex>
 #include <set>
 #include <string_view>
 #include <unordered_map>
@@ -1707,6 +1708,8 @@ namespace
         Milliseconds sursaut{ 0 };          // fin de la recharge partagee des sursauts de survie
         std::map<uint32, Milliseconds> recharges;   // autres signatures, par enchantement
         uint32 chargesCoeur = 0;            // critiques comptes pour Coeur de forge
+        uint32 egides = 0;                  // declenchements de sursaut de ce joueur (banc de garde G1)
+        uint32 coeurs = 0;                  // declenchements de Coeur de forge de ce joueur (banc de garde G1)
     };
     std::atomic<uint32> DeclenchementsSignatures{ 0 };
     std::atomic<uint32> DeclenchementsCoeur{ 0 };
@@ -1825,6 +1828,7 @@ namespace
                     bouclier->ChangeAmount(bp);
             }
             ++DeclenchementsSignatures;
+            ++a->egides;
             LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} absorbe={} reste={}",
                 joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, absorbe, valeur - absorbe);
             return;   // un seul sursaut par coup
@@ -1876,6 +1880,7 @@ namespace
                 aura->SetDuration(int32(s->dureeMs));
             }
         ++DeclenchementsCoeur;
+        ++a->coeurs;
         LOG_INFO("module", "coa artisanat: coeur de forge declenche joueur={} enchant={} aura={} duree_ms={} recharge_ms={} valeur={} valeur_jcj={}",
             joueur->GetGUID().GetCounter(), s->enchant, s->sortEffet, s->dureeMs, s->rechargeMs, s->valeur, s->valeurArene);
     }
@@ -1931,13 +1936,89 @@ namespace
             montant = T(uint64(montant) * dixMilliemes / 10000);
     }
 
+    // ---- Banc de garde G1 (T2-1, docs/BANC-artisanat-G1-garde.md) : compteurs par bot sur une fenetre de mesure ----------
+    //
+    // Une mesure par bot : degats infliges (le bot ou ce qu'il controle), soins donnes (effectifs), degats subis (apres
+    // absorptions, Egide comprise), morts. L'adversaire du banc (ADVERSAIRE_GARDE, marque) voit ses coups de melee multiplies
+    // par `pression` %. Ecrit par les crochets d'unite (fils de carte), lu et remis a zero par la commande (fil monde) : verrou.
+    // Rien n'est compte tant qu'aucune mesure n'est ouverte (GardesOuvertes, lu sans verrou).
+    constexpr uint32 ADVERSAIRE_GARDE = 30888;   // « QA Test Dummy 80 Hostile Low Damage » [M creature_template : 80, normal, hostile]
+    std::string const CLE_ADVERSAIRE_GARDE = "CoaArtisanatAdversaireGarde";
+    struct AdversaireGarde final : public DataMap::Base
+    {
+        uint32 pression = 100;
+    };
+    struct MesureGarde
+    {
+        ObjectGuid adversaire;
+        Milliseconds debut{ 0 }, fin{ 0 };
+        bool ouverte = false;
+        uint64 degats = 0, soins = 0, soinsBruts = 0, subis = 0;
+        uint32 morts = 0, egides0 = 0, coeurs0 = 0, pression = 100;
+        std::vector<ObjectGuid> pieces;
+        std::vector<std::pair<uint8, ObjectGuid>> origine;   // (emplacement, piece d'origine renvoyee en sac par equiper)
+    };
+    std::mutex VerrouGarde;
+    std::unordered_map<uint32, MesureGarde> Gardes;   // par GUID bas du bot
+    std::atomic<uint32> GardesOuvertes{ 0 };
+    // Fin la plus tardive des mesures ouvertes (ms de jeu) : au-dela, les crochets sortent sans verrou, meme si un bot
+    // deconnecte a laisse sa mesure ouverte (GardesOuvertes ne redescend alors qu'a « lire » ou « rendre »).
+    std::atomic<int64> FinGardes{ 0 };
+
+    bool GardeEnCours()
+    {
+        return GardesOuvertes.load(std::memory_order_relaxed)
+            && GameTime::GetGameTimeMS().count() < FinGardes.load(std::memory_order_relaxed);
+    }
+
+    // Le joueur (bot) a qui revient l'action d'une unite, s'il a une mesure ouverte et non echue.
+    template <typename Fn>
+    void CompterGarde(Unit const* u, Fn&& fn)
+    {
+        Player const* p = u ? u->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+        if (!p)
+            return;
+        Milliseconds const maintenant = GameTime::GetGameTimeMS();
+        std::lock_guard<std::mutex> verrou(VerrouGarde);
+        auto it = Gardes.find(p->GetGUID().GetCounter());
+        if (it != Gardes.end() && it->second.ouverte && maintenant < it->second.fin)
+            fn(it->second);
+    }
+
     // Signatures a declencher (Egide : sursaut de survie) sur les degats subis par un joueur ; bonus de Coeur de forge.
     class ArtisanatUnit final : public UnitScript
     {
     public:
         // DealDamage n'a pas d'interrupteur de crochet : ScriptMgr::DealDamage appelle tous les UnitScript (UnitScript.cpp:69).
         ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true, { UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
-            UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_MODIFY_HEAL_RECEIVED }) { }
+            UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_DAMAGE, UNITHOOK_ON_HEAL,
+            UNITHOOK_ON_UNIT_DEATH }) { }
+
+        // Banc G1 : apres DealDamage (Egide comprise) et l'AI de la victime, avant la soustraction (Unit.cpp:991-1006).
+        void OnDamage(Unit* attaquant, Unit* victime, uint32& degats) override
+        {
+            if (!GardeEnCours() || !degats || attaquant == victime)
+                return;
+            // Seuls les coups echanges avec l'adversaire du banc comptent (pas un monstre de passage, pas l'adversaire d'un
+            // autre bot).
+            if (victime)
+                CompterGarde(attaquant, [&](MesureGarde& m) { if (victime->GetGUID() == m.adversaire) m.degats += degats; });
+            if (victime && victime->IsPlayer() && attaquant)
+                CompterGarde(victime, [&](MesureGarde& m) { if (attaquant->GetGUID() == m.adversaire) m.subis += degats; });
+        }
+
+        // Banc G1 : soin effectif, apres ModifyHealth (Unit.cpp:8469-8472).
+        void OnHeal(Unit* soigneur, Unit* /*soigne*/, uint32& gain) override
+        {
+            if (GardeEnCours() && gain)
+                CompterGarde(soigneur, [&](MesureGarde& m) { m.soins += gain; });
+        }
+
+        void OnUnitDeath(Unit* mort, Unit* /*tueur*/) override
+        {
+            if (GardeEnCours() && mort && mort->IsPlayer())
+                CompterGarde(mort, [&](MesureGarde& m) { ++m.morts; });
+        }
 
         // UnitScript::DealDamage (appele pour tous les UnitScript, en tete de Unit::DealDamage, avant la soustraction des
         // PV) recoit le type de degats, contrairement a OnDamage : on exclut la mort instantanee (NODAMAGE, sorts
@@ -1952,6 +2033,11 @@ namespace
 
         void ModifyMeleeDamage(Unit* cible, Unit* attaquant, uint32& degats) override
         {
+            // Banc G1 : pression de l'adversaire marque (ses coups de melee x pression %).
+            if (GardeEnCours() && attaquant && attaquant->GetEntry() == ADVERSAIRE_GARDE
+                && attaquant->IsCreature())
+                if (AdversaireGarde const* a = attaquant->CustomData.Get<AdversaireGarde>(CLE_ADVERSAIRE_GARDE))
+                    degats = uint32(uint64(degats) * a->pression / 100);
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
         }
 
@@ -1986,6 +2072,9 @@ namespace
             Unit* soigneur = tic ? b : a;
             Unit* soigne = tic ? a : b;
             AppliquerCorrection(soin, CorrectionCoeurDeForge(soigneur, soigne, true));
+            // Banc G1 : soin brut (surplus compris), qui mesure la puissance de soin quand le soigneur se soigne lui-meme.
+            if (GardeEnCours() && soin)
+                CompterGarde(soigneur, [&](MesureGarde& m) { m.soinsBruts += soin; });
         }
 
     private:
@@ -2471,6 +2560,7 @@ namespace
                 { "talent", HandleBancTalent, SEC_ADMINISTRATOR, Console::Yes },
                 { "extrait", HandleBancExtrait, SEC_ADMINISTRATOR, Console::Yes },
                 { "palier", HandleBancPalier, SEC_ADMINISTRATOR, Console::Yes },
+                { "garde", HandleBancGarde, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
             {
@@ -3159,6 +3249,284 @@ namespace
             }
 
             handler->SendSysMessage("banc talent <bot> etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | forcer <sort> | oublier | effacer | signature | egide");
+            return true;
+        }
+
+        // ---- .artisanat banc garde <bot> ... : banc de garde G1 (T2-1, docs/BANC-artisanat-G1-garde.md) --------------------
+        //
+        // equiper <entree,...>     : cree et porte ces pieces (rang 5 : niveau d'objet egal avec et sans) ; les pieces d'une
+        //                            mesure precedente sont detruites d'abord ;
+        // signer <enchant,...|aucun> : vide les emplacements 7 et 8 des pieces du banc, puis pose chaque enchantement : une
+        //                            facette (effet coeur_de_forge) en 8 sur l'Oeuvre portee, une signature en 7 sur la piece
+        //                            suivante ; rend les signatures ACTIVES (moteur : 3 au plus, meme nature = une) ;
+        // lancer <s> [pression %]  : vie et mana pleines, invoque l'adversaire ADVERSAIRE_GARDE (PV portes a 1e9, coups x
+        //                            pression %), qui attaque le bot ; ouvre la mesure pour <s> secondes (10-1800) ;
+        // lire                     : la ligne de mesure (« coa garde: ... ») ; ferme la mesure et retire l'adversaire si echue ;
+        // rendre                   : ferme, retire l'adversaire, detruit les pieces du banc.
+        // PTR et bots seulement (Cible). Les compteurs ne voient que le bot et ce qu'il controle.
+        static bool HandleBancGarde(ChatHandler* handler, std::string nom, std::string action, Optional<std::string> a,
+            Optional<std::string> b)
+        {
+            if (!BancPermis(handler))
+                return true;
+            // lire et rendre doivent passer en combat ou mort (fin de mesure) : un bot en ligne suffit.
+            Player* j = nullptr;
+            if (action == "lire" || action == "rendre")
+            {
+                j = ObjectAccessor::FindPlayerByName(nom, true);
+                if (!j || !j->GetSession() || !j->GetSession()->IsBot())
+                    return handler->PSendSysMessage("banc garde: {} n'est pas un bot en ligne.", nom), true;
+            }
+            else
+                j = Cible(handler, nom);
+            if (!j)
+                return true;
+            uint32 const cle = j->GetGUID().GetCounter();
+            auto retirerAdversaire = [&](MesureGarde& m)
+            {
+                if (Creature* c = m.adversaire ? ObjectAccessor::GetCreature(*j, m.adversaire) : nullptr)
+                    c->DespawnOrUnsummon();
+                m.adversaire.Clear();
+            };
+            auto fermer = [&](MesureGarde& m)
+            {
+                if (m.ouverte)
+                {
+                    m.ouverte = false;
+                    --GardesOuvertes;
+                }
+            };
+            auto lireListe = [](std::string const& texte, std::vector<uint32>& ids) -> bool
+            {
+                ids.clear();
+                for (std::string_view jeton : Acore::Tokenize(texte, ',', false))
+                {
+                    Optional<uint32> v = Acore::StringTo<uint32>(jeton);
+                    if (!v || !*v)
+                        return false;
+                    ids.push_back(*v);
+                }
+                return !ids.empty();
+            };
+            // Copie de la mesure sous verrou ; les objets du jeu se touchent hors verrou (fil monde, cartes a l'arret).
+            auto copie = [&]() { std::lock_guard<std::mutex> v(VerrouGarde); return Gardes[cle]; };
+            auto ecrire = [&](MesureGarde const& m) { std::lock_guard<std::mutex> v(VerrouGarde); Gardes[cle] = m; };
+
+            if (action == "equiper")
+            {
+                std::vector<uint32> entrees;
+                if (!a || !lireListe(*a, entrees))
+                    return handler->SendSysMessage("banc garde: equiper <entree,entree,...>"), true;
+                MesureGarde m = copie();
+                if (m.ouverte)
+                    return handler->SendSysMessage("banc garde: une mesure est ouverte (lire ou rendre d'abord)."), true;
+                for (ObjectGuid g : m.pieces)
+                    if (Item* o = j->GetItemByGuid(g))
+                        j->DestroyItem(o->GetBagSlot(), o->GetSlot(), true);
+                m.pieces.clear();
+                std::string texte;
+                m.origine.clear();
+                for (uint32 entree : entrees)
+                {
+                    Item* o = CreerEnSac(j, entree);
+                    uint16 dest = 0;
+                    Item* avant = nullptr;
+                    if (o && j->CanEquipItem(NULL_SLOT, dest, o, true) == EQUIP_ERR_OK)
+                        avant = j->GetItemByPos(dest);
+                    bool const porte = o && Porter(j, o);
+                    if (porte && avant)
+                        m.origine.emplace_back(uint8(dest & 255), avant->GetGUID());
+                    if (o)
+                        m.pieces.push_back(o->GetGUID());
+                    texte += Acore::StringFormat(" {}:{}", entree, !o ? "SACS/INCONNU" : porte ? "porte" : "NON PORTE");
+                }
+                ecrire(m);
+                MarquerSignatures(j);
+                j->SaveToDB(false, false);
+                handler->PSendSysMessage("banc garde: {} piece(s) :{}", uint32(m.pieces.size()), texte);
+                return true;
+            }
+
+            if (action == "signer")
+            {
+                if (!a)
+                    return handler->SendSysMessage("banc garde: signer <enchant,...|aucun>"), true;
+                MesureGarde const m = copie();
+                std::vector<Item*> pieces;
+                for (ObjectGuid g : m.pieces)
+                    if (Item* o = j->GetItemByGuid(g); o && o->IsEquipped())
+                        pieces.push_back(o);
+                std::vector<uint32> ids;
+                if (*a != "aucun" && !lireListe(*a, ids))
+                    return handler->SendSysMessage("banc garde: signer <enchant,...|aucun>"), true;
+                for (Item* o : pieces)
+                {
+                    PoserEnchantement(j, o, EMPLACEMENT_SIGNATURE, 0, 0);
+                    PoserEnchantement(j, o, EMPLACEMENT_FACETTE, 0, 0);
+                }
+                std::string texte;
+                std::size_t suivante = 0;
+                for (uint32 id : ids)
+                {
+                    auto s = Signatures.find(id);
+                    if (s == Signatures.end())
+                    {
+                        texte += Acore::StringFormat(" {}:INCONNU", id);
+                        continue;
+                    }
+                    Item* cible = nullptr;
+                    EnchantmentSlot emplacement = EMPLACEMENT_SIGNATURE;
+                    if (s->second.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE)
+                    {
+                        emplacement = EMPLACEMENT_FACETTE;
+                        for (Item* o : pieces)
+                            if (EstOeuvre(o->GetEntry()))
+                                cible = o;
+                    }
+                    else
+                        while (suivante < pieces.size() && !cible)
+                        {
+                            Item* o = pieces[suivante++];
+                            if (!o->GetEnchantmentId(EMPLACEMENT_SIGNATURE))
+                                cible = o;
+                        }
+                    if (!cible)
+                    {
+                        texte += Acore::StringFormat(" {}:SANS PIECE", id);
+                        continue;
+                    }
+                    PoserEnchantement(j, cible, emplacement, id, 0);
+                    texte += Acore::StringFormat(" {}:{}@{}", id, uint32(emplacement), cible->GetEntry());
+                }
+                RecalculerSignatures(j);
+                SignaturesActives* sa = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+                std::string actives;
+                for (SignatureDef const* d : sa->actives)
+                    actives += Acore::StringFormat("{}{}", actives.empty() ? "" : ",", d->enchant);
+                j->SaveToDB(false, false);
+                handler->PSendSysMessage("banc garde: pose{} ; actives={}", texte.empty() ? " (aucune)" : texte,
+                    actives.empty() ? "aucune" : actives);
+                return true;
+            }
+
+            if (action == "lancer")
+            {
+                Optional<uint32> secondes = a ? Acore::StringTo<uint32>(*a) : Optional<uint32>();
+                Optional<uint32> pression = b ? Acore::StringTo<uint32>(*b) : Optional<uint32>(100);
+                if (!secondes || *secondes < 10 || *secondes > 1800 || !pression || *pression < 10 || *pression > 5000)
+                    return handler->SendSysMessage("banc garde: lancer <secondes 10-1800> [pression % 10-5000]"), true;
+                MesureGarde m = copie();
+                if (m.ouverte)
+                    return handler->SendSysMessage("banc garde: une mesure est deja ouverte (lire ou rendre)."), true;
+                retirerAdversaire(m);
+                if (j->IsMounted())
+                {
+                    j->Dismount();
+                    j->RemoveAurasByType(SPELL_AURA_MOUNTED);
+                }
+                // Rien ne passe d'un bras a l'autre : auras et recharges d'artisanat, recharges de classe, ressource.
+                SignaturesActives* avant = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+                for (auto const& [id, def] : Signatures)
+                    if (def.sortEffet)
+                        j->RemoveAurasDueToSpell(def.sortEffet);
+                if (CoaArtisanatIds::SORT_AURA_CHARGES_COEUR_DE_FORGE)
+                    j->RemoveAurasDueToSpell(CoaArtisanatIds::SORT_AURA_CHARGES_COEUR_DE_FORGE);
+                avant->sursaut = Milliseconds(0);
+                avant->recharges.clear();
+                avant->chargesCoeur = 0;
+                j->RemoveAllSpellCooldown();
+                j->SetFullHealth();
+                Powers const ressource = j->getPowerType();
+                j->SetPower(ressource, (ressource == POWER_RAGE || ressource == POWER_RUNIC_POWER) ? 0 : j->GetMaxPower(ressource));
+                // L'adversaire part a la fin exacte de la fenetre : le bot sort de combat, « lire » le trouve parti.
+                TempSummon* adv = j->SummonCreature(ADVERSAIRE_GARDE, j->GetPositionX() + 3.0f, j->GetPositionY(), j->GetPositionZ(), 0.0f,
+                    TEMPSUMMON_TIMED_DESPAWN, *secondes * IN_MILLISECONDS);
+                if (!adv)
+                    return handler->PSendSysMessage("banc garde: adversaire {} non invoque.", ADVERSAIRE_GARDE), true;
+                adv->SetMaxHealth(1000000000);
+                adv->SetFullHealth();
+                adv->CustomData.GetDefault<AdversaireGarde>(CLE_ADVERSAIRE_GARDE)->pression = *pression;
+                if (adv->IsAIEnabled && adv->AI())
+                    adv->AI()->AttackStart(j);
+                SignaturesActives* sa = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+                Milliseconds const maintenant = GameTime::GetGameTimeMS();
+                m.adversaire = adv->GetGUID();
+                m.debut = maintenant;
+                m.fin = maintenant + Seconds(*secondes);
+                m.degats = m.soins = m.soinsBruts = m.subis = 0;
+                m.morts = 0;
+                m.egides0 = sa->egides;
+                m.coeurs0 = sa->coeurs;
+                m.pression = *pression;
+                m.ouverte = true;
+                ecrire(m);
+                ++GardesOuvertes;
+                int64 fin = FinGardes.load();
+                while (fin < m.fin.count() && !FinGardes.compare_exchange_weak(fin, m.fin.count())) { }
+                handler->PSendSysMessage("banc garde: mesure ouverte {} s, adversaire {} (guid {}), pression {} %", *secondes,
+                    ADVERSAIRE_GARDE, adv->GetGUID().GetCounter(), *pression);
+                return true;
+            }
+
+            if (action == "lire" || action == "rendre")
+            {
+                MesureGarde m = copie();
+                Milliseconds const maintenant = GameTime::GetGameTimeMS();
+                bool const echue = m.ouverte && maintenant >= m.fin;
+                Milliseconds const finEffective = std::min(maintenant, m.fin);
+                uint32 const dureeMs = m.debut.count() ? uint32(std::max<int64>(0, (finEffective - m.debut).count())) : 0;
+                SignaturesActives* sa = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
+                if (sa->sale)
+                    RecalculerSignatures(j);
+                std::string actives;
+                for (SignatureDef const* d : sa->actives)
+                    actives += Acore::StringFormat("{}{}", actives.empty() ? "" : ",", d->enchant);
+                double const s = dureeMs / 1000.0;
+                // CustomData remis a zero (bot reconnecte, P-238) : compteurs de declenchements inferieurs au depart.
+                bool const reinit = sa->egides < m.egides0 || sa->coeurs < m.coeurs0;
+                Creature const* adv = m.adversaire ? ObjectAccessor::GetCreature(*j, m.adversaire) : nullptr;
+                std::string const etatAdv = !adv ? "parti" : !adv->IsAlive() ? "mort"
+                    : Acore::StringFormat("{}{}", adv->IsInCombat() ? "combat" : "hors_combat", adv->GetVictim() == j ? "_bot" : "_autre");
+                std::string const ligne = Acore::StringFormat("coa garde: bot={} classe={} etat={} actives={} duree_ms={} degats={} soins={} "
+                    "soins_bruts={} subis={} morts={} egides={} coeurs={} pression={} adversaire={} reinit={} dps={:.1f} hps={:.1f} "
+                    "hps_brut={:.1f} dtps={:.1f}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
+                    actives.empty() ? "aucune" : actives, dureeMs, m.degats, m.soins, m.soinsBruts, m.subis, m.morts,
+                    reinit ? 0 : sa->egides - m.egides0, reinit ? 0 : sa->coeurs - m.coeurs0, m.pression, etatAdv, reinit ? 1 : 0,
+                    s > 0 ? m.degats / s : 0.0, s > 0 ? m.soins / s : 0.0, s > 0 ? m.soinsBruts / s : 0.0, s > 0 ? m.subis / s : 0.0);
+                if (echue || action == "rendre")
+                {
+                    fermer(m);
+                    retirerAdversaire(m);
+                    LOG_INFO("module", "{}", ligne);
+                }
+                if (action == "rendre")
+                {
+                    for (ObjectGuid g : m.pieces)
+                        if (Item* o = j->GetItemByGuid(g))
+                            j->DestroyItem(o->GetBagSlot(), o->GetSlot(), true);
+                    m.pieces.clear();
+                    // L'equipement d'origine reprend sa place (s'il est encore en sac et l'emplacement libre).
+                    uint32 remises = 0;
+                    for (auto const& [emplacement, g] : m.origine)
+                        if (Item* o = j->GetItemByGuid(g); o && !o->IsEquipped() && !j->GetItemByPos(INVENTORY_SLOT_BAG_0, emplacement))
+                            remises += Porter(j, o) ? 1 : 0;
+                    m.origine.clear();
+                    j->SaveToDB(false, false);
+                    handler->PSendSysMessage("banc garde: pieces du banc detruites, {} piece(s) d'origine remise(s).", remises);
+                }
+                // Ecrire sous verrou en gardant les compteurs : les crochets ont pu compter depuis la copie.
+                {
+                    std::lock_guard<std::mutex> v(VerrouGarde);
+                    MesureGarde& g = Gardes[cle];
+                    g.ouverte = m.ouverte;
+                    g.adversaire = m.adversaire;
+                    g.pieces = m.pieces;
+                    g.origine = m.origine;
+                }
+                handler->PSendSysMessage("{}", ligne);
+                return true;
+            }
+            handler->SendSysMessage("banc garde <bot> equiper <entree,...> | signer <enchant,...|aucun> | lancer <s> [pression %] | lire | rendre");
             return true;
         }
 
