@@ -2470,6 +2470,7 @@ namespace
                 { "nettoyer", HandleBancNettoyer, SEC_ADMINISTRATOR, Console::Yes },
                 { "talent", HandleBancTalent, SEC_ADMINISTRATOR, Console::Yes },
                 { "extrait", HandleBancExtrait, SEC_ADMINISTRATOR, Console::Yes },
+                { "palier", HandleBancPalier, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
             {
@@ -3158,6 +3159,79 @@ namespace
             }
 
             handler->SendSysMessage("banc talent <bot> etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | forcer <sort> | oublier | effacer | signature | egide");
+            return true;
+        }
+
+        // ---- .artisanat banc palier <bot> <entree> [garder] : un palier sur une piece QUELCONQUE (D-PO-45, armes) -----------
+        //
+        // Cree la piece <entree> en sac (fabricant = le bot), y pose un enchantement permanent, un temporaire de 30 min, des
+        // gemmes si elle a des chasses (aucune piece de palier n'en a au 15/10 : non eprouve) et, si ENCHANT_EXTRAIT est
+        // utilisable, l'emplacement 9 (GUID du bot) ; les emplacements 7 et 8 restent vides ; puis la meme epreuve
+        // que « recopie 2 » : refus sans reactifs, refus au niveau requis - 1, cout fourni a l'exact, prelevement et recopie
+        // verifies (CONFORME = memes enchantements, charges des emplacements 7-9 comprises, meme fabricant). La piece neuve est
+        // detruite a la fin, sauf « garder ». Il faut une etape « palier » en table pour <entree>, et un bot au niveau de
+        // l'etape (le banc ne change pas son niveau, hors du refus a niveau - 1).
+        static bool HandleBancPalier(ChatHandler* handler, std::string nom, uint32 entree, Optional<std::string> option)
+        {
+            if (!BancPermis(handler))
+                return true;
+            bool const garder = option && *option == "garder";
+            if (option && !garder)
+                return handler->PSendSysMessage("banc palier: option inconnue « {} » (seule : garder).", *option), true;
+            Player* j = Cible(handler, nom);
+            if (!j)
+                return true;
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
+            if (!EstPieceArtisanat(proto))
+                return handler->PSendSysMessage("banc palier: {} n'est pas une piece de l'artisanat (armure ou arme de {}-{}).", entree,
+                    ARTISANAT_OBJET_MIN, ARTISANAT_OBJET_MAX), true;
+            auto it = Etapes.find(entree);
+            if (it == Etapes.end() || it->second.eveil)
+                return handler->PSendSysMessage("banc palier: aucune etape de palier en table pour {} ({}).", entree, proto->Name1), true;
+            if (j->GetLevel() < it->second.niveau)
+                return handler->PSendSysMessage("banc palier: {} est niveau {}, l'etape de {} demande {}.", nom, uint32(j->GetLevel()),
+                    entree, uint32(it->second.niveau)), true;
+            Item* piece = CreerEnSac(j, entree);
+            if (!piece)
+                return handler->SendSysMessage("banc palier: sacs pleins."), true;
+            SignerPar(j, piece);
+            Sertir(j, piece);
+            PoserEnchantement(j, piece, PERM_ENCHANTMENT_SLOT, EnchantementDeObjet(PARCHEMIN), 0);
+            PoserEnchantement(j, piece, TEMP_ENCHANTMENT_SLOT, EnchantementDeObjet(HUILE), 30 * MINUTE * IN_MILLISECONDS);
+            if (EnchantExtraitUtilisable())
+                PoserExtrait(j, piece, j->GetGUID().GetCounter());
+            handler->PSendSysMessage("banc palier: {} « {} » classe {} sous-classe {} niveau d'objet {} : {}", entree, proto->Name1,
+                proto->Class, proto->SubClass, proto->ItemLevel, Decrire(piece));
+            ObjectGuid const guidDepart = piece->GetGUID();   // la piece de depart est detruite si le palier passe
+            // Reactifs tenus avant : EtapeBanc les vide (refus) puis les fournit ; on remet le bot dans son etat a la fin.
+            std::vector<std::pair<uint32, uint32>> tenus;
+            for (auto const& [objet, nombre] : it->second.objets)
+                if (objet)
+                    tenus.emplace_back(objet, j->GetItemCount(objet, false));
+            Item* neuve = EtapeBanc(handler, j, piece, SorteEtape::Palier, "banc palier", true);
+            if (neuve)
+            {
+                handler->PSendSysMessage("banc palier: {} -> {} « {} » niveau d'objet {}", entree, neuve->GetEntry(),
+                    neuve->GetTemplate()->Name1, neuve->GetTemplate()->ItemLevel);
+                LOG_INFO("module", "coa artisanat: banc palier bot={} de={} vers={} piece={}", j->GetGUID().GetCounter(), entree,
+                    neuve->GetEntry(), neuve->GetGUID().GetCounter());
+                if (!garder)
+                    j->DestroyItem(neuve->GetBagSlot(), neuve->GetSlot(), true);
+            }
+            else if (Item* reste = j->GetItemByGuid(guidDepart); reste && !garder)
+                j->DestroyItem(reste->GetBagSlot(), reste->GetSlot(), true);
+            uint32 ecarts = 0;
+            for (auto const& [objet, avant] : tenus)
+            {
+                uint32 const maintenant = j->GetItemCount(objet, false);
+                if (maintenant > avant)
+                    j->DestroyItemCount(objet, maintenant - avant, true);
+                else if (maintenant < avant)
+                    ecarts += Completer(j, objet, avant);
+            }
+            if (ecarts)
+                handler->PSendSysMessage("banc palier: sacs pleins, {} reactif(s) non rendu(s) au bot.", ecarts);
+            j->SaveToDB(false, false);
             return true;
         }
 
