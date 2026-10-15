@@ -3308,6 +3308,20 @@ namespace
                 }
                 return !ids.empty();
             };
+            // Pieces du banc portees / tenues : une piece retiree par l'IA du bot fausse le niveau d'objet de la mesure.
+            auto portees = [&](MesureGarde const& m, bool remettre) -> std::pair<uint32, uint32>
+            {
+                uint32 n = 0, total = 0;
+                for (ObjectGuid g : m.pieces)
+                    if (Item* o = j->GetItemByGuid(g))
+                    {
+                        ++total;
+                        if (!o->IsEquipped() && remettre)
+                            Porter(j, o);
+                        n += o->IsEquipped() ? 1 : 0;
+                    }
+                return { n, total };
+            };
             // Copie de la mesure sous verrou ; les objets du jeu se touchent hors verrou (fil monde, cartes a l'arret).
             auto copie = [&]() { std::lock_guard<std::mutex> v(VerrouGarde); return Gardes[cle]; };
             auto ecrire = [&](MesureGarde const& m) { std::lock_guard<std::mutex> v(VerrouGarde); Gardes[cle] = m; };
@@ -3328,7 +3342,12 @@ namespace
                 m.origine.clear();
                 for (uint32 entree : entrees)
                 {
-                    Item* o = CreerEnSac(j, entree);
+                    // Sans SMSG_ITEM_PUSH_RESULT (SendNewItem) : mesure du 16/10, un bot aleatoire qui recoit l'annonce d'un
+                    // objet reevalue son equipement et remet le sien en moins de 5 s.
+                    Item* o = nullptr;
+                    ItemPosCountVec place;
+                    if (j->CanStoreNewItem(NULL_BAG, NULL_SLOT, place, entree, 1) == EQUIP_ERR_OK)
+                        o = j->StoreNewItem(place, entree, true);
                     uint16 dest = 0;
                     Item* avant = nullptr;
                     if (o && j->CanEquipItem(NULL_SLOT, dest, o, true) == EQUIP_ERR_OK)
@@ -3419,6 +3438,9 @@ namespace
                 if (m.ouverte)
                     return handler->SendSysMessage("banc garde: une mesure est deja ouverte (lire ou rendre)."), true;
                 retirerAdversaire(m);
+                auto const [portesAvant, tenues] = portees(m, true);
+                if (portesAvant != tenues)
+                    return handler->PSendSysMessage("banc garde: {} piece(s) du banc sur {} portees : mesure refusee.", portesAvant, tenues), true;
                 if (j->IsMounted())
                 {
                     j->Dismount();
@@ -3487,10 +3509,11 @@ namespace
                 Creature const* adv = m.adversaire ? ObjectAccessor::GetCreature(*j, m.adversaire) : nullptr;
                 std::string const etatAdv = !adv ? "parti" : !adv->IsAlive() ? "mort"
                     : Acore::StringFormat("{}{}", adv->IsInCombat() ? "combat" : "hors_combat", adv->GetVictim() == j ? "_bot" : "_autre");
-                std::string const ligne = Acore::StringFormat("coa garde: bot={} classe={} etat={} actives={} duree_ms={} degats={} soins={} "
-                    "soins_bruts={} subis={} morts={} egides={} coeurs={} pression={} adversaire={} reinit={} dps={:.1f} hps={:.1f} "
+                auto const [nPortees, nTenues] = portees(m, false);
+                std::string const ligne = Acore::StringFormat("coa garde: bot={} classe={} etat={} actives={} portees={}/{} duree_ms={} degats={} "
+                    "soins={} soins_bruts={} subis={} morts={} egides={} coeurs={} pression={} adversaire={} reinit={} dps={:.1f} hps={:.1f} "
                     "hps_brut={:.1f} dtps={:.1f}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
-                    actives.empty() ? "aucune" : actives, dureeMs, m.degats, m.soins, m.soinsBruts, m.subis, m.morts,
+                    actives.empty() ? "aucune" : actives, nPortees, nTenues, dureeMs, m.degats, m.soins, m.soinsBruts, m.subis, m.morts,
                     reinit ? 0 : sa->egides - m.egides0, reinit ? 0 : sa->coeurs - m.coeurs0, m.pression, etatAdv, reinit ? 1 : 0,
                     s > 0 ? m.degats / s : 0.0, s > 0 ? m.soins / s : 0.0, s > 0 ? m.soinsBruts / s : 0.0, s > 0 ? m.subis / s : 0.0);
                 if (echue || action == "rendre")
