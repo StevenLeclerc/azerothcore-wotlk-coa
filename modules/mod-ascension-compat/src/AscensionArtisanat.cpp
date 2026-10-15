@@ -1956,6 +1956,7 @@ namespace
         uint64 degats = 0, soins = 0, soinsBruts = 0, subis = 0;
         uint32 morts = 0, egides0 = 0, coeurs0 = 0, pression = 100;
         std::vector<ObjectGuid> pieces;
+        std::vector<uint8> emplacements;                     // emplacement d'equipement de chaque piece du banc
         std::vector<std::pair<uint8, ObjectGuid>> origine;   // (emplacement, piece d'origine renvoyee en sac par equiper)
     };
     std::mutex VerrouGarde;
@@ -3264,6 +3265,44 @@ namespace
         // lire                     : la ligne de mesure (« coa garde: ... ») ; ferme la mesure et retire l'adversaire si echue ;
         // rendre                   : ferme, retire l'adversaire, detruit les pieces du banc.
         // PTR et bots seulement (Cible). Les compteurs ne voient que le bot et ce qu'il controle.
+        // Emplacement d'equipement pour une piece du banc, hors de ceux deja pris par une autre piece du banc : main droite
+        // puis main gauche (si la classe manie deux armes), premier puis second anneau ou bijou. NULL_SLOT : aucun.
+        static uint8 EmplacementLibre(Player* j, ItemTemplate const* proto, std::set<uint8> const& pris)
+        {
+            std::vector<uint8> candidats;
+            switch (proto->InventoryType)
+            {
+                case INVTYPE_WEAPON:
+                    candidats = { EQUIPMENT_SLOT_MAINHAND };
+                    if (j->CanDualWield())
+                        candidats.push_back(EQUIPMENT_SLOT_OFFHAND);
+                    break;
+                case INVTYPE_FINGER: candidats = { EQUIPMENT_SLOT_FINGER1, EQUIPMENT_SLOT_FINGER2 }; break;
+                case INVTYPE_TRINKET: candidats = { EQUIPMENT_SLOT_TRINKET1, EQUIPMENT_SLOT_TRINKET2 }; break;
+                default:
+                {
+                    uint8 const s = j->FindEquipSlot(proto, NULL_SLOT, true);
+                    if (s != NULL_SLOT)
+                        candidats = { s };
+                    break;
+                }
+            }
+            for (uint8 c : candidats)
+                if (!pris.count(c))
+                    return c;
+            return NULL_SLOT;
+        }
+
+        // Porte `o` (en sac) a l'emplacement `emplacement` ; ce qui l'occupait part a sa place en sac.
+        static bool PorterA(Player* j, Item* o, uint8 emplacement)
+        {
+            uint16 dest = 0;
+            if (j->CanEquipItem(emplacement, dest, o, true) != EQUIP_ERR_OK)
+                return false;
+            j->SwapItem(o->GetPos(), dest);
+            return o->IsEquipped() && o->GetSlot() == emplacement;
+        }
+
         static bool HandleBancGarde(ChatHandler* handler, std::string nom, std::string action, Optional<std::string> a,
             Optional<std::string> b)
         {
@@ -3309,18 +3348,20 @@ namespace
                 return !ids.empty();
             };
             // Pieces du banc portees / tenues : une piece retiree par l'IA du bot fausse le niveau d'objet de la mesure.
+            // total = pieces creees par equiper (une piece detruite compte comme manquante) ; n compte APRES toutes les remises.
             auto portees = [&](MesureGarde const& m, bool remettre) -> std::pair<uint32, uint32>
             {
-                uint32 n = 0, total = 0;
-                for (ObjectGuid g : m.pieces)
-                    if (Item* o = j->GetItemByGuid(g))
-                    {
-                        ++total;
-                        if (!o->IsEquipped() && remettre)
-                            Porter(j, o);
-                        n += o->IsEquipped() ? 1 : 0;
-                    }
-                return { n, total };
+                if (remettre)
+                    for (std::size_t i = 0; i < m.pieces.size(); ++i)
+                        if (Item* o = j->GetItemByGuid(m.pieces[i]); o && i < m.emplacements.size() && m.emplacements[i] != NULL_SLOT
+                            && !(o->IsEquipped() && o->GetSlot() == m.emplacements[i]))
+                            PorterA(j, o, m.emplacements[i]);
+                uint32 n = 0;
+                for (std::size_t i = 0; i < m.pieces.size(); ++i)
+                    if (Item* o = j->GetItemByGuid(m.pieces[i]); o && i < m.emplacements.size() && o->IsEquipped()
+                        && o->GetSlot() == m.emplacements[i])
+                        ++n;
+                return { n, uint32(m.pieces.size()) };
             };
             // Copie de la mesure sous verrou ; les objets du jeu se touchent hors verrou (fil monde, cartes a l'arret).
             auto copie = [&]() { std::lock_guard<std::mutex> v(VerrouGarde); return Gardes[cle]; };
@@ -3338,25 +3379,36 @@ namespace
                     if (Item* o = j->GetItemByGuid(g))
                         j->DestroyItem(o->GetBagSlot(), o->GetSlot(), true);
                 m.pieces.clear();
+                m.emplacements.clear();
                 std::string texte;
                 m.origine.clear();
+                std::set<uint8> pris;   // emplacements deja donnes a une piece du banc : deux armes ne se chassent pas
                 for (uint32 entree : entrees)
                 {
                     // Sans SMSG_ITEM_PUSH_RESULT (SendNewItem) : mesure du 16/10, un bot aleatoire qui recoit l'annonce d'un
-                    // objet reevalue son equipement et remet le sien en moins de 5 s.
+                    // objet reevalue son equipement et remet le sien en moins de 5 s (EquipAction, paquet « item push result »).
                     Item* o = nullptr;
                     ItemPosCountVec place;
                     if (j->CanStoreNewItem(NULL_BAG, NULL_SLOT, place, entree, 1) == EQUIP_ERR_OK)
                         o = j->StoreNewItem(place, entree, true);
-                    uint16 dest = 0;
-                    Item* avant = nullptr;
-                    if (o && j->CanEquipItem(NULL_SLOT, dest, o, true) == EQUIP_ERR_OK)
-                        avant = j->GetItemByPos(dest);
-                    bool const porte = o && Porter(j, o);
-                    if (porte && avant)
-                        m.origine.emplace_back(uint8(dest & 255), avant->GetGUID());
+                    uint8 const emplacement = o ? EmplacementLibre(j, o->GetTemplate(), pris) : uint8(NULL_SLOT);
+                    bool porte = false;
+                    if (o && emplacement != NULL_SLOT)
+                    {
+                        Item* avant = j->GetItemByPos(INVENTORY_SLOT_BAG_0, emplacement);
+                        porte = PorterA(j, o, emplacement);
+                        if (porte)
+                        {
+                            pris.insert(emplacement);
+                            if (avant)
+                                m.origine.emplace_back(emplacement, avant->GetGUID());
+                        }
+                    }
                     if (o)
+                    {
                         m.pieces.push_back(o->GetGUID());
+                        m.emplacements.push_back(emplacement);
+                    }
                     texte += Acore::StringFormat(" {}:{}", entree, !o ? "SACS/INCONNU" : porte ? "porte" : "NON PORTE");
                 }
                 ecrire(m);
@@ -3438,6 +3490,10 @@ namespace
                 if (m.ouverte)
                     return handler->SendSysMessage("banc garde: une mesure est deja ouverte (lire ou rendre)."), true;
                 retirerAdversaire(m);
+                if (j->IsInCombat() || j->IsNonMeleeSpellCast(false))
+                    return handler->SendSysMessage("banc garde: le bot est en combat ou incante : mesure refusee (reessayer)."), true;
+                if (m.pieces.empty())
+                    return handler->SendSysMessage("banc garde: aucune piece du banc (equiper d'abord) : mesure refusee."), true;
                 auto const [portesAvant, tenues] = portees(m, true);
                 if (portesAvant != tenues)
                     return handler->PSendSysMessage("banc garde: {} piece(s) du banc sur {} portees : mesure refusee.", portesAvant, tenues), true;
@@ -3528,6 +3584,7 @@ namespace
                         if (Item* o = j->GetItemByGuid(g))
                             j->DestroyItem(o->GetBagSlot(), o->GetSlot(), true);
                     m.pieces.clear();
+                    m.emplacements.clear();
                     // L'equipement d'origine reprend sa place (s'il est encore en sac et l'emplacement libre).
                     uint32 remises = 0;
                     for (auto const& [emplacement, g] : m.origine)
@@ -3544,6 +3601,7 @@ namespace
                     g.ouverte = m.ouverte;
                     g.adversaire = m.adversaire;
                     g.pieces = m.pieces;
+                    g.emplacements = m.emplacements;
                     g.origine = m.origine;
                 }
                 handler->PSendSysMessage("{}", ligne);
