@@ -1880,10 +1880,24 @@ namespace
             joueur->GetGUID().GetCounter(), s->enchant, s->sortEffet, s->dureeMs, s->rechargeMs, s->valeur, s->valeurArene);
     }
 
+    // Valeur JcJ d'un SOIN (PO, 15/10 : un soin sur un allie en JcE garde la valeur pleine, donjons et raids compris) :
+    // en champ de bataille ou en arene, ou si le soigne est en combat JcJ. Indicateur retenu : CombatManager::HasPvPCombat()
+    // du soigne (Combat/CombatManager.cpp:195-201) : une reference de combat JcJ n'existe qu'entre deux unites controlees
+    // par un joueur (CombatManager.cpp:235-236, bots compris), elle expire d'elle-meme apres le dernier echange
+    // (PvPCombatReference::Update) ; le drapeau JcJ seul dirait « attaquable », pas « en combat contre un joueur ».
+    bool SoinEnJcJ(Unit const* soigneur, Unit const* soigne)
+    {
+        Map const* carte = soigneur->FindMap();
+        if (carte && carte->IsBattlegroundOrArena())
+            return true;
+        // Un allie PNJ (escorte, convoi) n'a que des references JcE : on lit aussi son combat contre des joueurs.
+        return soigne && (soigne->GetCombatManager().HasPvPCombat() || soigne->GetCombatManager().HasPvECombatWithPlayers());
+    }
+
     // Coeur de forge pour un coup ou un soin de `source` sur `cible`, en dix-milliemes : le multiplicateur qui ramene ce que
     // l'aura du DBC a deja applique (ses effets MOD_DAMAGE_PERCENT_DONE / MOD_HEALING_DONE_PERCENT, lus sur l'aura portee)
-    // a la valeur voulue : valeur JcJ (valeur_arene) si la cible est controlee par un joueur, 0 en arene 1c1 contre un
-    // gladiateur, sinon la valeur. 10000 : rien a corriger. Une aura sans effet de jeu (DUMMY) donne la valeur entiere.
+    // a la valeur voulue : valeur JcJ (valeur_arene) pour un coup sur une cible controlee par un joueur ou pour un soin en JcJ
+    // (SoinEnJcJ), 0 en arene 1c1 contre un gladiateur, sinon la valeur. 10000 : rien a corriger. Une aura sans effet de jeu (DUMMY) donne la valeur entiere.
     // Fils de carte : ne lit que source et cible.
     uint32 CorrectionCoeurDeForge(Unit const* source, Unit const* cible, bool soin)
     {
@@ -1902,7 +1916,7 @@ namespace
             for (auto const& [enchant, s] : Signatures)
                 if (s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE && s.sortEffet == AuraCoeurDeForge)
                 {
-                    voulu = int32(ControleParUnJoueur(cible) ? s.valeurArene : s.valeur);
+                    voulu = int32((soin ? SoinEnJcJ(source, cible) : ControleParUnJoueur(cible)) ? s.valeurArene : s.valeur);
                     break;
                 }
         if (voulu == deja || 100 + deja <= 0)
@@ -1950,9 +1964,10 @@ namespace
         // (SpellAuraEffects.cpp:6827-6828, arguments (soigne, soigneur)) : on ne le corrige pas ici, on le signale.
         void ModifyPeriodicDamageAurasTick(Unit* cible, Unit* attaquant, uint32& degats, SpellInfo const* sort) override
         {
+            TicDeSoin = 0;
             if (EstTicDeSoin(sort))
             {
-                TicDeSoinEnCours = true;
+                TicDeSoin = sort->Id;   // valable pour l'appel ModifyHealReceived suivant, du meme sort seulement
                 return;
             }
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
@@ -1960,22 +1975,29 @@ namespace
 
         // Deux appelants, deux ordres : Unit::HealBySpell (Unit.cpp:8761) passe (soigneur, soigne) ; le tic de soin
         // (SpellAuraEffects.cpp:6828) passe (soigne, soigneur), annonce par TicDeSoinEnCours.
-        void ModifyHealReceived(Unit* a, Unit* b, uint32& soin, SpellInfo const* /*sort*/) override
+        void ModifyHealReceived(Unit* a, Unit* b, uint32& soin, SpellInfo const* sort) override
         {
-            bool const tic = TicDeSoinEnCours;
-            TicDeSoinEnCours = false;
+            bool const tic = TicDeSoin && sort && sort->Id == TicDeSoin;
+            TicDeSoin = 0;
+            // OBS_MOD_HEALTH : le coeur n'applique pas les bonus du soigneur a ce tic (SpellAuraEffects.cpp:6809-6812) ;
+            // l'aura du DBC n'a rien ajoute, on ne corrige rien.
+            if (tic && !sort->HasAura(SPELL_AURA_PERIODIC_HEAL))
+                return;
             Unit* soigneur = tic ? b : a;
             Unit* soigne = tic ? a : b;
             AppliquerCorrection(soin, CorrectionCoeurDeForge(soigneur, soigne, true));
         }
 
     private:
-        static inline thread_local bool TicDeSoinEnCours = false;
+        static inline thread_local uint32 TicDeSoin = 0;
 
+        // Les deux auras que HandlePeriodicHealAurasTick traite (SpellAuraEffects.cpp:1268-1270). Un sort qui porte aussi une
+        // aura de degats periodiques ne se distingue pas par son SpellInfo : traite comme des degats (19 sorts, ecart accepte).
         static bool EstTicDeSoin(SpellInfo const* sort)
         {
-            return sort && sort->HasAura(SPELL_AURA_PERIODIC_HEAL) && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE)
-                && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT) && !sort->HasAura(SPELL_AURA_PERIODIC_LEECH);
+            return sort && (sort->HasAura(SPELL_AURA_PERIODIC_HEAL) || sort->HasAura(SPELL_AURA_OBS_MOD_HEALTH))
+                && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE) && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT)
+                && !sort->HasAura(SPELL_AURA_PERIODIC_LEECH);
         }
     };
 
