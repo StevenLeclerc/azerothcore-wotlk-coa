@@ -1139,6 +1139,16 @@ namespace
         return recolte ? RECOLTE[tranche] : CREATION[tranche];
     }
 
+    // Points gagnes par les jalons de niveau (D-PO-42, b1) : calcules, jamais stockes, donc retroactifs et hors de portee
+    // d'un oubli. Creation : 1 au 10 puis 1 a chaque niveau impair (6 en 10-19, 36 au 80). Recolte : 1 au 10 puis 1 tous
+    // les 3 niveaux (4 en 10-19, 24 au 80). Toujours sous Plafond().
+    uint32 Jalons(uint8 niveau, bool recolte)
+    {
+        if (niveau < 10)
+            return 0;
+        return recolte ? 1 + (niveau - 10) / 3 : 1 + (niveau - 9) / 2;
+    }
+
     struct TalentDef
     {
         uint32 sort = 0;
@@ -1332,7 +1342,9 @@ namespace
         uint32 const metier = recolte ? e.metierR : e.metierC;
         if (!metier)
             return 0;
-        uint32 const plafond = std::min(recolte ? e.gagnesR : e.gagnesC, Plafond(joueur->GetLevel(), recolte));
+        // gagnes = sources hors jalons (MJ, puis premieres fois et grimoires).
+        uint32 const plafond = std::min(Jalons(joueur->GetLevel(), recolte) + (recolte ? e.gagnesR : e.gagnesC),
+            Plafond(joueur->GetLevel(), recolte));
         uint32 const depenses = Depenses(e, metier);
         return plafond > depenses ? plafond - depenses : 0;
     }
@@ -1433,27 +1445,35 @@ namespace
         return {};
     }
 
-    void OublierTalents(Player* joueur)
+    // Oubli (D-PO-42, b2) : sorts et metiers principaux vides, la reserve gagnee reste (« celui qui cherche n'a jamais rien
+    // perdu »). `effacer` (MJ) supprime tout, points compris.
+    void OublierTalents(Player* joueur, bool effacer = false)
     {
         EtatTalents* e = Etat(joueur);
         e->sorts.clear();
         e->metierC = e->metierR = 0;
-        e->gagnesC = e->gagnesR = 0;
+        if (effacer)
+            e->gagnesC = e->gagnesR = 0;
         SynchroniserMarqueurs(joueur, *e);
         if (TablesPersonnages)
         {
             CharacterDatabase.Execute("DELETE FROM coa_artisanat_talent WHERE guid = {}", joueur->GetGUID().GetCounter());
-            CharacterDatabase.Execute("DELETE FROM coa_artisanat_personnage WHERE guid = {}", joueur->GetGUID().GetCounter());
+            if (effacer)
+                CharacterDatabase.Execute("DELETE FROM coa_artisanat_personnage WHERE guid = {}", joueur->GetGUID().GetCounter());
+            else
+                SauverPersonnage(joueur, *e);
         }
     }
 
     // Etat pour l'atelier : « TALENTS:<metC>:<metR>:<dispoC>:<dispoR>:<plafC>:<plafR>:<gagC>:<gagR> », puis la liste
-    // des sorts connus en « TALENTS_APPRIS:<k>/<n>:<sort>,... » (decoupee sous 255 caracteres).
+    // des sorts connus en « TALENTS_APPRIS:<k>/<n>:<sort>,... » (decoupee sous 255 caracteres). <gag> = jalons + gagnes.
     void EnvoyerEtat(Player* joueur)
     {
         EtatTalents* e = Etat(joueur);
+        uint8 const niveau = joueur->GetLevel();
         Repondre(joueur, Acore::StringFormat("TALENTS:{}:{}:{}:{}:{}:{}:{}:{}", e->metierC, e->metierR, Disponibles(joueur, *e, false),
-            Disponibles(joueur, *e, true), Plafond(joueur->GetLevel(), false), Plafond(joueur->GetLevel(), true), e->gagnesC, e->gagnesR));
+            Disponibles(joueur, *e, true), Plafond(niveau, false), Plafond(niveau, true), Jalons(niveau, false) + e->gagnesC,
+            Jalons(niveau, true) + e->gagnesR));
         std::vector<std::string> morceaux(1);
         for (uint32 sort : e->sorts)
         {
@@ -1802,10 +1822,14 @@ namespace
             attente->Vider();
         }
 
-        void OnPlayerLevelChanged(Player* joueur, uint8 /*ancien*/) override
+        void OnPlayerLevelChanged(Player* joueur, uint8 ancien) override
         {
             if (!RecalculSuspendu)
                 RecalculerBonusDeSet(joueur);
+            // Jalons (D-PO-42, b3) : le compteur de l'atelier bouge tout de suite. Jamais pour un bot : Etat() lance deux
+            // requetes synchrones a son premier appel.
+            if (!Talents.empty() && std::max(ancien, joueur->GetLevel()) >= 10 && joueur->GetSession() && !joueur->GetSession()->IsBot())
+                EnvoyerEtat(joueur);
         }
 
         // L'ouverture compte, pas seulement la prise : un bot peut ouvrir un noeud et ne rien prendre (objet non
@@ -2502,15 +2526,17 @@ namespace
 
         // ---- Talents : .artisanat talent (MJ, sur soi) et .artisanat banc talent (bots, preuves) -------------------
 
-        // Actions communes : etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier.
+        // Actions communes : etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier (points gardes) |
+        // effacer (tout, points compris). Chaque changement renvoie l'etat a l'atelier.
         static bool ActionTalent(ChatHandler* handler, Player* j, std::string const& action, Optional<std::string> const& a,
             Optional<std::string> const& b)
         {
             EtatTalents* e = Etat(j);
             auto etat = [&]
             {
-                handler->PSendSysMessage("talent: metiers C={} R={} ; gagnes C={} R={} ; disponibles C={} R={} ; plafonds C={} R={} (niveau {}) ; {} sorts connus",
-                    e->metierC, e->metierR, e->gagnesC, e->gagnesR, Disponibles(j, *e, false), Disponibles(j, *e, true),
+                handler->PSendSysMessage("talent: metiers C={} R={} ; jalons C={} R={} ; gagnes C={} R={} ; disponibles C={} R={} ; plafonds C={} R={} (niveau {}) ; {} sorts connus",
+                    e->metierC, e->metierR, Jalons(j->GetLevel(), false), Jalons(j->GetLevel(), true), e->gagnesC, e->gagnesR,
+                    Disponibles(j, *e, false), Disponibles(j, *e, true),
                     Plafond(j->GetLevel(), false), Plafond(j->GetLevel(), true), uint32(j->GetLevel()), uint32(e->sorts.size()));
             };
             int32 n = 0;
@@ -2527,6 +2553,7 @@ namespace
             {
                 (*a == "C" ? e->gagnesC : e->gagnesR) = uint32(n);
                 SauverPersonnage(j, *e);
+                EnvoyerEtat(j);
                 etat();
                 return true;
             }
@@ -2534,6 +2561,7 @@ namespace
             {
                 std::string const r = ChoisirMetier(j, (*a)[0], uint32(n));
                 handler->PSendSysMessage("talent: metier {} {} -> {}", *a, n, r.empty() ? "OK" : r);
+                EnvoyerEtat(j);
                 return true;
             }
             if (action == "apprendre" && a && LireEntier(*a, n) && n > 0)
@@ -2541,11 +2569,13 @@ namespace
                 std::string const r = ApprendreTalent(j, uint32(n));
                 handler->PSendSysMessage("talent: apprendre {} -> {} ; disponibles C={} R={}", n, r.empty() ? "OK" : r,
                     Disponibles(j, *e, false), Disponibles(j, *e, true));
+                EnvoyerEtat(j);
                 return true;
             }
-            if (action == "oublier")
+            if (action == "oublier" || action == "effacer")
             {
-                OublierTalents(j);
+                OublierTalents(j, action == "effacer");
+                EnvoyerEtat(j);
                 etat();
                 return true;
             }
@@ -2558,7 +2588,7 @@ namespace
                 return true;
             Player* j = handler->GetPlayer();
             if (!j || !ActionTalent(handler, j, action, a, b))
-                handler->SendSysMessage("talent etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier");
+                handler->SendSysMessage("talent etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier | effacer");
             return true;
         }
 
