@@ -1966,6 +1966,28 @@ namespace
     // deconnecte a laisse sa mesure ouverte (GardesOuvertes ne redescend alors qu'a « lire » ou « rendre »).
     std::atomic<int64> FinGardes{ 0 };
 
+    // Gel du bot pendant une serie de mesures (mod-playerbots, src/Ai/Coa/CoaGelBanc.h) : cle CustomData posee par
+    // `equiper`, retiree par `rendre` ou a l'echeance (GEL_MARGE apres la derniere action du banc sur ce bot), par le
+    // WorldScript ci-dessous (fil monde, cartes a l'arret). Deconnexion, redemarrage : CustomData disparait avec le bot.
+    std::string const CLE_GEL_BANC = "CoaGelBanc";
+    struct GelBanc final : public DataMap::Base { };
+    constexpr Milliseconds GEL_MARGE{ 15 * MINUTE * IN_MILLISECONDS };
+    std::map<uint32, Milliseconds> GelsEcheances;   // fil monde seulement (commande, WorldScript)
+
+    void Geler(Player* j, Milliseconds jusqua)
+    {
+        if (!j->CustomData.Get<GelBanc>(CLE_GEL_BANC))
+            j->CustomData.Set(CLE_GEL_BANC, new GelBanc());
+        Milliseconds& e = GelsEcheances[j->GetGUID().GetCounter()];
+        e = std::max(e, jusqua);
+    }
+
+    void Degeler(Player* j)
+    {
+        j->CustomData.Erase(CLE_GEL_BANC);
+        GelsEcheances.erase(j->GetGUID().GetCounter());
+    }
+
     bool GardeEnCours()
     {
         return GardesOuvertes.load(std::memory_order_relaxed)
@@ -2163,7 +2185,37 @@ namespace
     class ArtisanatWorld final : public WorldScript
     {
     public:
-        ArtisanatWorld() : WorldScript("CoaArtisanatWorld", { WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_AFTER_CONFIG_LOAD }) { }
+        ArtisanatWorld() : WorldScript("CoaArtisanatWorld", { WORLDHOOK_ON_STARTUP, WORLDHOOK_ON_AFTER_CONFIG_LOAD,
+            WORLDHOOK_ON_UPDATE }) { }
+
+        // Filet du gel des bots du banc G1 (fil monde, apres la mise a jour des cartes) : une fois par seconde, retire
+        // la cle des bots dont l'echeance est passee. Sans gel : une liste vide.
+        void OnUpdate(uint32 diff) override
+        {
+            if (GelsEcheances.empty())
+                return;
+            _cumul += diff;
+            if (_cumul < 1000)
+                return;
+            _cumul = 0;
+            Milliseconds const maintenant = GameTime::GetGameTimeMS();
+            for (auto it = GelsEcheances.begin(); it != GelsEcheances.end();)
+            {
+                if (maintenant < it->second)
+                {
+                    ++it;
+                    continue;
+                }
+                if (Player* p = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(it->first)))
+                    p->CustomData.Erase(CLE_GEL_BANC);
+                LOG_INFO("module", "coa garde: gel echu bot={} (cle retiree)", it->first);
+                it = GelsEcheances.erase(it);
+            }
+        }
+
+    private:
+        uint32 _cumul = 0;
+    public:
 
         void OnStartup() override
         {
@@ -3381,7 +3433,9 @@ namespace
                 m.pieces.clear();
                 m.emplacements.clear();
                 std::string texte;
-                m.origine.clear();
+                // L'equipement d'origine est releve une fois, au premier `equiper` : un rééquipement (liste reduite, autre
+                // set) trouve les emplacements vides ou tenus par le banc et ne doit pas l'oublier (corrige le 16/10).
+                Geler(j, GameTime::GetGameTimeMS() + GEL_MARGE);
                 std::set<uint8> pris;   // emplacements deja donnes a une piece du banc : deux armes ne se chassent pas
                 for (uint32 entree : entrees)
                 {
@@ -3400,7 +3454,9 @@ namespace
                         if (porte)
                         {
                             pris.insert(emplacement);
-                            if (avant)
+                            bool const deja = std::any_of(m.origine.begin(), m.origine.end(),
+                                [&](std::pair<uint8, ObjectGuid> const& x) { return x.first == emplacement; });
+                            if (avant && !deja)
                                 m.origine.emplace_back(emplacement, avant->GetGUID());
                         }
                     }
@@ -3538,6 +3594,7 @@ namespace
                 m.pression = *pression;
                 m.ouverte = true;
                 ecrire(m);
+                Geler(j, m.fin + GEL_MARGE);
                 ++GardesOuvertes;
                 int64 fin = FinGardes.load();
                 while (fin < m.fin.count() && !FinGardes.compare_exchange_weak(fin, m.fin.count())) { }
@@ -3548,6 +3605,10 @@ namespace
 
             if (action == "lire" || action == "rendre")
             {
+                // rendre remet l'equipement d'origine : impossible en combat (armure) ou mort ; on refuse, le pilote
+                // reessaie (sinon les pieces d'origine seraient oubliees en sac).
+                if (action == "rendre" && (j->IsInCombat() || !j->IsAlive()))
+                    return handler->SendSysMessage("banc garde: rendre refuse, bot en combat ou mort (reessayer)."), true;
                 MesureGarde m = copie();
                 Milliseconds const maintenant = GameTime::GetGameTimeMS();
                 bool const echue = m.ouverte && maintenant >= m.fin;
@@ -3589,10 +3650,11 @@ namespace
                     uint32 remises = 0;
                     for (auto const& [emplacement, g] : m.origine)
                         if (Item* o = j->GetItemByGuid(g); o && !o->IsEquipped() && !j->GetItemByPos(INVENTORY_SLOT_BAG_0, emplacement))
-                            remises += Porter(j, o) ? 1 : 0;
+                            remises += PorterA(j, o, emplacement) ? 1 : 0;
                     m.origine.clear();
+                    Degeler(j);
                     j->SaveToDB(false, false);
-                    handler->PSendSysMessage("banc garde: pieces du banc detruites, {} piece(s) d'origine remise(s).", remises);
+                    handler->PSendSysMessage("banc garde: pieces du banc detruites, {} piece(s) d'origine remise(s), bot degele.", remises);
                 }
                 // Ecrire sous verrou en gardant les compteurs : les crochets ont pu compter depuis la copie.
                 {
