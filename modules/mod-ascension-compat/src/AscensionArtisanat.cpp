@@ -23,6 +23,9 @@
 //    butin et rapportent de l'experience au detenteur du butin. Taux en configuration (CoaArtisanat.Monde.*), 0 par
 //    defaut ; bots exclus sauf CoaArtisanat.Monde.TauxBots.
 
+#include "AscensionArtisanatIds.h"
+#include "Battleground.h"
+#include "CharacterCache.h"
 #include "Chat.h"
 #include "CommandScript.h"
 #include "Config.h"
@@ -34,6 +37,7 @@
 #include "Group.h"
 #include "Item.h"
 #include "LootMgr.h"
+#include "Mail.h"
 #include "Map.h"
 #include "Log.h"
 #include "ObjectAccessor.h"
@@ -45,6 +49,8 @@
 #include "SpellAuras.h"
 #include "SpellInfo.h"
 #include "SpellMgr.h"
+#include "StringConvert.h"
+#include "Tokenize.h"
 #include "Realm.h"
 #include "World.h"
 #include "WorldPacket.h"
@@ -76,16 +82,48 @@ namespace
     constexpr std::string_view PREFIXE_ADDON = "COA_ATL\t";   // CONCEPTION-artisanat-C-atelier.md, messages d'addon
     std::string const CLE_DONNEES = "CoaArtisanatRecopie";
     std::string const CLE_DELAI = "CoaArtisanatDelai";
+    std::string const CLE_DELAI_EXTRAIT = "CoaArtisanatDelaiExtrait";
     constexpr Milliseconds DELAI_EVEIL{ 500 };
+    // EXTRAIT? (D-PO, retour de dev-addon 83b2ebc) : hors du delai partage de 500 ms ; son propre garde-fou anti-rafale,
+    // EXTRAIT_PAR_FENETRE demandes par seconde (l'Atelier s'en tient a 1 par case et par seconde, 4 par seconde au total).
+    constexpr Milliseconds FENETRE_EXTRAIT{ 1000 };
+    constexpr uint32 EXTRAIT_PAR_FENETRE = 8;
 
     // Emplacements recopies. BONUS_ENCHANTMENT_SLOT (bonus de chasse) se recalcule sur la piece neuve. Les
-    // PROP_ENCHANTMENT_SLOT_* servent aux suffixes aleatoires, que nos pieces n'ont pas : le premier porte la signature
-    // de l'artisan (lot T, D-PO-34), qui suit la piece aux paliers, a l'eveil et aux rangs.
-    constexpr std::array<EnchantmentSlot, 7> EMPLACEMENTS_RECOPIES =
+    // PROP_ENCHANTMENT_SLOT_* servent aux suffixes aleatoires, que nos pieces n'ont pas (0 piece de 9101200-9104999 avec
+    // RandomProperty ou RandomSuffix, mesure le 15/10) : le 7 porte la signature de l'artisan (lot T, D-PO-34), le 8 la
+    // facette d'une Oeuvre legendaire, le 9 le recolteur (GUID bas dans les charges, ENCHANT_EXTRAIT ; lot T1, T1-5).
+    // Tous suivent la piece aux paliers, a l'eveil et aux rangs.
+    constexpr std::array<EnchantmentSlot, 9> EMPLACEMENTS_RECOPIES =
     {
         PERM_ENCHANTMENT_SLOT, TEMP_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT_2,
-        SOCK_ENCHANTMENT_SLOT_3, PRISMATIC_ENCHANTMENT_SLOT, PROP_ENCHANTMENT_SLOT_0
+        SOCK_ENCHANTMENT_SLOT_3, PRISMATIC_ENCHANTMENT_SLOT, PROP_ENCHANTMENT_SLOT_0, PROP_ENCHANTMENT_SLOT_1,
+        PROP_ENCHANTMENT_SLOT_2
     };
+    constexpr EnchantmentSlot EMPLACEMENT_SIGNATURE = PROP_ENCHANTMENT_SLOT_0;   // 7
+    constexpr EnchantmentSlot EMPLACEMENT_FACETTE = PROP_ENCHANTMENT_SLOT_1;     // 8
+    constexpr EnchantmentSlot EMPLACEMENT_EXTRAIT = PROP_ENCHANTMENT_SLOT_2;     // 9
+
+    bool EstOeuvre(uint32 entree)
+    {
+        return entree && std::find(CoaArtisanatIds::OEUVRES.begin(), CoaArtisanatIds::OEUVRES.end(), entree)
+            != CoaArtisanatIds::OEUVRES.end();
+    }
+
+    // Un enchantement peut-il porter un GUID dans ses charges sans que le coeur les decompte ? Verdict T1-1 : le coeur ne
+    // touche aux charges d'un emplacement PROP que pour un type ITEM_ENCHANTMENT_TYPE_COMBAT_SPELL (Player.cpp:7664-7733)
+    // et ne vide un emplacement que si sa duree est non nulle (UpdateEnchantTime, Player::AddEnchantmentDuration). On
+    // exige donc des types tous a 0. Rend vide si oui, sinon la raison.
+    std::string RaisonEnchantementNonNeutre(uint32 enchant)
+    {
+        SpellItemEnchantmentEntry const* e = sSpellItemEnchantmentStore.LookupEntry(enchant);
+        if (!e)
+            return "inconnu du DBC serveur";
+        for (uint8 i = 0; i < MAX_SPELL_ITEM_ENCHANTMENT_EFFECTS; ++i)
+            if (e->type[i] != ITEM_ENCHANTMENT_TYPE_NONE)
+                return Acore::StringFormat("effet {} de type {} (0 exige)", uint32(i), uint32(e->type[i]));
+        return {};
+    }
 
     bool EstObjetArtisanat(uint32 entry)
     {
@@ -207,6 +245,9 @@ namespace
         Milliseconds instant{ 0 };
         bool objetDeLancement = false;       // la source est l'objet de lancement (renforcement)
         std::vector<Chasses> candidats;       // sinon : les pieces reactives presentes avant la consommation
+        // Oeuvre (T1-5) : les Coeurs de foudre tenus avant la consommation (objet, recolteur) ; celui qui a disparu a la
+        // creation est celui que la recette a pris (pile de 1 : un objet par Coeur).
+        std::vector<std::pair<ObjectGuid, ObjectGuid>> materiauxLegendaires;
 
         void Vider()
         {
@@ -214,6 +255,7 @@ namespace
             entreeCreee = 0;
             objetDeLancement = false;
             candidats.clear();
+            materiauxLegendaires.clear();
         }
     };
 
@@ -630,6 +672,12 @@ namespace
         Repondre(joueur, nom + "_OK:" + std::to_string(neuve->GetEntry()));
     }
 
+    struct RafaleExtrait final : public DataMap::Base
+    {
+        Milliseconds debut{ 0 };
+        uint32 nombre = 0;
+    };
+
     struct DelaiEveil final : public DataMap::Base
     {
         Milliseconds prochain{ 0 };
@@ -920,9 +968,10 @@ namespace
     {
         std::string texte = Acore::StringFormat("{} (guid {}) fabricant={}", objet->GetEntry(),
             objet->GetGUID().GetCounter(), objet->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter());
-        for (uint8 s = PERM_ENCHANTMENT_SLOT; s <= PRISMATIC_ENCHANTMENT_SLOT; ++s)
+        for (uint8 s = PERM_ENCHANTMENT_SLOT; s <= EMPLACEMENT_EXTRAIT; ++s)
             if (uint32 const id = objet->GetEnchantmentId(EnchantmentSlot(s)))
-                texte += Acore::StringFormat(" [{}]={}/{}ms", uint32(s), id, objet->GetEnchantmentDuration(EnchantmentSlot(s)));
+                texte += Acore::StringFormat(" [{}]={}/{}ms/{}ch", uint32(s), id, objet->GetEnchantmentDuration(EnchantmentSlot(s)),
+                    objet->GetEnchantmentCharges(EnchantmentSlot(s)));
         return texte;
     }
 
@@ -1177,6 +1226,7 @@ namespace
         uint32 rechargeMs = 0;
         uint32 sortEffet = 0;
         uint32 pieceMasque = 0;
+        uint32 dureeMs = 0;
         uint8 rang = 0;
         uint8 seuilPct = 0;
         uint8 groupeSursaut = 0;
@@ -1186,6 +1236,9 @@ namespace
         std::string effet;
     };
     std::unordered_map<uint32, SignatureDef> Signatures;      // par enchantement
+    // La facette Coeur de forge (effet EFFET_COEUR_DE_FORGE) : son aura (sort_effet) est lue a chaque coup par les crochets
+    // de degats et de soins ; 0 : pas de ligne, rien n'est lu.
+    uint32 AuraCoeurDeForge = 0;
     bool TablesPersonnages = false;
 
     bool TableExiste(DatabaseWorkerPool<WorldDatabaseConnection>& base, std::string_view nom)
@@ -1251,9 +1304,10 @@ namespace
         }
 
         uint32 signaturesRejetees = 0;
+        AuraCoeurDeForge = 0;
         if (TableExiste(WorldDatabase, "coa_artisanat_signature"))
             if (QueryResult r = WorldDatabase.Query("SELECT enchant, metier, voie, forme, rang, effet, valeur, valeur_arene, recharge_ms, "
-                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet FROM coa_artisanat_signature"))
+                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet, duree_ms FROM coa_artisanat_signature"))
                 do
                 {
                     Field* f = r->Fetch();
@@ -1272,12 +1326,25 @@ namespace
                     s.pieceClasse = f[11].Get<uint8>();
                     s.pieceMasque = f[12].Get<uint32>();
                     s.sortEffet = f[13].Get<uint32>();
+                    s.dureeMs = f[14].Get<uint32>();
+                    bool const coeur = s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
+                    // Coeur de forge : un pourcentage (au plus 100), une aura a poser (sort_effet), une recharge.
                     if (!sSpellItemEnchantmentStore.LookupEntry(s.enchant) || (s.sortEffet && !sSpellMgr->GetSpellInfo(s.sortEffet))
-                        || s.forme.empty() || !s.rang || s.seuilPct > 100)
+                        || s.forme.empty() || !s.rang || s.seuilPct > 100
+                        || (coeur && (!s.sortEffet || s.valeur > 100 || s.valeurArene > 100)))
                     {
                         ++signaturesRejetees;
-                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} (enchantement ou sort d'effet inconnu, forme ou rang vide)", s.enchant);
+                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} (enchantement ou sort d'effet inconnu, forme ou rang vide, "
+                            "ou coeur_de_forge sans aura ou au-dela de 100 %)", s.enchant);
                         continue;
+                    }
+                    if (coeur)
+                    {
+                        if (AuraCoeurDeForge && AuraCoeurDeForge != s.sortEffet)
+                            LOG_ERROR("module", "coa artisanat: deux auras coeur_de_forge ({} et {}) : seule la premiere est lue",
+                                AuraCoeurDeForge, s.sortEffet);
+                        else
+                            AuraCoeurDeForge = s.sortEffet;
                     }
                     Signatures[s.enchant] = s;
                 } while (r->NextRow());
@@ -1285,6 +1352,23 @@ namespace
         LOG_INFO("module", "coa artisanat: talents : {} sorts ({} marqueurs de metier), {} rejetes ; signatures : {}, {} rejetees ; tables personnages {}",
             uint32(Talents.size()), uint32(MarqueursMetier.size()), rejetes, uint32(Signatures.size()), signaturesRejetees,
             TablesPersonnages ? "presentes" : "ABSENTES");
+
+        // Lot T1 (Sourcier) : ce qui attend un identifiant d'un autre agent reste inerte, et le dit.
+        using namespace CoaArtisanatIds;
+        if (!ENCHANT_EXTRAIT)
+            LOG_INFO("module", "coa sourcier: ENCHANT_EXTRAIT = 0 (dev-dbc) : emplacement 9 non pose a la fabrication, inerte");
+        else if (std::string const raison = RaisonEnchantementNonNeutre(ENCHANT_EXTRAIT); !raison.empty())
+            LOG_ERROR("module", "coa sourcier: ENCHANT_EXTRAIT {} non neutre ({}) : emplacement 9 non pose", ENCHANT_EXTRAIT, raison);
+        if (!AuraCoeurDeForge)
+            LOG_INFO("module", "coa sourcier: coeur de forge inerte (aucune ligne coa_artisanat_signature effet 'coeur_de_forge')");
+        if (!OBJET_COEUR_DE_FOUDRE || !OEUVRES[0])
+            LOG_INFO("module", "coa sourcier: Coeur de foudre {} / Oeuvre {} : fabrication de l'Oeuvre inerte (0 = non recu)",
+                OBJET_COEUR_DE_FOUDRE, OEUVRES[0]);
+    }
+
+    bool EnchantExtraitUtilisable()
+    {
+        return CoaArtisanatIds::ENCHANT_EXTRAIT && RaisonEnchantementNonNeutre(CoaArtisanatIds::ENCHANT_EXTRAIT).empty();
     }
 
     struct EtatTalents final : public DataMap::Base
@@ -1533,7 +1617,8 @@ namespace
         std::string forme, voie;
         uint8 rang = 0;
         for (uint32 sort : e->sorts)
-            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == e->metierC)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == e->metierC
+                && !it->second.talent.starts_with(CoaArtisanatIds::PREFIXE_TALENT_FACETTE))
             {
                 if (!it->second.forme.empty())
                 {
@@ -1559,15 +1644,72 @@ namespace
         }
     }
 
-    // Signatures actives : la meilleure de chaque (voie, forme) portee, 3 au plus (ordre des emplacements), sans cumul.
+    // Metier (SkillLine) d'une recette, 0 si elle n'est rattachee a aucun.
+    uint32 MetierDeRecette(uint32 recette)
+    {
+        uint32 metier = 0;
+        auto bornes = sSpellMgr->GetSkillLineAbilityMapBounds(recette);
+        for (auto it = bornes.first; it != bornes.second; ++it)
+            metier = it->second->SkillLine;
+        return metier;
+    }
+
+    // Emplacement 9 : GUID bas du recolteur dans les charges de l'enchantement neutre ENCHANT_EXTRAIT (verdict T1-1). La
+    // piece n'est pas portee a la creation ; si elle l'etait, l'enchantement est neutre : rien a appliquer.
+    bool PoserExtrait(Player* joueur, Item* objet, uint32 recolteurBas)
+    {
+        if (!recolteurBas || !EnchantExtraitUtilisable())
+            return false;
+        objet->SetEnchantment(EMPLACEMENT_EXTRAIT, CoaArtisanatIds::ENCHANT_EXTRAIT, 0, recolteurBas, joueur->GetGUID());
+        objet->SetState(ITEM_CHANGED, joueur);
+        return true;
+    }
+
+    // Facette d'une Oeuvre (emplacement 8) : le talent « facette:<forme> » que connait l'artisan, specialiste du metier de
+    // la recette ; l'enchantement est la ligne coa_artisanat_signature de cette forme et de ce metier (rang le plus haut).
+    // Rend l'enchantement pose, 0 sinon.
+    uint32 PoserFacette(Player* joueur, Item* objet, uint32 recette)
+    {
+        if (Signatures.empty() || !TablesPersonnages)
+            return 0;
+        EtatTalents* e = Etat(joueur);
+        uint32 const metier = MetierDeRecette(recette);
+        if (!metier || metier != e->metierC)
+            return 0;
+        std::string forme;
+        for (uint32 sort : e->sorts)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier
+                && it->second.talent.starts_with(CoaArtisanatIds::PREFIXE_TALENT_FACETTE))
+                forme = it->second.talent.substr(std::string_view(CoaArtisanatIds::PREFIXE_TALENT_FACETTE).size());
+        if (forme.empty())
+            return 0;
+        SignatureDef const* choisie = nullptr;
+        for (auto const& [enchant, s] : Signatures)
+            if (s.metier == metier && s.forme == forme && (!choisie || s.rang > choisie->rang))
+                choisie = &s;
+        if (!choisie)
+        {
+            LOG_ERROR("module", "coa sourcier: facette {} sans ligne coa_artisanat_signature (metier {}) : Oeuvre sans facette", forme, metier);
+            return 0;
+        }
+        objet->SetEnchantment(EMPLACEMENT_FACETTE, choisie->enchant, 0, 0, joueur->GetGUID());
+        objet->SetState(ITEM_CHANGED, joueur);
+        return choisie->enchant;
+    }
+
+    // Signatures actives (T1-5) : d'abord la facette de l'Oeuvre portee (emplacement 8, elle prend une des 3 places), puis
+    // les signatures (emplacement 7) dans l'ordre des emplacements d'equipement ; 3 au plus. Une facette ou une signature de
+    // meme nature (metier, voie, forme) qu'une autre deja retenue ne s'y ajoute pas : la plus forte (valeur) des deux reste.
     struct SignaturesActives final : public DataMap::Base
     {
         std::vector<SignatureDef const*> actives;
         bool sale = true;                   // equipement change depuis le dernier calcul
         Milliseconds sursaut{ 0 };          // fin de la recharge partagee des sursauts de survie
         std::map<uint32, Milliseconds> recharges;   // autres signatures, par enchantement
+        uint32 chargesCoeur = 0;            // critiques comptes pour Coeur de forge
     };
     std::atomic<uint32> DeclenchementsSignatures{ 0 };
+    std::atomic<uint32> DeclenchementsCoeur{ 0 };
 
     void RecalculerSignatures(Player* joueur)
     {
@@ -1576,32 +1718,58 @@ namespace
         a->sale = false;
         if (Signatures.empty())
             return;
-        for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
-        {
-            Item* objet = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-            if (!objet || objet->IsBroken())
-                continue;
-            auto it = Signatures.find(objet->GetEnchantmentId(PROP_ENCHANTMENT_SLOT_0));
-            if (it == Signatures.end())
-                continue;
-            SignatureDef const* s = &it->second;
-            auto meme = std::find_if(a->actives.begin(), a->actives.end(), [&](SignatureDef const* x)
+        std::vector<SignatureDef const*> facettes;
+        for (EnchantmentSlot const emplacement : { EMPLACEMENT_FACETTE, EMPLACEMENT_SIGNATURE })
+            for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
             {
-                return x->metier == s->metier && x->voie == s->voie && x->forme == s->forme;
-            });
-            if (meme != a->actives.end())
-            {
-                if (s->rang > (*meme)->rang)
-                    *meme = s;
+                Item* objet = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                if (!objet || objet->IsBroken())
+                    continue;
+                auto it = Signatures.find(objet->GetEnchantmentId(emplacement));
+                if (it == Signatures.end())
+                    continue;
+                SignatureDef const* s = &it->second;
+                auto meme = std::find_if(a->actives.begin(), a->actives.end(), [&](SignatureDef const* x)
+                {
+                    return x->metier == s->metier && x->voie == s->voie && x->forme == s->forme;
+                });
+                if (meme != a->actives.end())
+                {
+                    // Deux signatures : le rang (regle d'avant T1). Une facette et une signature : la valeur.
+                    bool const facetteEnJeu = emplacement == EMPLACEMENT_FACETTE
+                        || std::find(facettes.begin(), facettes.end(), *meme) != facettes.end();
+                    if (facetteEnJeu ? s->valeur > (*meme)->valeur : s->rang > (*meme)->rang)
+                        *meme = s;
+                }
+                else if (a->actives.size() < 3)
+                {
+                    a->actives.push_back(s);
+                    if (emplacement == EMPLACEMENT_FACETTE)
+                        facettes.push_back(s);
+                }
             }
-            else if (a->actives.size() < 3)
-                a->actives.push_back(s);
-        }
     }
 
-    // Egide (et tout effet « absorbe_sous_seuil ») : le coup qui ferait passer sous le seuil est absorbe a hauteur de la
-    // valeur (au niveau 80, x niveau / 80 ; valeur d'arene en arene), le reste devient un bouclier (sort d'effet).
-    // Recharge partagee par les sursauts de survie (groupe_sursaut).
+    // Arene 1 contre 1 contre un gladiateur (conception § 5, revue JcJ n° 7) : les effets d'artisanat y sont neutralises.
+    // Arene de type TYPE_ARENE_1C1 dont un des combattants est un bot (le gladiateur ; un banc bot contre bot aussi).
+    bool NeutraliseEnArene1c1(Player const* joueur)
+    {
+        Battleground* bg = joueur ? joueur->GetBattleground() : nullptr;
+        if (!bg || !bg->isArena() || bg->GetArenaType() != CoaArtisanatIds::TYPE_ARENE_1C1)
+            return false;
+        for (auto const& [guid, p] : bg->GetPlayers())
+            if (p && p->GetSession() && p->GetSession()->IsBot())
+                return true;
+        return false;
+    }
+
+    // Valeur JcJ (T1-5, revue JcJ n° 2) : des que l'autre partie est controlee par un joueur (un bot est un joueur), en arene,
+    // en champ de bataille comme en monde ouvert. Remplace l'ancien test « carte d'arene ».
+    bool ControleParUnJoueur(Unit const* u)
+    {
+        return u && u->GetCharmerOrOwnerPlayerOrPlayerItself();
+    }
+
     // Les crochets d'equipement ne couvrent pas tous les retraits (piece portee detruite) : on marque, et on recalcule
     // au premier coup suivant.
     void MarquerSignatures(Player* joueur)
@@ -1609,16 +1777,26 @@ namespace
         joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES)->sale = true;
     }
 
-    void DeclencherSignatures(Player* joueur, uint32& degats)
+    SignaturesActives* Actives(Player* joueur)
     {
-        if (Signatures.empty() || !joueur->IsAlive())
-            return;
         SignaturesActives* a = joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
         if (a->sale)
             RecalculerSignatures(joueur);
-        if (a->actives.empty())
+        return a;
+    }
+
+    // Egide (et tout effet « absorbe_sous_seuil ») : le coup qui ferait passer sous le seuil est absorbe a hauteur de la
+    // valeur (au niveau 80, x niveau / 80 ; valeur JcJ si l'attaquant est controle par un joueur), le reste devient un
+    // bouclier (sort d'effet). Recharge partagee par les sursauts de survie (groupe_sursaut).
+    void DeclencherSignatures(Player* joueur, Unit* attaquant, uint32& degats)
+    {
+        if (Signatures.empty() || !joueur->IsAlive())
+            return;
+        SignaturesActives* a = Actives(joueur);
+        if (a->actives.empty() || NeutraliseEnArene1c1(joueur))
             return;
         Milliseconds const maintenant = GameTime::GetGameTimeMS();
+        bool const jcj = ControleParUnJoueur(attaquant);
         for (SignatureDef const* s : a->actives)
         {
             if (s->effet != "absorbe_sous_seuil" && s->effet != "egide")
@@ -1630,8 +1808,7 @@ namespace
             Milliseconds& recharge = s->groupeSursaut ? a->sursaut : a->recharges[s->enchant];
             if (maintenant < recharge)
                 continue;
-            bool const arene = joueur->GetMap() && joueur->GetMap()->IsBattleArena();
-            uint32 const valeur = uint32(uint64(arene ? s->valeurArene : s->valeur) * joueur->GetLevel() / DEFAULT_MAX_LEVEL);
+            uint32 const valeur = uint32(uint64(jcj ? s->valeurArene : s->valeur) * joueur->GetLevel() / DEFAULT_MAX_LEVEL);
             // Un coup mortel meme apres absorption : rien ne se declenche, la recharge n'est pas consommee.
             if (uint64(degats) >= pv + valeur)
                 continue;
@@ -1648,17 +1825,105 @@ namespace
                     bouclier->ChangeAmount(bp);
             }
             ++DeclenchementsSignatures;
-            LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} absorbe={} reste={}",
-                joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, absorbe, valeur - absorbe);
+            LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} absorbe={} reste={}",
+                joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, absorbe, valeur - absorbe);
             return;   // un seul sursaut par coup
         }
     }
 
-    // Signatures a declencher (Egide : sursaut de survie) sur les degats subis par un joueur.
+    // Coeur de forge (T1-5) : chaque critique (compte par les crochets de ArtisanatPlayer et ArtisanatSorts) charge la
+    // facette ; a SEUIL_CHARGES_COEUR_DE_FORGE, l'aura (sort_effet, duree_ms) est posee et la recharge (recharge_ms)
+    // commence ; pendant la recharge, rien ne se compte. Facette non active (hors des 3 places, piece cassee), arene 1c1
+    // contre un gladiateur : rien. Les charges se voient dans l'aura SORT_AURA_CHARGES_COEUR_DE_FORGE (une pile par charge).
+    void ChargerCoeurDeForge(Player* joueur)
+    {
+        if (!AuraCoeurDeForge || !joueur->IsAlive())
+            return;
+        SignaturesActives* a = Actives(joueur);
+        auto it = std::find_if(a->actives.begin(), a->actives.end(), [](SignatureDef const* s)
+        {
+            return s->effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
+        });
+        if (it == a->actives.end() || NeutraliseEnArene1c1(joueur))
+            return;
+        SignatureDef const* s = *it;
+        Milliseconds const maintenant = GameTime::GetGameTimeMS();
+        Milliseconds& recharge = a->recharges[s->enchant];
+        if (maintenant < recharge)
+            return;
+        uint32 const piles = CoaArtisanatIds::SORT_AURA_CHARGES_COEUR_DE_FORGE;
+        if (++a->chargesCoeur < CoaArtisanatIds::SEUIL_CHARGES_COEUR_DE_FORGE)
+        {
+            if (piles)
+            {
+                Aura* aura = joueur->GetAura(piles, joueur->GetGUID());
+                if (!aura)
+                    aura = joueur->AddAura(piles, joueur);
+                if (aura)
+                    aura->SetStackAmount(uint8(std::min<uint32>(a->chargesCoeur, 255)));
+            }
+            return;
+        }
+        a->chargesCoeur = 0;
+        if (piles)
+            joueur->RemoveAurasDueToSpell(piles);
+        recharge = maintenant + Milliseconds(s->rechargeMs);
+        joueur->CastSpell(joueur, s->sortEffet, true);
+        if (s->dureeMs)
+            if (Aura* aura = joueur->GetAura(s->sortEffet, joueur->GetGUID()))
+            {
+                aura->SetMaxDuration(int32(s->dureeMs));
+                aura->SetDuration(int32(s->dureeMs));
+            }
+        ++DeclenchementsCoeur;
+        LOG_INFO("module", "coa artisanat: coeur de forge declenche joueur={} enchant={} aura={} duree_ms={} recharge_ms={} valeur={} valeur_jcj={}",
+            joueur->GetGUID().GetCounter(), s->enchant, s->sortEffet, s->dureeMs, s->rechargeMs, s->valeur, s->valeurArene);
+    }
+
+    // Coeur de forge pour un coup ou un soin de `source` sur `cible`, en dix-milliemes : le multiplicateur qui ramene ce que
+    // l'aura du DBC a deja applique (ses effets MOD_DAMAGE_PERCENT_DONE / MOD_HEALING_DONE_PERCENT, lus sur l'aura portee)
+    // a la valeur voulue : valeur JcJ (valeur_arene) si la cible est controlee par un joueur, 0 en arene 1c1 contre un
+    // gladiateur, sinon la valeur. 10000 : rien a corriger. Une aura sans effet de jeu (DUMMY) donne la valeur entiere.
+    // Fils de carte : ne lit que source et cible.
+    uint32 CorrectionCoeurDeForge(Unit const* source, Unit const* cible, bool soin)
+    {
+        if (!AuraCoeurDeForge || !source || !source->IsPlayer())
+            return 10000;
+        Aura const* aura = source->GetAura(AuraCoeurDeForge);
+        if (!aura)
+            return 10000;
+        int32 deja = 0;
+        for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+            if (AuraEffect const* e = aura->GetEffect(i))
+                if (e->GetAuraType() == (soin ? SPELL_AURA_MOD_HEALING_DONE_PERCENT : SPELL_AURA_MOD_DAMAGE_PERCENT_DONE))
+                    deja += e->GetAmount();
+        int32 voulu = 0;
+        if (!NeutraliseEnArene1c1(source->ToPlayer()))
+            for (auto const& [enchant, s] : Signatures)
+                if (s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE && s.sortEffet == AuraCoeurDeForge)
+                {
+                    voulu = int32(ControleParUnJoueur(cible) ? s.valeurArene : s.valeur);
+                    break;
+                }
+        if (voulu == deja || 100 + deja <= 0)
+            return 10000;
+        return uint32(std::max<int64>(0, int64(100 + voulu) * 10000 / (100 + deja)));
+    }
+
+    template <typename T>
+    void AppliquerCorrection(T& montant, uint32 dixMilliemes)
+    {
+        if (dixMilliemes != 10000 && montant > 0)
+            montant = T(uint64(montant) * dixMilliemes / 10000);
+    }
+
+    // Signatures a declencher (Egide : sursaut de survie) sur les degats subis par un joueur ; bonus de Coeur de forge.
     class ArtisanatUnit final : public UnitScript
     {
     public:
-        ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true) { }
+        // DealDamage n'a pas d'interrupteur de crochet : ScriptMgr::DealDamage appelle tous les UnitScript (UnitScript.cpp:69).
+        ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true, { UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
+            UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_MODIFY_HEAL_RECEIVED }) { }
 
         // UnitScript::DealDamage (appele pour tous les UnitScript, en tete de Unit::DealDamage, avant la soustraction des
         // PV) recoit le type de degats, contrairement a OnDamage : on exclut la mort instantanee (NODAMAGE, sorts
@@ -1667,10 +1932,119 @@ namespace
         {
             if (degats && attaquant && victime && attaquant != victime && victime->IsPlayer() && type != NODAMAGE
                 && type != SELF_DAMAGE && type != HEAL)
-                DeclencherSignatures(victime->ToPlayer(), degats);
+                DeclencherSignatures(victime->ToPlayer(), attaquant, degats);
             return degats;
         }
+
+        void ModifyMeleeDamage(Unit* cible, Unit* attaquant, uint32& degats) override
+        {
+            AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
+        }
+
+        void ModifySpellDamageTaken(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* /*sort*/) override
+        {
+            AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
+        }
+
+        // Le tic d'un soin sur la duree passe AUSSI par ce crochet, juste avant ModifyHealReceived et dans le meme fil
+        // (SpellAuraEffects.cpp:6827-6828, arguments (soigne, soigneur)) : on ne le corrige pas ici, on le signale.
+        void ModifyPeriodicDamageAurasTick(Unit* cible, Unit* attaquant, uint32& degats, SpellInfo const* sort) override
+        {
+            if (EstTicDeSoin(sort))
+            {
+                TicDeSoinEnCours = true;
+                return;
+            }
+            AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
+        }
+
+        // Deux appelants, deux ordres : Unit::HealBySpell (Unit.cpp:8761) passe (soigneur, soigne) ; le tic de soin
+        // (SpellAuraEffects.cpp:6828) passe (soigne, soigneur), annonce par TicDeSoinEnCours.
+        void ModifyHealReceived(Unit* a, Unit* b, uint32& soin, SpellInfo const* /*sort*/) override
+        {
+            bool const tic = TicDeSoinEnCours;
+            TicDeSoinEnCours = false;
+            Unit* soigneur = tic ? b : a;
+            Unit* soigne = tic ? a : b;
+            AppliquerCorrection(soin, CorrectionCoeurDeForge(soigneur, soigne, true));
+        }
+
+    private:
+        static inline thread_local bool TicDeSoinEnCours = false;
+
+        static bool EstTicDeSoin(SpellInfo const* sort)
+        {
+            return sort && sort->HasAura(SPELL_AURA_PERIODIC_HEAL) && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE)
+                && !sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE_PERCENT) && !sort->HasAura(SPELL_AURA_PERIODIC_LEECH);
+        }
     };
+
+    // Un sort dont le coeur fait passer le resultat par Player::CastItemCombatSpell (Spell.cpp:2929-2931, :2952-2954) : ses
+    // critiques sont comptes par le crochet d'objet de combat, pas ici (sinon deux charges pour un critique).
+    bool PasseParObjetDeCombat(SpellInfo const* info)
+    {
+        return (info->DmgClass == SPELL_DAMAGE_CLASS_MELEE || info->DmgClass == SPELL_DAMAGE_CLASS_RANGED)
+            && !info->HasAttribute(SPELL_ATTR0_CANCELS_AUTO_ATTACK_COMBAT) && !info->HasAttribute(SPELL_ATTR4_SUPPRESS_WEAPON_PROCS);
+    }
+
+    // Critiques des sorts (degats ou soins directs, une fois par cible touchee) pour Coeur de forge. Les tics periodiques ne
+    // passent pas par ce crochet : ils ne chargent pas (accepte en T1).
+    class ArtisanatSorts final : public AllSpellScript
+    {
+    public:
+        ArtisanatSorts() : AllSpellScript("CoaArtisanatSorts", { ALLSPELLHOOK_ON_HIT_RESULT }) { }
+
+        void OnSpellHitResult(Spell* sort, Unit* /*cible*/, uint8 rate, uint32 degats, uint32 soins, bool critique) override
+        {
+            if (!critique || !AuraCoeurDeForge || rate != SPELL_MISS_NONE || (!degats && !soins) || !sort)
+                return;
+            Player* joueur = sort->GetCaster() ? sort->GetCaster()->ToPlayer() : nullptr;
+            SpellInfo const* info = sort->GetSpellInfo();
+            if (!joueur || !info || info->Id == AuraCoeurDeForge || (degats && PasseParObjetDeCombat(info)))
+                return;
+            ChargerCoeurDeForge(joueur);
+        }
+    };
+
+    // Oeuvre legendaire (T1-5) : fabricant = l'artisan (pose par le coeur), facette en 8, recolteur du Coeur de foudre
+    // effectivement consomme en 9. Journal « coa sourcier: oeuvre ... ».
+    void FabriquerOeuvre(Player* joueur, Item* objet, RecopieEnAttente const& attente)
+    {
+        ObjectGuid recolteur;
+        uint32 consommes = 0;
+        for (auto const& [coeur, createur] : attente.materiauxLegendaires)
+            if (!joueur->GetItemByGuid(coeur))
+            {
+                ++consommes;
+                if (!recolteur)
+                    recolteur = createur;
+            }
+        uint32 const facette = PoserFacette(joueur, objet, attente.sort);
+        bool const extrait = PoserExtrait(joueur, objet, recolteur.GetCounter());
+        LOG_INFO("module", "coa sourcier: oeuvre fabriquee joueur={} piece={} ({}) recette={} facette={} coeurs_consommes={} recolteur={} extrait={}",
+            joueur->GetGUID().GetCounter(), objet->GetGUID().GetCounter(), objet->GetEntry(), attente.sort, facette, consommes,
+            recolteur.GetCounter(), extrait ? "pose" : (recolteur ? "NON POSE (ENCHANT_EXTRAIT)" : "aucun recolteur"));
+    }
+
+    // « EXTRAIT?<sac>:<case> » -> « EXTRAIT:<sac>:<case>:<nom> » ; <nom> vide : pas d'emplacement 9 (l'Atelier n'ajoute
+    // aucune ligne) ; « un Sourcier disparu » : le personnage n'existe plus. Position comme EVEIL (PositionServeur).
+    void TraiterExtrait(Player* joueur, std::string_view corps)
+    {
+        std::size_t const sep = corps.find(':');
+        int32 sac = 0, casse = 0;
+        uint8 bag = 0, slot = 0;
+        if (sep == std::string_view::npos || !LireEntier(corps.substr(0, sep), sac) || !LireEntier(corps.substr(sep + 1), casse))
+            return Repondre(joueur, "EXTRAIT_ERR:FORMAT");
+        Item* objet = PositionServeur(joueur, sac, casse, bag, slot) ? joueur->GetItemByPos(bag, slot) : nullptr;
+        if (!objet)
+            return Repondre(joueur, Acore::StringFormat("EXTRAIT_ERR:PIECE:{}:{}", sac, casse));
+        std::string nom;
+        if (CoaArtisanatIds::ENCHANT_EXTRAIT && objet->GetEnchantmentId(EMPLACEMENT_EXTRAIT) == CoaArtisanatIds::ENCHANT_EXTRAIT)
+            if (uint32 const bas = objet->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT))
+                if (!sCharacterCache->GetCharacterNameByGuid(ObjectGuid::Create<HighGuid::Player>(bas), nom))
+                    nom = "un Sourcier disparu";
+        Repondre(joueur, Acore::StringFormat("EXTRAIT:{}:{}:{}", sac, casse, nom));
+    }
 
     // ---- Scripts --------------------------------------------------------------------------------------------------
 
@@ -1701,7 +2075,19 @@ namespace
         ArtisanatPlayer() : PlayerScript("CoaArtisanatPlayer", { PLAYERHOOK_ON_SPELL_CAST, PLAYERHOOK_ON_CREATE_ITEM,
             PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT,
             PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_EQUIP, PLAYERHOOK_ON_UNEQUIP_ITEM, PLAYERHOOK_ON_AFTER_SET_VISIBLE_ITEM_SLOT,
-            PLAYERHOOK_ON_DELETE_FROM_DB }) { }
+            PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_CAN_CAST_ITEM_COMBAT_SPELL }) { }
+
+        // Coeur de forge : coups blancs et sorts de melee ou de distance (Player::CastItemCombatSpell, appele pour CHAQUE
+        // objet porte) ; on ne compte que pour la piece qui porte la facette, une fois par coup. Ne refuse jamais rien.
+        bool OnPlayerCanCastItemCombatSpell(Player* joueur, Unit* /*cible*/, WeaponAttackType /*type*/, uint32 /*procVictime*/,
+            uint32 resultat, Item* objet, ItemTemplate const* /*proto*/) override
+        {
+            if (AuraCoeurDeForge && (resultat & PROC_HIT_CRITICAL) && objet)
+                if (auto it = Signatures.find(objet->GetEnchantmentId(EMPLACEMENT_FACETTE));
+                    it != Signatures.end() && it->second.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE)
+                    ChargerCoeurDeForge(joueur);
+            return true;
+        }
 
         // Personnage supprime : son etat d'artisan part avec lui (le guid peut etre repris apres un redemarrage).
         void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
@@ -1751,6 +2137,18 @@ namespace
             attente->sort = info->Id;
             attente->entreeCreee = creee;
             attente->instant = GameTime::GetGameTimeMS();
+
+            // Oeuvre : le materiau legendaire est un reactif ; on note chaque exemplaire tenu et son recolteur.
+            if (EstOeuvre(creee) && CoaArtisanatIds::OBJET_COEUR_DE_FOUDRE)
+                for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                    if (info->Reagent[i] > 0 && uint32(info->Reagent[i]) == CoaArtisanatIds::OBJET_COEUR_DE_FOUDRE && info->ReagentCount[i])
+                    {
+                        PourChaquePieceTenue(joueur, CoaArtisanatIds::OBJET_COEUR_DE_FOUDRE, [&](Item* coeur)
+                        {
+                            attente->materiauxLegendaires.emplace_back(coeur->GetGUID(), coeur->GetGuidValue(ITEM_FIELD_CREATOR));
+                        });
+                        break;
+                    }
 
             // Renforcement : la piece est l'objet de lancement.
             if (Item* objet = sort->m_CastItem)
@@ -1816,9 +2214,15 @@ namespace
                 objet->SetGuidValue(ITEM_FIELD_CREATOR, source->fabricant);
                 objet->SetState(ITEM_CHANGED, joueur);
             }
-            // Fabrication (aucune piece consommee) : la signature du specialiste (lot T).
+            // Fabrication (aucune piece consommee) : la signature du specialiste (lot T) ; une Oeuvre n'en porte pas a part,
+            // elle porte sa facette (emplacement 8) et le recolteur du materiau legendaire consomme (emplacement 9).
             if (!attente->objetDeLancement && attente->candidats.empty())
-                SignerALaFabrication(joueur, objet, attente->sort);
+            {
+                if (EstOeuvre(objet->GetEntry()))
+                    FabriquerOeuvre(joueur, objet, *attente);
+                else
+                    SignerALaFabrication(joueur, objet, attente->sort);
+            }
             attente->Vider();
         }
 
@@ -1871,13 +2275,31 @@ namespace
             std::string_view corps = std::string_view(message).substr(PREFIXE_ADDON.size());
             bool const eveil = corps.starts_with("EVEIL:");
             bool const talent = corps.starts_with("TALENT:") || corps.starts_with("METIER:") || corps == "TALENTS?";
-            if (!eveil && !talent && !corps.starts_with("AMELIORER:"))
+            bool const extrait = corps.starts_with("EXTRAIT?");
+            if (!eveil && !talent && !extrait && !corps.starts_with("AMELIORER:"))
                 return true;
             // Consomme meme desactive ; jamais relaye a un autre joueur.
             if (destinataire != joueur || message.size() > 255)
                 return false;
-            // Un message d'addon ne passe pas par UpdateSpeakTime : un delai minimal par joueur.
             Milliseconds const maintenant = GameTime::GetGameTimeMS();
+            // EXTRAIT? (infobulle, lecture seule) a son propre delai, court : il ne doit ni bloquer ni etre bloque par
+            // les commandes de l'atelier. Au-dela : EXTRAIT_ERR:DELAI, une fois par fenetre.
+            if (extrait)
+            {
+                RafaleExtrait* d = joueur->CustomData.GetDefault<RafaleExtrait>(CLE_DELAI_EXTRAIT);
+                if (maintenant >= d->debut + FENETRE_EXTRAIT)
+                {
+                    d->debut = maintenant;
+                    d->nombre = 0;
+                }
+                // Toujours une reponse : au-dela du garde-fou, EXTRAIT_ERR:DELAI (l'Atelier redemandera).
+                if (++d->nombre > EXTRAIT_PAR_FENETRE)
+                    Repondre(joueur, "EXTRAIT_ERR:DELAI");
+                else
+                    TraiterExtrait(joueur, corps.substr(8));
+                return false;
+            }
+            // Un message d'addon ne passe pas par UpdateSpeakTime : un delai minimal par joueur.
             DelaiEveil* delai = joueur->CustomData.GetDefault<DelaiEveil>(CLE_DELAI);
             if (maintenant < delai->prochain)
             {
@@ -2025,6 +2447,7 @@ namespace
                 { "set", HandleBancSet, SEC_ADMINISTRATOR, Console::Yes },
                 { "nettoyer", HandleBancNettoyer, SEC_ADMINISTRATOR, Console::Yes },
                 { "talent", HandleBancTalent, SEC_ADMINISTRATOR, Console::Yes },
+                { "extrait", HandleBancExtrait, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
             {
@@ -2572,6 +2995,26 @@ namespace
                 EnvoyerEtat(j);
                 return true;
             }
+            // MJ, lot T1 (spec § 1 : talents legendaires appris par commande de MJ) : inscrit un talent SANS controle (metier,
+            // etage, plafond), dans la table comme un talent appris, pour que SynchroniserMarqueurs ne le retire pas a la
+            // connexion suivante (ce que ferait un simple .learn d'un sort de coa_artisanat_talent_def).
+            if (action == "forcer" && a && LireEntier(*a, n) && n > 0)
+            {
+                if (!Talents.count(uint32(n)))
+                {
+                    handler->PSendSysMessage("talent: forcer {} -> INCONNU (absent de coa_artisanat_talent_def)", n);
+                    return true;
+                }
+                e->sorts.insert(uint32(n));
+                if (!j->HasSpell(uint32(n)))
+                    j->learnSpell(uint32(n));
+                if (TablesPersonnages)
+                    CharacterDatabase.Execute("INSERT IGNORE INTO coa_artisanat_talent (guid, sort) VALUES ({}, {})", j->GetGUID().GetCounter(), n);
+                LOG_INFO("module", "coa artisanat: talent force (MJ) joueur={} sort={}", j->GetGUID().GetCounter(), n);
+                handler->PSendSysMessage("talent: forcer {} -> OK (sans controle)", n);
+                EnvoyerEtat(j);
+                return true;
+            }
             if (action == "oublier" || action == "effacer")
             {
                 OublierTalents(j, action == "effacer");
@@ -2588,7 +3031,7 @@ namespace
                 return true;
             Player* j = handler->GetPlayer();
             if (!j || !ActionTalent(handler, j, action, a, b))
-                handler->SendSysMessage("talent etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier | effacer");
+                handler->SendSysMessage("talent etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | forcer <sort> | oublier | effacer");
             return true;
         }
 
@@ -2692,7 +3135,173 @@ namespace
                 return true;
             }
 
-            handler->SendSysMessage("banc talent <bot> etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | oublier | signature | egide");
+            handler->SendSysMessage("banc talent <bot> etat | points <C|R> <n> | metier <C|R> <skill> | apprendre <sort> | forcer <sort> | oublier | effacer | signature | egide");
+            return true;
+        }
+
+        // ---- .artisanat banc extrait <bot> ... : banc de l'emplacement 9 (T1-1) ----------------------------------------
+        //
+        // poser <enchant> [recolteur] : cree un Heaume palier 10 en sac, pose <enchant> en 9 avec le GUID bas <recolteur>
+        //                               (defaut : le bot) dans les charges, sauvegarde ;
+        // lire                        : chaque piece tenue qui a un emplacement 9 : memoire et item_instance, comparees ;
+        // porter                      : porte la premiere (pour le combat : le bot se bat seul ; relire ensuite) ;
+        // recopie                     : palier suivant (AMELIORER, cout fourni) de la premiere ; recopie verifiee, charges
+        //                               comprises ;
+        // courrier <nom>              : envoie la premiere par courrier a <nom> ; relire avec « objet <guid> » ;
+        // objet <guid>                : item_instance d'un objet, ou qu'il soit (courrier, autre personnage) ;
+        // retirer                     : detruit les pieces de l'artisanat tenues qui ont un emplacement 9.
+        // Aucune ecriture hors du bot (sauf courrier, au destinataire). Royaume PTR seulement.
+
+        // Emplacement 9 lu dans item_instance.enchantments (12 x « id duree charges »). Faux si l'objet n'y est pas.
+        static bool Emplacement9EnBase(uint32 guid, uint32& id, uint32& charges, uint32& proprietaire)
+        {
+            QueryResult r = CharacterDatabase.Query("SELECT enchantments, owner_guid FROM item_instance WHERE guid = {}", guid);
+            if (!r)
+                return false;
+            std::vector<std::string_view> jetons = Acore::Tokenize(r->Fetch()[0].Get<std::string_view>(), ' ', false);
+            proprietaire = r->Fetch()[1].Get<uint32>();
+            std::size_t const base = std::size_t(EMPLACEMENT_EXTRAIT) * MAX_ENCHANTMENT_OFFSET;
+            if (jetons.size() < base + 3)
+                return id = charges = 0, true;
+            id = Acore::StringTo<uint32>(jetons[base]).value_or(0);
+            charges = Acore::StringTo<uint32>(jetons[base + 2]).value_or(0);
+            return true;
+        }
+
+        static std::vector<Item*> PiecesAvecEmplacement9(Player* j)
+        {
+            std::vector<Item*> pieces;
+            for (uint32 entree = ARTISANAT_OBJET_MIN; entree <= ARTISANAT_OBJET_MAX; ++entree)
+                if (EstPieceArtisanat(sObjectMgr->GetItemTemplate(entree)))
+                    PourChaquePieceTenue(j, entree, [&](Item* o) { if (o->GetEnchantmentId(EMPLACEMENT_EXTRAIT)) pieces.push_back(o); });
+            return pieces;
+        }
+
+        static bool HandleBancExtrait(ChatHandler* handler, std::string nom, std::string action, Optional<std::string> a,
+            Optional<std::string> b)
+        {
+            if (!BancPermis(handler))
+                return true;
+            if (action == "objet")
+            {
+                int32 g = 0;
+                uint32 id = 0, charges = 0, proprietaire = 0;
+                if (!a || !LireEntier(*a, g) || g <= 0)
+                    return handler->SendSysMessage("banc extrait: objet <guid de l'objet>"), true;
+                if (!Emplacement9EnBase(uint32(g), id, charges, proprietaire))
+                    return handler->PSendSysMessage("banc extrait: objet {} absent de item_instance.", g), true;
+                handler->PSendSysMessage("banc extrait: objet {} en base : proprietaire={} emplacement 9 = {} charges={}", g, proprietaire, id, charges);
+                return true;
+            }
+            Player* j = Cible(handler, nom);
+            if (!j)
+                return true;
+            int32 n = 0;
+
+            if (action == "poser")
+            {
+                if (!a || !LireEntier(*a, n) || n <= 0)
+                    return handler->SendSysMessage("banc extrait: poser <enchant> [guid bas du recolteur]"), true;
+                uint32 const enchant = uint32(n);
+                std::string const raison = RaisonEnchantementNonNeutre(enchant);
+                // Un type COMBAT_SPELL decompterait les charges : refuse. Inconnu du DBC : accepte (rien ne l'applique), dit.
+                if (!raison.empty() && raison != "inconnu du DBC serveur")
+                    return handler->PSendSysMessage("banc extrait: enchantement {} refuse : {}.", enchant, raison), true;
+                int32 r = int32(j->GetGUID().GetCounter());
+                if (b && (!LireEntier(*b, r) || r <= 0))
+                    return handler->SendSysMessage("banc extrait: recolteur = un guid bas positif."), true;
+                Item* piece = CreerEnSac(j, HEAUME_PALIER10);
+                if (!piece)
+                    return handler->SendSysMessage("banc extrait: sacs pleins."), true;
+                piece->SetEnchantment(EMPLACEMENT_EXTRAIT, enchant, 0, uint32(r), j->GetGUID());
+                piece->SetState(ITEM_CHANGED, j);
+                j->SaveToDB(false, false);
+                uint32 id = 0, charges = 0, proprietaire = 0;
+                bool const enBase = Emplacement9EnBase(piece->GetGUID().GetCounter(), id, charges, proprietaire);
+                handler->PSendSysMessage("banc extrait: pose {} ; enchantement {}{} ; base (ecriture asynchrone, relire) : {}",
+                    Decrire(piece), enchant, raison.empty() ? " neutre" : " (" + raison + ")",
+                    enBase ? Acore::StringFormat("{} charges={}", id, charges) : std::string("pas encore ecrite"));
+                LOG_INFO("module", "coa sourcier: banc emplacement 9 pose bot={} piece={} enchant={} charges={}",
+                    j->GetGUID().GetCounter(), piece->GetGUID().GetCounter(), enchant, r);
+                return true;
+            }
+
+            std::vector<Item*> pieces = PiecesAvecEmplacement9(j);
+            if (action == "lire")
+            {
+                handler->PSendSysMessage("banc extrait: {} piece(s) tenue(s) avec un emplacement 9.", uint32(pieces.size()));
+                for (Item* p : pieces)
+                {
+                    uint32 id = 0, charges = 0, proprietaire = 0;
+                    bool const enBase = Emplacement9EnBase(p->GetGUID().GetCounter(), id, charges, proprietaire);
+                    bool const egal = enBase && id == p->GetEnchantmentId(EMPLACEMENT_EXTRAIT)
+                        && charges == p->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT);
+                    handler->PSendSysMessage("banc extrait: {} {} ; memoire {} charges={} ; base {} ; {}", Decrire(p),
+                        p->IsEquipped() ? "portee" : "en sac", p->GetEnchantmentId(EMPLACEMENT_EXTRAIT),
+                        p->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT),
+                        enBase ? Acore::StringFormat("{} charges={}", id, charges) : std::string("ABSENTE"),
+                        egal ? "IDENTIQUES" : "ECART (sauvegarde en retard ? relire apres saveall)");
+                }
+                return true;
+            }
+            if (pieces.empty())
+                return handler->SendSysMessage("banc extrait: aucune piece avec un emplacement 9 (poser d'abord)."), true;
+            Item* premiere = pieces.front();
+
+            if (action == "porter")
+            {
+                bool const ok = premiere->IsEquipped() || Porter(j, premiere);
+                j->SaveToDB(false, false);
+                handler->PSendSysMessage("banc extrait: {} {}", Decrire(premiere), ok ? "portee" : "NE SE PORTE PAS");
+                return true;
+            }
+            if (action == "recopie")
+            {
+                uint32 const charges = premiere->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT);
+                uint32 const id = premiere->GetEnchantmentId(EMPLACEMENT_EXTRAIT);
+                Item* neuve = EtapeBanc(handler, j, premiere, SorteEtape::Palier, "banc extrait: recopie", false);
+                if (neuve)
+                    handler->PSendSysMessage("banc extrait: piece neuve emplacement 9 = {} charges={} (avant {} charges={}) : {}",
+                        neuve->GetEnchantmentId(EMPLACEMENT_EXTRAIT), neuve->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT), id, charges,
+                        neuve->GetEnchantmentId(EMPLACEMENT_EXTRAIT) == id && neuve->GetEnchantmentCharges(EMPLACEMENT_EXTRAIT) == charges
+                        ? "IDENTIQUES" : "ECART");
+                j->SaveToDB(false, false);
+                return true;
+            }
+            if (action == "courrier")
+            {
+                ObjectGuid const dest = a ? sCharacterCache->GetCharacterGuidByName(*a) : ObjectGuid::Empty;
+                if (!dest || dest == j->GetGUID())
+                    return handler->SendSysMessage("banc extrait: courrier <nom d'un autre personnage existant>"), true;
+                if (premiere->IsEquipped())
+                    return handler->SendSysMessage("banc extrait: la piece est portee ; la mettre en sac d'abord."), true;
+                uint32 const guidPiece = premiere->GetGUID().GetCounter();
+                CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+                j->MoveItemFromInventory(premiere->GetBagSlot(), premiere->GetSlot(), true);
+                premiere->DeleteFromInventoryDB(trans);
+                premiere->SaveToDB(trans);
+                MailDraft draft("Banc emplacement 9", "");
+                draft.AddItem(premiere);
+                draft.SendMailTo(trans, MailReceiver(ObjectAccessor::FindConnectedPlayer(dest), dest.GetCounter()), MailSender(j), MAIL_CHECK_MASK_COPIED);
+                CharacterDatabase.CommitTransaction(trans);
+                j->SaveToDB(false, false);
+                handler->PSendSysMessage("banc extrait: piece {} envoyee a {} (guid {}) ; relire : .artisanat banc extrait - objet {}",
+                    guidPiece, *a, dest.GetCounter(), guidPiece);
+                return true;
+            }
+            if (action == "retirer")
+            {
+                uint32 detruites = 0;
+                for (Item* p : pieces)
+                {
+                    j->DestroyItem(p->GetBagSlot(), p->GetSlot(), true);
+                    ++detruites;
+                }
+                j->SaveToDB(false, false);
+                handler->PSendSysMessage("banc extrait: {} piece(s) detruite(s).", detruites);
+                return true;
+            }
+            handler->SendSysMessage("banc extrait <bot> poser <enchant> [recolteur] | lire | porter | recopie | courrier <nom> | retirer ; banc extrait - objet <guid>");
             return true;
         }
 
@@ -2700,8 +3309,14 @@ namespace
         static bool Conforme(Chasses const& avant, uint32 bonusAvant, Item const* apres)
         {
             for (std::size_t i = 0; i < EMPLACEMENTS_RECOPIES.size(); ++i)
-                if (avant.emplacements[i].id != apres->GetEnchantmentId(EMPLACEMENTS_RECOPIES[i]))
+            {
+                EnchantmentSlot const slot = EMPLACEMENTS_RECOPIES[i];
+                if (avant.emplacements[i].id != apres->GetEnchantmentId(slot))
                     return false;
+                // Signature, facette, recolteur : les charges aussi (le 9 y porte le GUID du recolteur).
+                if (slot >= PROP_ENCHANTMENT_SLOT_0 && avant.emplacements[i].charges != apres->GetEnchantmentCharges(slot))
+                    return false;
+            }
             return bonusAvant == apres->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT)
                 && avant.fabricant == apres->GetGuidValue(ITEM_FIELD_CREATOR);
         }
@@ -2811,5 +3426,6 @@ void AddAscensionArtisanatScripts()
     new ArtisanatPlayer();
     new ArtisanatButinMonde();
     new ArtisanatUnit();
+    new ArtisanatSorts();
     new ArtisanatCommandes();
 }
