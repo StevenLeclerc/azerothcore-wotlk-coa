@@ -1005,6 +1005,31 @@ namespace
     };
     ReglesMonde Monde;
 
+    // Categorie d'une victime. Creature du Directeur (D-PO-48) : elite ordinaire, quels que soient son rang et la carte ;
+    // sinon le rang, l'elite et l'ordinaire passant en Instance dans un donjon. Faux : aucune categorie (rang inconnu).
+    bool CategorieDe(CreatureTemplate const* modele, bool donjon, CategorieMonde& categorie)
+    {
+        if (!modele)
+            return false;
+        if (modele->Entry >= CoaArtisanatIds::PNJ_DIRECTEUR_MIN && modele->Entry <= CoaArtisanatIds::PNJ_DIRECTEUR_MAX)
+        {
+            categorie = CAT_ELITE;
+            return true;
+        }
+        switch (modele->rank)
+        {
+            case CREATURE_ELITE_WORLDBOSS: categorie = CAT_BOSS; break;
+            case CREATURE_ELITE_RAREELITE: categorie = CAT_RARE_ELITE; break;
+            case CREATURE_ELITE_RARE:      categorie = CAT_RARE; break;
+            case CREATURE_ELITE_ELITE:     categorie = CAT_ELITE; break;
+            case CREATURE_ELITE_NORMAL:    categorie = CAT_ORDINAIRE; break;
+            default: return false;
+        }
+        if ((categorie == CAT_ELITE || categorie == CAT_ORDINAIRE) && donjon)
+            categorie = CAT_INSTANCE;
+        return true;
+    }
+
     // Lu au demarrage et a chaque .reload config. Tout est a 0 par defaut : rien ne tombe sans configuration.
     void ChargerReglesMonde()
     {
@@ -1129,17 +1154,8 @@ namespace
             }
 
             CategorieMonde categorie;
-            switch (victime->GetCreatureTemplate()->rank)
-            {
-                case CREATURE_ELITE_WORLDBOSS: categorie = CAT_BOSS; break;
-                case CREATURE_ELITE_RAREELITE: categorie = CAT_RARE_ELITE; break;
-                case CREATURE_ELITE_RARE:      categorie = CAT_RARE; break;
-                case CREATURE_ELITE_ELITE:     categorie = CAT_ELITE; break;
-                case CREATURE_ELITE_NORMAL:    categorie = CAT_ORDINAIRE; break;
-                default: return;   // CREATURE_UNKNOWN (rang 5) : rien
-            }
-            if ((categorie == CAT_ELITE || categorie == CAT_ORDINAIRE) && victime->GetMap()->IsDungeon())
-                categorie = CAT_INSTANCE;
+            if (!CategorieDe(victime->GetCreatureTemplate(), victime->GetMap()->IsDungeon(), categorie))
+                return;   // CREATURE_UNKNOWN (rang 5) : rien
 
             for (std::size_t q = 0; q < 3; ++q)
             {
@@ -2614,6 +2630,7 @@ namespace
                 { "extrait", HandleBancExtrait, SEC_ADMINISTRATOR, Console::Yes },
                 { "palier", HandleBancPalier, SEC_ADMINISTRATOR, Console::Yes },
                 { "rang", HandleBancRang, SEC_ADMINISTRATOR, Console::Yes },
+                { "butin", HandleBancButin, SEC_ADMINISTRATOR, Console::Yes },
                 { "garde", HandleBancGarde, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
@@ -3692,6 +3709,36 @@ namespace
                     return sort->Id;
                 }
             return 0;
+        }
+
+        // .artisanat banc butin <entree> [rang] : categorie des materiaux de monde d'un modele de creature (dehors et en
+        // donjon) et ses taux en configuration ; [rang] remplace le rang du modele (simulation, rien n'est ecrit). Lecture seule.
+        static bool HandleBancButin(ChatHandler* handler, uint32 entree, Optional<uint32> rang)
+        {
+            if (!BancPermis(handler))
+                return true;
+            CreatureTemplate const* modele = sObjectMgr->GetCreatureTemplate(entree);
+            if (!modele)
+                return handler->PSendSysMessage("banc butin: creature {} inconnue.", entree), true;
+            CreatureTemplate copie = *modele;
+            if (rang)
+                copie.rank = *rang;
+            for (bool const donjon : { false, true })
+            {
+                CategorieMonde c;
+                if (!CategorieDe(&copie, donjon, c))
+                {
+                    handler->PSendSysMessage("banc butin: {} « {} » rang {} {} : aucune categorie", entree, modele->Name, copie.rank,
+                        donjon ? "en donjon" : "dehors");
+                    continue;
+                }
+                bool const directeur = entree >= CoaArtisanatIds::PNJ_DIRECTEUR_MIN && entree <= CoaArtisanatIds::PNJ_DIRECTEUR_MAX;
+                handler->PSendSysMessage("banc butin: {} « {} » rang {}{} {} -> {}{} ; taux bruts (humain, victime qui donne de l'experience) "
+                    "vert {} %, rare {} %, epique {} % ; materiaux {}", entree, modele->Name, copie.rank, rang ? " (simule)" : "",
+                    donjon ? "en donjon" : "dehors", NOMS_CATEGORIES[c], directeur ? " (plage du Directeur, D-PO-48)" : "",
+                    Monde.chances[c][0], Monde.chances[c][1], Monde.chances[c][2], Monde.actif ? "actifs" : "coupes");
+            }
+            return true;
         }
 
         static constexpr uint32 FABRICANT_BANC_RANG = 4242;   // GUID bas de fabricant d'essai (pas le bot)

@@ -73,6 +73,13 @@ namespace CoaArtisanatIds
     // <forme> est la forme de la ligne coa_artisanat_signature de la facette (ex. « facette:coeur_de_forge »).
     constexpr char const* PREFIXE_TALENT_FACETTE = "facette:";
 
+    // Creatures du Directeur (mod-playerbots, EV_ENTREE_MIN/MAX de CoaDirecteur) : au butin des materiaux de monde,
+    // classees en elite ordinaire quel que soit leur rang (D-PO-48), rang 0 compris (monstres de vagues). Comprend aussi
+    // 9105000-9105099 (Colosse d'orage...). Meme plage que DIRECTEUR_EVENEMENT_ENTREE_MIN/MAX (AscensionCompat.cpp) et
+    // EV_ENTREE_MIN/MAX (mod-playerbots, CoaDirecteur.cpp) : a changer ensemble.
+    constexpr uint32 PNJ_DIRECTEUR_MIN = 9100000;
+    constexpr uint32 PNJ_DIRECTEUR_MAX = 9109999;
+
     // ---- Dosages [H] (spec T1-4, conception § 2) ------------------------------------------------------------------
 
     constexpr uint32 SEUIL_CHARGES_COEUR_DE_FORGE = 10;         // critiques pour declencher l'aura
