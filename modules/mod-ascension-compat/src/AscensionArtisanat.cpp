@@ -2613,6 +2613,7 @@ namespace
                 { "talent", HandleBancTalent, SEC_ADMINISTRATOR, Console::Yes },
                 { "extrait", HandleBancExtrait, SEC_ADMINISTRATOR, Console::Yes },
                 { "palier", HandleBancPalier, SEC_ADMINISTRATOR, Console::Yes },
+                { "rang", HandleBancRang, SEC_ADMINISTRATOR, Console::Yes },
                 { "garde", HandleBancGarde, SEC_ADMINISTRATOR, Console::Yes },
             };
             static ChatCommandTable artisanat =
@@ -3670,6 +3671,244 @@ namespace
                 return true;
             }
             handler->SendSysMessage("banc garde <bot> equiper <entree,...> | signer <enchant,...|aucun> | lancer <s> [pression %] | lire | rendre");
+            return true;
+        }
+
+        // ---- .artisanat banc rang <bot> <entree> [n] [garder] : renforcements de rang par le sort de l'objet (D-PO-46) ------
+        //
+        // Cree <entree> en sac (fabricant = le bot), y pose un enchantement permanent, un temporaire de 30 min, des gemmes
+        // dans ses chasses, le recolteur en 9 (le bot), la facette Coeur de forge en 8 si c'est une Oeuvre, sinon une
+        // signature en 7 ; la porte (l'equipement d'origine revient a la fin). Puis <n> renforcements (1-5) : pour chacun,
+        // le sort de l'objet QUI CREE une piece de l'artisanat (pas le premier : sur une Oeuvre, le premier est la lueur),
+        // refus sans reactifs et au niveau 79 au premier, reactifs fournis, couts et recopie (Conforme : enchantements,
+        // charges des emplacements 7-9, fabricant) verifies, gabarit de la piece neuve (sorts) rapporte. Reactifs du bot remis
+        // a leur niveau d'avant ; la derniere piece est detruite, sauf « garder ».
+        static uint32 SortDeCreation(ItemTemplate const* proto, uint8& index)
+        {
+            for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+                if (SpellInfo const* sort = sSpellMgr->GetSpellInfo(proto->Spells[i].SpellId); sort && EntreeCreeeArtisanat(sort))
+                {
+                    index = i;
+                    return sort->Id;
+                }
+            return 0;
+        }
+
+        static constexpr uint32 FABRICANT_BANC_RANG = 4242;   // GUID bas de fabricant d'essai (pas le bot)
+
+        static bool HandleBancRang(ChatHandler* handler, std::string nom, uint32 entree, Optional<uint32> nombre,
+            Optional<std::string> option)
+        {
+            if (!BancPermis(handler))
+                return true;
+            bool const garder = option && *option == "garder";
+            if (option && !garder)
+                return handler->PSendSysMessage("banc rang: option inconnue « {} » (seule : garder).", *option), true;
+            uint32 const n = nombre.value_or(1);
+            if (n < 1 || n > 5)
+                return handler->SendSysMessage("banc rang: <bot> <entree> [1-5] [garder]"), true;
+            Player* j = Cible(handler, nom);
+            if (!j)
+                return true;
+            if (j->GetLevel() != NIVEAU_EVEIL)
+                return handler->PSendSysMessage("banc rang: {} doit etre niveau 80 (il est {}).", nom, uint32(j->GetLevel())), true;
+            if (j->IsInFlight())
+                return handler->SendSysMessage("banc rang: le bot est en vol, relancer quand il sera pose."), true;
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
+            uint8 index = 0;
+            if (!EstPieceArtisanat(proto) || !SortDeCreation(proto, index))
+                return handler->PSendSysMessage("banc rang: {} n'est pas une piece de l'artisanat avec un sort de renforcement.", entree), true;
+            if (j->IsMounted())
+            {
+                j->Dismount();
+                j->RemoveAurasByType(SPELL_AURA_MOUNTED);
+            }
+            // Une case pour la piece, une pour chaque reactif de la chaine et une marge : les drapeaux de lancement du banc
+            // sautent le controle de place (Spell.cpp, !IsTriggered()), la piece neuve serait perdue sacs pleins.
+            if (CasesLibres(j) < 2 + 3 * n)
+                return handler->PSendSysMessage("banc rang: il faut {} cases libres ({} libres).", 2 + 3 * n, CasesLibres(j)), true;
+            Item* piece = CreerEnSac(j, entree);
+            if (!piece)
+                return handler->SendSysMessage("banc rang: sacs pleins."), true;
+            // Fabricant distinct du bot : le coeur pose le lanceur comme fabricant de la piece neuve ; avec le bot comme
+            // fabricant d'origine, « Conforme » ne prouverait pas la recopie.
+            piece->SetGuidValue(ITEM_FIELD_CREATOR, ObjectGuid::Create<HighGuid::Player>(FABRICANT_BANC_RANG));
+            piece->SetState(ITEM_CHANGED, j);
+            Sertir(j, piece);
+            PoserEnchantement(j, piece, PERM_ENCHANTMENT_SLOT, EnchantementDeObjet(PARCHEMIN), 0);
+            PoserEnchantement(j, piece, TEMP_ENCHANTMENT_SLOT, EnchantementDeObjet(HUILE), 30 * MINUTE * IN_MILLISECONDS);
+            PoserExtrait(j, piece, j->GetGUID().GetCounter());
+            uint32 marque = 0;
+            // Oeuvre : la facette Coeur de forge ; autre piece : la signature de plus petit enchantement (hors facette).
+            for (auto const& [enchant, sd] : Signatures)
+            {
+                bool const facette = sd.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
+                if (EstOeuvre(entree) ? (facette && !marque) : (!facette && (!marque || enchant < marque)))
+                    marque = enchant;
+            }
+            if (marque)
+                PoserEnchantement(j, piece, EstOeuvre(entree) ? EMPLACEMENT_FACETTE : EMPLACEMENT_SIGNATURE, marque, 0);
+            // Porter : l'equipement d'origine a cet emplacement est note pour revenir a la fin.
+            uint8 const emplacement = j->FindEquipSlot(proto, NULL_SLOT, true);
+            Item* origine = emplacement != NULL_SLOT ? j->GetItemByPos(INVENTORY_SLOT_BAG_0, emplacement) : nullptr;
+            ObjectGuid const guidOrigine = origine ? origine->GetGUID() : ObjectGuid::Empty;
+            if (emplacement == NULL_SLOT || !PorterA(j, piece, emplacement))
+            {
+                j->DestroyItem(piece->GetBagSlot(), piece->GetSlot(), true);
+                return handler->PSendSysMessage("banc rang: {} ne se porte pas sur {}.", entree, nom), true;
+            }
+            handler->PSendSysMessage("banc rang: depart {} ; {}", Decrire(piece), !marque
+                ? std::string("AUCUNE signature ni facette en table : emplacements 7-8 non eprouves")
+                : Acore::StringFormat("marque {} en {}", marque, EstOeuvre(entree) ? "8 (facette)" : "7 (signature)"));
+
+            // Reactifs de toute la chaine, tenus avant : remis a ce niveau a la fin.
+            std::map<uint32, uint32> tenus;
+            for (uint32 e = entree, k = 0; k < n; ++k)
+            {
+                ItemTemplate const* pr = sObjectMgr->GetItemTemplate(e);
+                uint8 ix = 0;
+                SpellInfo const* sort = pr ? sSpellMgr->GetSpellInfo(SortDeCreation(pr, ix)) : nullptr;
+                if (!sort)
+                    break;
+                for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                    if (sort->Reagent[i] > 0 && !tenus.count(uint32(sort->Reagent[i])))
+                        tenus[uint32(sort->Reagent[i])] = j->GetItemCount(uint32(sort->Reagent[i]), false);
+                e = EntreeCreeeArtisanat(sort);
+            }
+
+            TriggerCastFlags const drapeaux = TriggerCastFlags(TRIGGERED_CAST_DIRECTLY | TRIGGERED_IGNORE_GCD
+                | TRIGGERED_IGNORE_SPELL_AND_CATEGORY_CD);
+            ObjectGuid courant = piece->GetGUID();
+            auto lancer = [&](SpellInfo const* sort) -> SpellCastResult
+            {
+                Item* p = j->GetItemByGuid(courant);
+                return p ? j->CastSpell(j, sort, drapeaux, p) : SPELL_FAILED_UNKNOWN;
+            };
+            uint32 conformes = 0;
+            for (uint32 k = 1; k <= n; ++k)
+            {
+                Item* p = j->GetItemByGuid(courant);
+                uint8 ix = 0;
+                SpellInfo const* sort = p ? sSpellMgr->GetSpellInfo(SortDeCreation(p->GetTemplate(), ix)) : nullptr;
+                if (!sort)
+                {
+                    handler->PSendSysMessage("banc rang: renforcement {} : plus de sort de renforcement sur {}.", k, p ? p->GetEntry() : 0);
+                    break;
+                }
+                if (!p->IsEquipped() && !PorterA(j, p, emplacement))
+                {
+                    handler->PSendSysMessage("banc rang: renforcement {} : la piece ne se porte pas.", k);
+                    break;
+                }
+                if (k == 1)
+                {
+                    uint32 const cree = EntreeCreeeArtisanat(sort);
+                    // Un refus qui n'a pas lieu cree un rang : on le retrouve et on le detruit (rien ne reste au bot).
+                    auto testRefus = [&](char const* tag, SpellCastResult attendu) -> bool
+                    {
+                        std::vector<ObjectGuid> avantTest;
+                        PourChaquePieceTenue(j, cree, [&](Item* o) { avantTest.push_back(o->GetGUID()); });
+                        SpellCastResult const r = lancer(sort);
+                        bool const intacte = j->GetItemByGuid(courant) != nullptr;
+                        uint32 fuites = 0;
+                        std::vector<Item*> nouvelles;
+                        PourChaquePieceTenue(j, cree, [&](Item* o)
+                        {
+                            if (std::find(avantTest.begin(), avantTest.end(), o->GetGUID()) == avantTest.end())
+                                nouvelles.push_back(o);
+                        });
+                        for (Item* o : nouvelles)
+                        {
+                            j->DestroyItem(o->GetBagSlot(), o->GetSlot(), true);
+                            ++fuites;
+                        }
+                        handler->PSendSysMessage("banc rang: {} -> resultat {} (attendu {}) {} ; piece intacte={}{}", tag, uint32(r),
+                            uint32(attendu), r == attendu ? "OK" : "ECART", intacte ? "oui" : "NON",
+                            fuites ? Acore::StringFormat(" ; {} rang(s) cree(s) par erreur, detruit(s)", fuites) : std::string());
+                        return intacte;
+                    };
+                    for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                        if (sort->Reagent[i] > 0)
+                            if (uint32 const t = j->GetItemCount(uint32(sort->Reagent[i]), false))
+                                j->DestroyItemCount(uint32(sort->Reagent[i]), t, true);
+                    if (!testRefus("sans reactifs", SPELL_FAILED_REAGENTS))
+                        break;
+                    for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                        if (sort->Reagent[i] > 0)
+                            Completer(j, uint32(sort->Reagent[i]), sort->ReagentCount[i]);
+                    j->SetLevel(NIVEAU_EVEIL - 1);
+                    bool const intacte = testRefus("niveau 79 (condition 27)", SPELL_FAILED_CUSTOM_ERROR);
+                    j->SetLevel(NIVEAU_EVEIL);
+                    if (!intacte)
+                        break;
+                }
+                for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                    if (sort->Reagent[i] > 0)
+                        Completer(j, uint32(sort->Reagent[i]), sort->ReagentCount[i]);
+                p = j->GetItemByGuid(courant);
+                uint32 const attendu = EntreeCreeeArtisanat(sort);
+                std::vector<ObjectGuid> dejaLa;
+                PourChaquePieceTenue(j, attendu, [&](Item* o) { dejaLa.push_back(o->GetGUID()); });
+                std::array<uint32, MAX_SPELL_REAGENTS> avantReactifs{};
+                for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                    if (sort->Reagent[i] > 0)
+                        avantReactifs[i] = j->GetItemCount(uint32(sort->Reagent[i]), false);
+                Chasses const avant = Photographier(j, p);
+                uint32 const bonusAvant = p->GetEnchantmentId(BONUS_ENCHANTMENT_SLOT);
+                SpellCastResult const r = lancer(sort);
+                Item* neuve = nullptr;
+                PourChaquePieceTenue(j, attendu, [&](Item* o)
+                {
+                    if (!neuve && std::find(dejaLa.begin(), dejaLa.end(), o->GetGUID()) == dejaLa.end())
+                        neuve = o;
+                });
+                std::string couts;
+                bool coutJuste = true;
+                for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+                {
+                    if (sort->Reagent[i] <= 0)
+                        continue;
+                    uint32 const apres = j->GetItemCount(uint32(sort->Reagent[i]), false);
+                    uint32 const pris = avantReactifs[i] >= apres ? avantReactifs[i] - apres : 0;
+                    coutJuste = coutJuste && pris == sort->ReagentCount[i];
+                    couts += Acore::StringFormat(" {}:{}/{}", sort->Reagent[i], pris, sort->ReagentCount[i]);
+                }
+                if (r != SPELL_CAST_OK || !neuve)
+                {
+                    handler->PSendSysMessage("banc rang: renforcement {} sort {} -> resultat {}, piece {} absente ; couts{}", k, sort->Id,
+                        uint32(r), attendu, couts);
+                    break;
+                }
+                bool const conforme = Conforme(avant, bonusAvant, neuve);
+                conformes += conforme ? 1 : 0;
+                std::string sorts;
+                for (uint8 i = 0; i < MAX_ITEM_PROTO_SPELLS; ++i)
+                    if (uint32 const id = neuve->GetTemplate()->Spells[i].SpellId)
+                        sorts += Acore::StringFormat(" {}:{}/{}", i + 1, id, uint32(neuve->GetTemplate()->Spells[i].SpellTrigger));
+                handler->PSendSysMessage("banc rang: renforcement {} sort {} (emplacement de sort {}) -> {} niveau d'objet {} ; recopie {} ; ancienne detruite={} ; couts{} {} ; sorts du gabarit{}",
+                    k, sort->Id, uint32(ix) + 1, Decrire(neuve), neuve->GetTemplate()->ItemLevel, conforme ? "CONFORME" : "ECART",
+                    j->GetItemByGuid(avant.source) ? "non" : "oui", couts, coutJuste ? "JUSTES" : "FAUX", sorts);
+                courant = neuve->GetGUID();
+            }
+            handler->PSendSysMessage("banc rang: {} renforcement(s) sur {} CONFORME(S)", conformes, n);
+            LOG_INFO("module", "coa artisanat: banc rang bot={} depart={} renforcements={} conformes={}", j->GetGUID().GetCounter(),
+                entree, n, conformes);
+
+            // Remise en etat : derniere piece detruite (sauf garder), equipement d'origine remis, reactifs a leur niveau.
+            if (Item* derniere = j->GetItemByGuid(courant); derniere && !garder)
+                j->DestroyItem(derniere->GetBagSlot(), derniere->GetSlot(), true);
+            if (Item* o = guidOrigine ? j->GetItemByGuid(guidOrigine) : nullptr; o && !o->IsEquipped()
+                && !j->GetItemByPos(INVENTORY_SLOT_BAG_0, emplacement))
+                PorterA(j, o, emplacement);
+            for (auto const& [objet, avant] : tenus)
+            {
+                uint32 const maintenant = j->GetItemCount(objet, false);
+                if (maintenant > avant)
+                    j->DestroyItemCount(objet, maintenant - avant, true);
+                else if (maintenant < avant)
+                    Completer(j, objet, avant);
+            }
+            j->SaveToDB(false, false);
             return true;
         }
 
