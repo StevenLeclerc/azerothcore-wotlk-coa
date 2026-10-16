@@ -81,6 +81,47 @@ namespace CoaArtisanatIds
     constexpr uint32 PNJ_DIRECTEUR_MIN = 9100000;
     constexpr uint32 PNJ_DIRECTEUR_MAX = 9109999;
 
+    // ---- Valeur JcJ des bonus « Moisson » de la Nuit (D-PO-49 ; sorts de dev-monde 176cbbf ; valeurs du PO, 16/10) ----
+    //
+    // Auras declenchees a la mort d'un ennemi (aura 42 des bonus 6 et 8 pieces) : la valeur JcJ s'applique a toute la duree
+    // de l'aura si, au moment ou elle est posee, le porteur est en combat contre une unite controlee par un joueur, ou en
+    // champ de bataille ou en arene (meme regle que les soins de Coeur de forge). Le declenchement a lieu dans Unit::Kill
+    // AVANT l'arret du combat de la victime (proc a Unit.cpp:14842, setDeathState a :14897 qui appelle CombatStop) : un
+    // joueur tue compte donc encore. En arene 1c1 contre un gladiateur : aura laissee, montants a 0. Degats d'Ombre
+    // declenches : valeur JcJ si la cible est controlee par un joueur, 0 en arene 1c1. Non ramenes : le soin de 5 % (9112073)
+    // et le mana de 4 % (9112081), effets instantanes hors aura.
+    struct MoissonAura
+    {
+        uint32 sort;
+        uint8 effet;        // index de l'effet d'aura a ramener
+        uint32 auraType;    // type d'aura attendu (temoin au demarrage)
+        int32 normal;       // valeur du DBC (BasePoints + 1)
+        int32 jcj;
+    };
+    constexpr std::array<MoissonAura, 8> MOISSON_AURAS =
+    {{
+        { 9112072, 0, 79, 8, 4 },        // degats physiques en %
+        { 9112073, 1, 29, 120, 80 },     // Force
+        { 9112074, 0, 99, 250, 160 },    // puissance d'attaque
+        { 9112074, 1, 124, 250, 160 },   // puissance d'attaque a distance
+        { 9112077, 0, 138, 6, 3 },       // hate de melee en %
+        { 9112078, 0, 29, 120, 80 },     // Agilite
+        { 9112081, 1, 13, 120, 80 },     // puissance des sorts (degats)
+        { 9112081, 2, 135, 120, 80 },    // puissance des sorts (soins)
+    }};
+    struct MoissonDegats
+    {
+        uint32 sort;
+        int32 normal;
+        int32 jcj;
+    };
+    constexpr std::array<MoissonDegats, 3> MOISSON_DEGATS =
+    {{
+        { 9112076, 1200, 600 },
+        { 9112079, 900, 450 },
+        { 9112083, 1400, 700 },
+    }};
+
     // ---- Dosages [H] (spec T1-4, conception § 2) ------------------------------------------------------------------
 
     constexpr uint32 SEUIL_CHARGES_COEUR_DE_FORGE = 10;         // critiques pour declencher l'aura

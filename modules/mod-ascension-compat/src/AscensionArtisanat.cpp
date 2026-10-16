@@ -1924,6 +1924,83 @@ namespace
         return soigne && (soigne->GetCombatManager().HasPvPCombat() || soigne->GetCombatManager().HasPvECombatWithPlayers());
     }
 
+    // ---- Valeur JcJ des bonus « Moisson » (D-PO-49, AscensionArtisanatIds.h : regle et valeurs) ----------------------
+    bool MoissonVerifiee = false;   // temoin du demarrage : chaque sort et type d'aura conforme a la table
+
+    void VerifierMoisson()
+    {
+        uint32 ok = 0, total = 0;
+        for (CoaArtisanatIds::MoissonAura const& m : CoaArtisanatIds::MOISSON_AURAS)
+        {
+            ++total;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(m.sort);
+            if (info && info->Effects[m.effet].ApplyAuraName == m.auraType && info->Effects[m.effet].CalcValue() == m.normal)
+                ++ok;
+            else
+                LOG_ERROR("module", "coa artisanat: moisson : sort {} effet {} : attendu aura {} valeur {}, lu {} / {}", m.sort,
+                    uint32(m.effet), m.auraType, m.normal, info ? uint32(info->Effects[m.effet].ApplyAuraName) : 0,
+                    info ? info->Effects[m.effet].CalcValue() : 0);
+        }
+        for (CoaArtisanatIds::MoissonDegats const& m : CoaArtisanatIds::MOISSON_DEGATS)
+        {
+            ++total;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(m.sort);
+            if (info && info->Effects[EFFECT_0].Effect == SPELL_EFFECT_SCHOOL_DAMAGE && info->Effects[EFFECT_0].CalcValue() == m.normal)
+                ++ok;
+            else
+                LOG_ERROR("module", "coa artisanat: moisson : sort de degats {} : attendu {} points, lu {}", m.sort, m.normal,
+                    info ? info->Effects[EFFECT_0].CalcValue() : 0);
+        }
+        MoissonVerifiee = ok == total;
+        LOG_INFO("module", "coa artisanat: moisson jcj : {}/{} effets conformes, valeur JcJ {}", ok, total,
+            MoissonVerifiee ? "active" : "INERTE (donnees absentes ou differentes)");
+    }
+
+    bool EstSortMoisson(uint32 id)
+    {
+        return id >= 9112072 && id <= 9112083;   // plage des sorts declenches (table de AscensionArtisanatIds.h)
+    }
+
+    // Aura Moisson posee sur un joueur : valeur JcJ (regle : en combat contre un joueur, ou en champ de bataille / arene, au
+    // moment de la pose), 0 en arene 1c1 contre un gladiateur. Ramene chaque effet a une valeur absolue : sans cumul si
+    // l'aura est rafraichie (le coeur recalcule alors le montant avant ce crochet).
+    void AppliquerMoisson(Player* joueur, Aura* aura)
+    {
+        bool const neutre = NeutraliseEnArene1c1(joueur);
+        bool const jcj = neutre || SoinEnJcJ(joueur, joueur);
+        if (!jcj)
+            return;
+        uint32 ramenes = 0;
+        for (CoaArtisanatIds::MoissonAura const& m : CoaArtisanatIds::MOISSON_AURAS)
+            if (m.sort == aura->GetId())
+                if (AuraEffect* e = aura->GetEffect(m.effet))
+                    if (e->GetAuraType() == AuraType(m.auraType))
+                    {
+                        e->ChangeAmount(neutre ? 0 : m.jcj);
+                        ++ramenes;
+                    }
+        if (ramenes)
+            LOG_DEBUG("module", "coa artisanat: moisson joueur={} aura={} effets={} valeur={}", joueur->GetGUID().GetCounter(),
+                aura->GetId(), ramenes, neutre ? "0 (arene 1c1)" : "JcJ");
+    }
+
+    // Degats d'Ombre Moisson : valeur JcJ si la cible est controlee par un joueur, 0 en arene 1c1 contre un gladiateur.
+    template <typename T>
+    void CorrigerDegatsMoisson(Unit const* attaquant, Unit const* cible, SpellInfo const* sort, T& degats)
+    {
+        if (!MoissonVerifiee || !sort || !EstSortMoisson(sort->Id) || degats <= 0 || !attaquant || !attaquant->IsPlayer())
+            return;
+        for (CoaArtisanatIds::MoissonDegats const& m : CoaArtisanatIds::MOISSON_DEGATS)
+            if (m.sort == sort->Id)
+            {
+                if (NeutraliseEnArene1c1(attaquant->ToPlayer()))
+                    degats = 0;
+                else if (ControleParUnJoueur(cible))
+                    degats = T(int64(degats) * m.jcj / m.normal);
+                return;
+            }
+    }
+
     // Coeur de forge pour un coup ou un soin de `source` sur `cible`, en dix-milliemes : le multiplicateur qui ramene ce que
     // l'aura du DBC a deja applique (ses effets MOD_DAMAGE_PERCENT_DONE / MOD_HEALING_DONE_PERCENT, lus sur l'aura portee)
     // a la valeur voulue : valeur JcJ (valeur_arene) pour un coup sur une cible controlee par un joueur ou pour un soin en JcJ
@@ -2040,7 +2117,14 @@ namespace
         // DealDamage n'a pas d'interrupteur de crochet : ScriptMgr::DealDamage appelle tous les UnitScript (UnitScript.cpp:69).
         ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true, { UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
             UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_DAMAGE, UNITHOOK_ON_HEAL,
-            UNITHOOK_ON_UNIT_DEATH }) { }
+            UNITHOOK_ON_UNIT_DEATH, UNITHOOK_ON_AURA_APPLY }) { }
+
+        // Moisson (D-PO-49) : apres l'application des effets (Unit.cpp:5150) et a chaque rafraichissement (:5009).
+        void OnAuraApply(Unit* porteur, Aura* aura) override
+        {
+            if (MoissonVerifiee && aura && EstSortMoisson(aura->GetId()) && porteur && porteur->IsPlayer())
+                AppliquerMoisson(porteur->ToPlayer(), aura);
+        }
 
         // Banc G1 : apres DealDamage (Egide comprise) et l'AI de la victime, avant la soustraction (Unit.cpp:991-1006).
         void OnDamage(Unit* attaquant, Unit* victime, uint32& degats) override
@@ -2089,8 +2173,9 @@ namespace
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
         }
 
-        void ModifySpellDamageTaken(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* /*sort*/) override
+        void ModifySpellDamageTaken(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort) override
         {
+            CorrigerDegatsMoisson(attaquant, cible, sort, degats);
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
         }
 
@@ -2248,6 +2333,7 @@ namespace
             ChargerEtapes();
             ChargerReglesMonde();
             ChargerTalents();
+            VerifierMoisson();   // apres le chargement des sorts (spell_dbc compris)
         }
 
         // Au demarrage, ce crochet passe avant le chargement des objets : les regles se lisent alors dans OnStartup.
