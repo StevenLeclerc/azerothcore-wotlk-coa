@@ -2060,13 +2060,17 @@ namespace
     // correction sur l'etat courant, comme avant. PERIODIC_DAMAGE_PERCENT (% des PV max) ne recoit aucun bonus du lanceur :
     // jamais corrige.
     // Ecrit par OnAuraApply (pose, rafraichissement), efface par OnAuraRemove, lu par le tic : tous sur le fil de la carte
-    // de la cible. Limite acceptee : un recalcul du montant sans OnAuraApply (perte d'une pile par ModStackAmount(-1),
-    // RecalculateAmountOfEffects) garde la part retenue a la pose precedente.
+    // de la cible. La part figee vient de AuraEffect::m_pctMods (passe a SpellDamageBonusDone, Unit.cpp:9198), recalcule
+    // seulement a la creation de l'aura (SpellAuraEffects.cpp:441) et par Aura::RefreshTimers (SpellAuras.cpp:873) ; un
+    // rafraichissement SANS RefreshTimers (ModStackAmount, SpellAuras.cpp:992 : StackAmount nul et SPELL_ATTR1_AURA_UNIQUE)
+    // garde donc la part de la pose precedente : on garde alors ce qui est retenu (d'ou une entree meme quand la part est
+    // nulle, pour tout DoT d'un joueur). ModStackAmount(-1) et RecalculateAmountOfEffects gardent aussi m_pctMods : coherent.
+    // Limite acceptee : une aura rechargee de la base a la connexion, lanceur absent, n'est pas corrigee.
     std::string const CLE_COEUR_DOT = "CoaArtisanatCoeurDeForgeDot";
     struct CoeurDeForgeDot
     {
         Aura const* aura = nullptr;   // identite seulement (jamais dereferencee) : l'effacement ne vise que cette aura
-        int32 deja = 0;
+        int32 deja = 0;               // 0 : DoT pose sans Coeur de forge, rien a corriger
     };
     struct CoeurDeForgeDots final : public DataMap::Base
     {
@@ -2083,13 +2087,26 @@ namespace
     {
         if (!AuraCoeurDeForge || !porteur || !aura || aura->GetType() != UNIT_AURA_TYPE || !EstDotAvecBonusDuLanceur(aura->GetSpellInfo()))
             return;
-        Unit const* lanceur = aura->GetCaster();
-        int32 const deja = (lanceur && lanceur->IsPlayer()) ? CoeurDeForgePorte(lanceur, false) : 0;
         std::pair<ObjectGuid, uint32> const cle{ aura->GetCasterGUID(), aura->GetId() };
-        if (deja)
-            porteur->CustomData.GetDefault<CoeurDeForgeDots>(CLE_COEUR_DOT)->parLanceurEtSort[cle] = { aura, deja };
-        else if (CoeurDeForgeDots* d = porteur->CustomData.Get<CoeurDeForgeDots>(CLE_COEUR_DOT))
-            d->parLanceurEtSort.erase(cle);
+        Unit const* lanceur = aura->GetCaster();
+        // Retiree pendant sa propre application (Unit.cpp:5150 n'a pas de garde) : rien a retenir.
+        if (aura->IsRemoved() || !lanceur || !lanceur->IsPlayer())
+        {
+            if (CoeurDeForgeDots* d = porteur->CustomData.Get<CoeurDeForgeDots>(CLE_COEUR_DOT))
+            {
+                auto it = d->parLanceurEtSort.find(cle);
+                if (it != d->parLanceurEtSort.end() && (!aura->IsRemoved() || it->second.aura == aura))
+                    d->parLanceurEtSort.erase(it);
+            }
+            return;
+        }
+        auto& retenus = porteur->CustomData.GetDefault<CoeurDeForgeDots>(CLE_COEUR_DOT)->parLanceurEtSort;
+        auto it = retenus.find(cle);
+        SpellInfo const* sort = aura->GetSpellInfo();
+        bool const sansRecalcul = !sort->StackAmount && sort->HasAttribute(SPELL_ATTR1_AURA_UNIQUE);
+        if (it != retenus.end() && it->second.aura == aura && sansRecalcul)
+            return;   // meme aura rafraichie sans RefreshTimers : m_pctMods, donc la part figee, n'a pas change
+        retenus[cle] = { aura, CoeurDeForgePorte(lanceur, false) };
     }
 
     // Retrait d'une aura de `porteur` (OnAuraRemove) : oublie ce qui avait ete retenu pour CETTE aura.
@@ -2114,7 +2131,7 @@ namespace
         {
             auto it = d->parLanceurEtSort.find({ source->GetGUID(), sort->Id });
             if (it != d->parLanceurEtSort.end())
-                return RatioCoeurDeForge(CoeurDeForgeVoulu(source, cible, false), it->second.deja);
+                return it->second.deja ? RatioCoeurDeForge(CoeurDeForgeVoulu(source, cible, false), it->second.deja) : 10000;
         }
         // Rien de retenu. Aura d'unite : posee sans Coeur de forge, rien a corriger. Aura de zone : bonus calcule au tic.
         if (!source->HasAura(AuraCoeurDeForge))
