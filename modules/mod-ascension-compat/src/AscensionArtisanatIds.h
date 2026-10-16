@@ -46,7 +46,9 @@ namespace CoaArtisanatIds
 
     constexpr uint32 OBJET_COEUR_DE_FOUDRE = 9101240;           // dev-monde d379182 (qualite 5, non lie, pile 1)
     // Les Oeuvres legendaires : ni signature a part, et le recolteur du materiau legendaire consomme en emplacement 9.
-    constexpr std::array<uint32, 1> OEUVRES = { 9104700 };      // dev-monde d379182 : Cuirasse du Maitre armurier (recette 9111180)
+    // Cuirasse du Maitre armurier : forme eveillee 9104700 (fabriquee, recette 9111180), puis rangs 1-5 9104701-9104705
+    // obtenus par renforcement (dev-monde 06ec7fd, D-PO-46 ; renforts 9112300-9112304 en spellid_2, lueur 9113493 en spellid_1).
+    constexpr std::array<uint32, 6> OEUVRES = { 9104700, 9104701, 9104702, 9104703, 9104704, 9104705 };
     // Filon-mere : gameobject_template de type 3 (CHEST) SANS verrou (data0 = 0), data1 = son butin personnel
     // (gameobject_loot_template), ScriptName = SCRIPT_FILON_MERE, entree dans 9101000-9101099 (refusee aux bots,
     // mod-playerbots LootObjectStack / LootAction).
