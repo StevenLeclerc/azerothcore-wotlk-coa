@@ -74,7 +74,9 @@ namespace
     constexpr uint32 ARTISANAT_OBJET_MIN = 9101200;
     constexpr uint32 ARTISANAT_OBJET_MAX = 9104999;   // D-PO-22
     constexpr uint32 ARTISANAT_SET_MIN = 63001;
-    constexpr uint32 ARTISANAT_SET_MAX = 63015;
+    // 63001-63014 : Faille ; 63015-63018 : Nuit (D-PO-49) ; reserve jusqu'a 63020, comme le generateur de dev-monde
+    // (outils/artisanat/generer.py, plage « sets » 63001-63020).
+    constexpr uint32 ARTISANAT_SET_MAX = 63020;
     constexpr uint32 ARTISANAT_GRILLE_MIN = 708;
     constexpr uint32 ARTISANAT_GRILLE_MAX = 1999;
     constexpr uint8 NIVEAU_EVEIL = 80;
