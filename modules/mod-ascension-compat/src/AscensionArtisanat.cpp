@@ -1005,13 +1005,20 @@ namespace
     };
     ReglesMonde Monde;
 
-    // Categorie d'une victime. Creature du Directeur (D-PO-48) : elite ordinaire, quels que soient son rang et la carte ;
-    // sinon le rang, l'elite et l'ordinaire passant en Instance dans un donjon. Faux : aucune categorie (rang inconnu).
+    bool EstRareDuDirecteur(CreatureTemplate const* modele)
+    {
+        return modele->Entry >= CoaArtisanatIds::PNJ_DIRECTEUR_MIN && modele->Entry <= CoaArtisanatIds::PNJ_DIRECTEUR_MAX
+            && (modele->rank == CREATURE_ELITE_RAREELITE || modele->rank == CREATURE_ELITE_RARE);
+    }
+
+    // Categorie d'une victime : le rang, l'elite et l'ordinaire passant en Instance dans un donjon. Creature du Directeur
+    // (D-PO-48) de rang RARE ELITE (2) ou RARE (4) : elite ordinaire, dehors comme en donjon ; ses rangs 0, 1 et 3 gardent la
+    // regle commune. Faux : aucune categorie (rang inconnu).
     bool CategorieDe(CreatureTemplate const* modele, bool donjon, CategorieMonde& categorie)
     {
         if (!modele)
             return false;
-        if (modele->Entry >= CoaArtisanatIds::PNJ_DIRECTEUR_MIN && modele->Entry <= CoaArtisanatIds::PNJ_DIRECTEUR_MAX)
+        if (EstRareDuDirecteur(modele))
         {
             categorie = CAT_ELITE;
             return true;
@@ -3732,10 +3739,10 @@ namespace
                         donjon ? "en donjon" : "dehors");
                     continue;
                 }
-                bool const directeur = entree >= CoaArtisanatIds::PNJ_DIRECTEUR_MIN && entree <= CoaArtisanatIds::PNJ_DIRECTEUR_MAX;
+                bool const directeur = EstRareDuDirecteur(&copie);
                 handler->PSendSysMessage("banc butin: {} « {} » rang {}{} {} -> {}{} ; taux bruts (humain, victime qui donne de l'experience) "
                     "vert {} %, rare {} %, epique {} % ; materiaux {}", entree, modele->Name, copie.rank, rang ? " (simule)" : "",
-                    donjon ? "en donjon" : "dehors", NOMS_CATEGORIES[c], directeur ? " (plage du Directeur, D-PO-48)" : "",
+                    donjon ? "en donjon" : "dehors", NOMS_CATEGORIES[c], directeur ? " (rare du Directeur, D-PO-48)" : "",
                     Monde.chances[c][0], Monde.chances[c][1], Monde.chances[c][2], Monde.actif ? "actifs" : "coupes");
             }
             return true;
