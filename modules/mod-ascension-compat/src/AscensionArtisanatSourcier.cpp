@@ -23,6 +23,12 @@
 //    COMPTES_HUMAINS_GARANTI comptes humains distincts parmi les participants, sinon CHANCE_COEUR_POUR_CENT.
 // 5. Recompenses de participant (humains de NIVEAU_RECOMPENSE et plus, groupe present ou credites de 2 % des PV du
 //    Colosse, de la faction du specialiste) : ressources d'evenement, RECOMPENSES_PAR_JOUR fois par jour au plus.
+// 6. Echec cause par un joueur (revue du 16/10, constat 12, D-PO-51) : la mort du specialiste ne compte « par un joueur »
+//    que si le tueur, ou son maitre, est un HUMAIN (pas un bot) d'une AUTRE equipe ; meme alors, la relance immediate
+//    n'est accordee qu'une fois par jour de jeu (colonne relance_jcj_jour, migration 2026_10_16_01) ; au-dela, ou sans
+//    la colonne, l'echec est traite comme un echec ordinaire.
+// 7. Coeur de foudre d'un specialiste connecte sur une autre carte (constat 14) : file d'attente par GUID, videe sur le
+//    fil du joueur (prochain OnPlayerUpdate ou connexion) ; deconnecte avant : courrier en base ; hors ligne : courrier.
 // Journal : « coa sourcier: ... » (lancement, refus, usage, colosse, succes, echec, remise, recompense, nettoyage).
 //
 // Tout identifiant non recu (AscensionArtisanatIds.h a 0) laisse la fonction INERTE : le sort est refuse avec « pas encore
@@ -61,6 +67,7 @@
 #include <map>
 #include <mutex>
 #include <set>
+#include <string_view>
 #include <vector>
 
 using namespace Acore::ChatCommands;
@@ -134,6 +141,7 @@ namespace
     // ---- Registre par personnage -------------------------------------------------------------------------------------
 
     bool TableRegistre = false;
+    bool ColonneRelanceJcj = false;   // relance_jcj_jour (migration 2026_10_16_01) ; absente : jamais de relance immediate
 
     struct Registre
     {
@@ -143,6 +151,7 @@ namespace
         int64 semaineGaranti = -1;  // semaine ou le Coeur garanti a ete donne
         int64 recompJour = 0;
         uint32 recompN = 0;
+        int64 relanceJcjJour = 0;   // jour ou la relance immediate (mort causee par un humain adverse) a ete accordee
     };
 
     Registre LireRegistre(uint32 guid)
@@ -150,8 +159,8 @@ namespace
         Registre r;
         if (!TableRegistre)
             return r;
-        if (QueryResult q = CharacterDatabase.Query("SELECT jour_lance, relance_ts, essai2_jour, semaine_garanti, recomp_jour, recomp_n "
-            "FROM coa_artisanat_sourcier WHERE guid = {}", guid))
+        if (QueryResult q = CharacterDatabase.Query("SELECT jour_lance, relance_ts, essai2_jour, semaine_garanti, recomp_jour, recomp_n{} "
+            "FROM coa_artisanat_sourcier WHERE guid = {}", ColonneRelanceJcj ? ", relance_jcj_jour" : "", guid))
         {
             Field* f = q->Fetch();
             r.jourLance = f[0].Get<int32>();
@@ -160,13 +169,22 @@ namespace
             r.semaineGaranti = f[3].Get<int32>();
             r.recompJour = f[4].Get<int32>();
             r.recompN = f[5].Get<uint8>();
+            if (ColonneRelanceJcj)
+                r.relanceJcjJour = f[6].Get<int32>();
         }
         return r;
     }
 
     void EcrireRegistre(uint32 guid, Registre const& r)
     {
-        if (TableRegistre)
+        if (!TableRegistre)
+            return;
+        // REPLACE remet toute colonne non nommee a son defaut : relance_jcj_jour est nommee des qu'elle existe.
+        if (ColonneRelanceJcj)
+            CharacterDatabase.DirectExecute("REPLACE INTO coa_artisanat_sourcier (guid, jour_lance, relance_ts, essai2_jour, semaine_garanti, "
+                "recomp_jour, recomp_n, relance_jcj_jour) VALUES ({}, {}, {}, {}, {}, {}, {}, {})", guid, int32(r.jourLance), r.relanceTs,
+                int32(r.essai2Jour), int32(r.semaineGaranti), int32(r.recompJour), std::min<uint32>(r.recompN, 255), int32(r.relanceJcjJour));
+        else
             CharacterDatabase.DirectExecute("REPLACE INTO coa_artisanat_sourcier (guid, jour_lance, relance_ts, essai2_jour, semaine_garanti, "
                 "recomp_jour, recomp_n) VALUES ({}, {}, {}, {}, {}, {}, {})", guid, int32(r.jourLance), r.relanceTs, int32(r.essai2Jour),
                 int32(r.semaineGaranti), int32(r.recompJour), std::min<uint32>(r.recompN, 255));
@@ -301,6 +319,73 @@ namespace
         return !restant;
     }
 
+    // ---- Coeurs de foudre a remettre a un specialiste connecte sur une autre carte (constat 14) -------------------------
+    //
+    // Le courrier par GUID seul (MailReceiver(lowGuid)) n'entre qu'en base : un joueur deja en ligne ne le voit qu'a sa
+    // reconnexion (Mail.cpp:255-260, courriers charges a la connexion). On note donc la remise par GUID, sous verrou (le
+    // Filon et le joueur sont sur deux fils de carte), et le joueur la prend sur SON fil : ViderRemises.
+    std::mutex VerrouRemises;
+    std::map<ObjectGuid, uint32> RemisesCoeur;   // specialiste -> Coeurs en attente
+    std::atomic<uint32> NombreRemises{ 0 };      // lu sans verrou a chaque mise a jour de joueur pour sortir tot
+
+    // Courrier en BASE seulement (MailReceiver par GUID) : vu a la prochaine connexion. N'ecrit sur aucun objet en memoire :
+    // appelable de tout fil. Rend vrai si tous les Coeurs sont partis.
+    bool PosterCoeurs(ObjectGuid specialiste, uint32 n)
+    {
+        if (!OBJET_COEUR_DE_FOUDRE || !n)
+            return false;
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        MailDraft courrier("Le Filon-mère", "Le Filon-mère vous livre un Cœur de foudre.");
+        uint32 poses = 0;
+        for (; poses < n; ++poses)
+        {
+            Item* coeur = Item::CreateItem(OBJET_COEUR_DE_FOUDRE, 1, nullptr);
+            if (!coeur)
+                break;
+            coeur->SetGuidValue(ITEM_FIELD_CREATOR, specialiste);
+            coeur->SaveToDB(trans);
+            courrier.AddItem(coeur);
+        }
+        if (!poses)
+            return false;
+        courrier.SendMailTo(trans, MailReceiver(specialiste.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+        CharacterDatabase.CommitTransaction(trans);
+        return poses == n;
+    }
+
+    void MettreEnFile(ObjectGuid specialiste)
+    {
+        std::lock_guard<std::mutex> verrou(VerrouRemises);
+        ++RemisesCoeur[specialiste];
+        NombreRemises = uint32(RemisesCoeur.size());
+    }
+
+    // Fil du joueur (mise a jour, connexion, avant deconnexion) : remet les Coeurs en attente et le previent.
+    void ViderRemises(Player* j, char const* moment)
+    {
+        if (!NombreRemises.load(std::memory_order_relaxed) || !j)
+            return;
+        uint32 n = 0;
+        {
+            std::lock_guard<std::mutex> verrou(VerrouRemises);
+            auto it = RemisesCoeur.find(j->GetGUID());
+            if (it == RemisesCoeur.end())
+                return;
+            n = it->second;
+            RemisesCoeur.erase(it);
+            NombreRemises = uint32(RemisesCoeur.size());
+        }
+        // A la deconnexion, la sauvegarde qui suit peut ne pas avoir lieu (LogoutPlayer(save = false)) : courrier en base,
+        // independant de cette sauvegarde. Sinon, dans les sacs (ou courrier en memoire s'ils sont pleins, Donner).
+        bool const deconnexion = std::string_view(moment) == "deconnexion";
+        bool const remis = deconnexion ? PosterCoeurs(j->GetGUID(), n)
+            : (OBJET_COEUR_DE_FOUDRE && Donner(j, OBJET_COEUR_DE_FOUDRE, n, j->GetGUID()));
+        LOG_INFO("module", "coa sourcier: remise differee joueur={} coeurs={} moment={} voie={} remis={}", j->GetGUID().GetCounter(), n,
+            moment, deconnexion ? "courrier" : "sacs", remis ? 1 : 0);
+        if (remis && !deconnexion && j->GetSession())
+            ChatHandler(j->GetSession()).SendNotification("Le Filon-mère vous livre un Cœur de foudre.");
+    }
+
     // Le Coeur garanti, puis la chance : decision pure (le banc la rejoue sans rien ecrire).
     struct DecisionCoeur
     {
@@ -384,12 +469,18 @@ namespace
             Marquer(joueur, _filon);
         }
 
-        void SpecialisteMort(bool parJoueur)
+        // `tueur` : le joueur a qui revient le coup mortel (lui, ou le maitre de ce qui a tue), nul pour un monstre. Ne compte
+        // « par un joueur » qu'un HUMAIN d'une AUTRE equipe que le specialiste (D-PO-51) : un bot, ou un humain de sa faction,
+        // est traite comme un monstre (regle des ABSENCE_MAX_S).
+        void SpecialisteMort(Player const* tueur)
         {
+            bool const humain = EstHumain(tueur);
+            bool const adverse = tueur && tueur->GetTeamId() != _equipe;
             _specialisteMortA = Maintenant();
-            _mortParJoueur = parJoueur;
-            LOG_INFO("module", "coa sourcier: specialiste mort filon={} specialiste={} par_joueur={}", _filon.GetCounter(),
-                _specialiste.GetCounter(), parJoueur ? 1 : 0);
+            _mortParJoueur = humain && adverse;
+            LOG_INFO("module", "coa sourcier: specialiste mort filon={} specialiste={} tueur_joueur={} humain={} adverse={} par_joueur={}",
+                _filon.GetCounter(), _specialiste.GetCounter(), tueur ? tueur->GetGUID().GetCounter() : 0, humain ? 1 : 0, adverse ? 1 : 0,
+                _mortParJoueur ? 1 : 0);
         }
 
         void ColosseMort()
@@ -592,15 +683,19 @@ namespace
             DecisionCoeur const d = DeciderCoeur(r, semaine, uint32(comptes.size()));
             EcrireRegistre(_specialiste.GetCounter(), r);
             bool remis = false;
+            char const* voie = "aucune";
             if (d.obtenu && OBJET_COEUR_DE_FOUDRE)
             {
                 if (s)
+                {
                     remis = Donner(s, OBJET_COEUR_DE_FOUDRE, 1, s->GetGUID());
+                    voie = "sacs";
+                }
                 else
-                    remis = PosterCoeur();
+                    remis = RemettreCoeurAilleurs(voie);
             }
-            LOG_INFO("module", "coa sourcier: remise filon={} specialiste={} garanti={} obtenu={} remis={} semaine={} comptes={}",
-                _filon.GetCounter(), _specialiste.GetCounter(), d.garanti ? 1 : 0, d.obtenu ? 1 : 0, remis ? 1 : 0, int32(semaine),
+            LOG_INFO("module", "coa sourcier: remise filon={} specialiste={} garanti={} obtenu={} remis={} voie={} semaine={} comptes={}",
+                _filon.GetCounter(), _specialiste.GetCounter(), d.garanti ? 1 : 0, d.obtenu ? 1 : 0, remis ? 1 : 0, voie, int32(semaine),
                 uint32(comptes.size()));
             if (s && d.obtenu)
                 ChatHandler(s->GetSession()).SendNotification("Le Filon-mère vous livre un Cœur de foudre.");
@@ -638,20 +733,19 @@ namespace
             }
         }
 
-        // Specialiste hors de cette carte au succes : le Coeur part par courrier (aucun objet d'une autre carte n'est touche).
-        bool PosterCoeur()
+        // Specialiste hors de cette carte au succes. Connecte ailleurs : file d'attente, videe sur son fil (ViderRemises) ;
+        // FindConnectedPlayer ne sert qu'a le savoir en ligne, rien n'est lu ni ecrit sur lui ici (P-137). Hors ligne :
+        // courrier en base, charge a sa connexion.
+        bool RemettreCoeurAilleurs(char const*& voie)
         {
-            CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-            Item* coeur = Item::CreateItem(OBJET_COEUR_DE_FOUDRE, 1, nullptr);
-            if (!coeur)
-                return false;
-            coeur->SetGuidValue(ITEM_FIELD_CREATOR, _specialiste);
-            coeur->SaveToDB(trans);
-            MailDraft courrier("Le Filon-mère", "Le Filon-mère vous livre un Cœur de foudre.");
-            courrier.AddItem(coeur);
-            courrier.SendMailTo(trans, MailReceiver(_specialiste.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-            CharacterDatabase.CommitTransaction(trans);
-            return true;
+            if (ObjectAccessor::FindConnectedPlayer(_specialiste))
+            {
+                MettreEnFile(_specialiste);
+                voie = "file";
+                return true;
+            }
+            voie = "courrier";
+            return PosterCoeurs(_specialiste, 1);
         }
 
         // Echec : rien de legendaire ; la relance est accordee tout de suite si un joueur l'a cause, sinon au bout de 4 h
@@ -664,9 +758,12 @@ namespace
             int64 const jour = JourDeJeu(maintenant);
             Registre r = LireRegistre(_specialiste.GetCounter());
             char const* relance = "aucune";
-            if (parJoueur)
+            // Relance immediate : une fois par jour de jeu (D-PO-51). Deja prise, ou colonne absente : echec ordinaire.
+            bool const immediate = parJoueur && ColonneRelanceJcj && r.relanceJcjJour != jour;
+            if (immediate)
             {
                 r.relanceTs = uint32(maintenant);
+                r.relanceJcjJour = jour;
                 relance = "immediate";
             }
             else if (r.essai2Jour != jour)
@@ -679,7 +776,7 @@ namespace
             if (Player* s = ObjectAccessor::GetPlayer(*me, _specialiste))
             {
                 AfficherRecharge(s, r);
-                ChatHandler(s->GetSession()).SendNotification(parJoueur ? "Le Filon-mère se referme : vous pourrez le réveiller de nouveau."
+                ChatHandler(s->GetSession()).SendNotification(immediate ? "Le Filon-mère se referme : vous pourrez le réveiller de nouveau."
                     : "Le Filon-mère se referme dans un grondement.");
             }
             LOG_INFO("module", "coa sourcier: echec filon={} specialiste={} raison={} par_joueur={} relance={} usages={} colosse={}",
@@ -886,7 +983,10 @@ namespace
                 ai->ColosseMort();
             // Seul le specialiste compte pour la regle des 60 s ; les autres morts sont lues par GroupeEnVie.
             else if (mort->IsPlayer() && ai->EstSpecialiste(mort->GetGUID()))
-                ai->SpecialisteMort(tueur && tueur != mort && tueur->GetCharmerOrOwnerPlayerOrPlayerItself());
+            {
+                Player const* joueur = (tueur && tueur != mort) ? tueur->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+                ai->SpecialisteMort(joueur && joueur != mort ? joueur : nullptr);
+            }
         }
     };
 
@@ -907,10 +1007,23 @@ namespace
     {
     public:
         SourcierJoueurs() : PlayerScript("CoaSourcierJoueurs", { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_LEARN_SPELL, PLAYERHOOK_ON_FORGOT_SPELL,
-            PLAYERHOOK_ON_DELETE_FROM_DB }) { }
+            PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_BEFORE_LOGOUT }) { }
+
+        // Coeur de foudre en attente (constat 14) : pris sur le fil du joueur. Un atomique lu a chaque mise a jour.
+        void OnPlayerUpdate(Player* j, uint32 /*diff*/) override
+        {
+            ViderRemises(j, "mise_a_jour");
+        }
+
+        // Deconnexion avant la prise (WorldSession.cpp:720) : le Coeur part par courrier en base, rien ne reste en file.
+        void OnPlayerBeforeLogout(Player* j) override
+        {
+            ViderRemises(j, "deconnexion");
+        }
 
         void OnPlayerLogin(Player* j) override
         {
+            ViderRemises(j, "connexion");
             if (!SORT_MARQUEUR_FILON || !EstHumain(j))
                 return;
             SynchroniserSortFilon(j);
@@ -946,6 +1059,11 @@ namespace
         {
             TableRegistre = bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
                 "AND TABLE_NAME = 'coa_artisanat_sourcier'"));
+            ColonneRelanceJcj = TableRegistre && bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE "
+                "TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coa_artisanat_sourcier' AND COLUMN_NAME = 'relance_jcj_jour'"));
+            if (TableRegistre && !ColonneRelanceJcj)
+                LOG_ERROR("module", "coa sourcier: colonne relance_jcj_jour ABSENTE (migration 2026_10_16_01 non appliquee) : aucune relance "
+                    "immediate apres une mort en JcJ, echec ordinaire");
             GameObjectTemplate const* go = GO_FILON_MERE ? sObjectMgr->GetGameObjectTemplate(GO_FILON_MERE) : nullptr;
             bool const scriptOk = go && go->ScriptId == sObjectMgr->GetScriptId(SCRIPT_FILON_MERE);
             GabaritsPresents = scriptOk && PNJ_COLOSSE_ORAGE && sObjectMgr->GetCreatureTemplate(PNJ_COLOSSE_ORAGE);
@@ -1011,9 +1129,10 @@ namespace
             if (!g)
                 return handler->PSendSysMessage("sourcier: {} inconnu.", nom), true;
             Registre const r = LireRegistre(g.GetCounter());
-            handler->PSendSysMessage("sourcier: {} (guid {}) : table {} ; jour_lance={} relance_ts={} essai2_jour={} semaine_garanti={} recomp_jour={} recomp_n={} ; lancement {}",
+            handler->PSendSysMessage("sourcier: {} (guid {}) : table {} ; jour_lance={} relance_ts={} essai2_jour={} semaine_garanti={} recomp_jour={} recomp_n={} relance_jcj_jour={} ; lancement {}",
                 nom, g.GetCounter(), TableRegistre ? "presente" : "ABSENTE", int32(r.jourLance), r.relanceTs, int32(r.essai2Jour),
-                int32(r.semaineGaranti), int32(r.recompJour), r.recompN, LancementAccorde(r, Maintenant()) ? "ACCORDE" : "refuse");
+                int32(r.semaineGaranti), int32(r.recompJour), r.recompN, ColonneRelanceJcj ? std::to_string(r.relanceJcjJour) : std::string("ABSENTE"),
+                LancementAccorde(r, Maintenant()) ? "ACCORDE" : "refuse");
             return true;
         }
 

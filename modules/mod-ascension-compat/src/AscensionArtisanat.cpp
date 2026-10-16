@@ -2001,34 +2001,128 @@ namespace
             }
     }
 
-    // Coeur de forge pour un coup ou un soin de `source` sur `cible`, en dix-milliemes : le multiplicateur qui ramene ce que
-    // l'aura du DBC a deja applique (ses effets MOD_DAMAGE_PERCENT_DONE / MOD_HEALING_DONE_PERCENT, lus sur l'aura portee)
-    // a la valeur voulue : valeur JcJ (valeur_arene) pour un coup sur une cible controlee par un joueur ou pour un soin en JcJ
-    // (SoinEnJcJ), 0 en arene 1c1 contre un gladiateur, sinon la valeur. 10000 : rien a corriger. Une aura sans effet de jeu (DUMMY) donne la valeur entiere.
-    // Fils de carte : ne lit que source et cible.
-    uint32 CorrectionCoeurDeForge(Unit const* source, Unit const* cible, bool soin)
+    // Coeur de forge : part (en %) que l'aura 9113491 portee par `source` ajoute aux degats (MOD_DAMAGE_PERCENT_DONE) ou aux
+    // soins (MOD_HEALING_DONE_PERCENT), lue sur l'aura PORTEE MAINTENANT. 0 sans l'aura.
+    int32 CoeurDeForgePorte(Unit const* source, bool soin)
     {
-        if (!AuraCoeurDeForge || !source || !source->IsPlayer())
-            return 10000;
         Aura const* aura = source->GetAura(AuraCoeurDeForge);
         if (!aura)
-            return 10000;
+            return 0;
         int32 deja = 0;
         for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
             if (AuraEffect const* e = aura->GetEffect(i))
                 if (e->GetAuraType() == (soin ? SPELL_AURA_MOD_HEALING_DONE_PERCENT : SPELL_AURA_MOD_DAMAGE_PERCENT_DONE))
                     deja += e->GetAmount();
-        int32 voulu = 0;
-        if (!NeutraliseEnArene1c1(source->ToPlayer()))
-            for (auto const& [enchant, s] : Signatures)
-                if (s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE && s.sortEffet == AuraCoeurDeForge)
-                {
-                    voulu = int32((soin ? SoinEnJcJ(source, cible) : ControleParUnJoueur(cible)) ? s.valeurArene : s.valeur);
-                    break;
-                }
+        return deja;
+    }
+
+    // Valeur voulue (en %) pour un coup ou un soin de `source` (joueur) sur `cible` : valeur JcJ (valeur_arene) pour un coup
+    // sur une cible controlee par un joueur ou pour un soin en JcJ (SoinEnJcJ), 0 en arene 1c1 contre un gladiateur, sinon
+    // la valeur.
+    int32 CoeurDeForgeVoulu(Unit const* source, Unit const* cible, bool soin)
+    {
+        if (NeutraliseEnArene1c1(source->ToPlayer()))
+            return 0;
+        for (auto const& [enchant, s] : Signatures)
+            if (s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE && s.sortEffet == AuraCoeurDeForge)
+                return int32((soin ? SoinEnJcJ(source, cible) : ControleParUnJoueur(cible)) ? s.valeurArene : s.valeur);
+        return 0;
+    }
+
+    // Multiplicateur, en dix-milliemes, qui ramene `deja` % (ce que l'aura du DBC a applique) a `voulu` %.
+    uint32 RatioCoeurDeForge(int32 voulu, int32 deja)
+    {
         if (voulu == deja || 100 + deja <= 0)
             return 10000;
         return uint32(std::max<int64>(0, int64(100 + voulu) * 10000 / (100 + deja)));
+    }
+
+    // Coeur de forge pour un coup ou un soin de `source` sur `cible` CALCULE MAINTENANT (coup direct, soin, tic dont le
+    // bonus du lanceur est calcule au tic), en dix-milliemes : le multiplicateur qui ramene ce que l'aura du DBC a deja
+    // applique (lu sur l'aura portee) a la valeur voulue. 10000 : rien a corriger. Une aura sans effet de jeu (DUMMY) donne
+    // la valeur entiere. Fils de carte : ne lit que source et cible.
+    uint32 CorrectionCoeurDeForge(Unit const* source, Unit const* cible, bool soin)
+    {
+        if (!AuraCoeurDeForge || !source || !source->IsPlayer() || !source->HasAura(AuraCoeurDeForge))
+            return 10000;
+        return RatioCoeurDeForge(CoeurDeForgeVoulu(source, cible, soin), CoeurDeForgePorte(source, soin));
+    }
+
+    // ---- Coeur de forge et degats sur la duree (revue du 16/10, constat 13) ----
+    //
+    // Pour une aura d'unite (UNIT_AURA_TYPE), le coeur fige le bonus du lanceur dans le montant a la POSE (et a chaque
+    // rafraichissement ou changement de pile) : AuraEffect::CalculateAmount, SpellAuraEffects.cpp:610-614, pour
+    // PERIODIC_DAMAGE et PERIODIC_LEECH seulement. Le tic (:6486, :6616) reprend ce montant fige. On retient donc, sur la
+    // CIBLE, la part de Coeur de forge que le lanceur portait a la pose, par (lanceur, sort) ; au tic, on ramene cette part
+    // a la valeur voulue, evaluee au tic (cible controlee par un joueur, arene 1c1). Rien de retenu : DoT pose sans Coeur
+    // de forge, rien a corriger.
+    // Une aura de zone (DYNOBJ_AURA_TYPE) recoit le bonus du lanceur AU TIC, apres le crochet (:6507-6508, :6625-6626) :
+    // correction sur l'etat courant, comme avant. PERIODIC_DAMAGE_PERCENT (% des PV max) ne recoit aucun bonus du lanceur :
+    // jamais corrige.
+    // Ecrit par OnAuraApply (pose, rafraichissement), efface par OnAuraRemove, lu par le tic : tous sur le fil de la carte
+    // de la cible. Limite acceptee : un recalcul du montant sans OnAuraApply (perte d'une pile par ModStackAmount(-1),
+    // RecalculateAmountOfEffects) garde la part retenue a la pose precedente.
+    std::string const CLE_COEUR_DOT = "CoaArtisanatCoeurDeForgeDot";
+    struct CoeurDeForgeDot
+    {
+        Aura const* aura = nullptr;   // identite seulement (jamais dereferencee) : l'effacement ne vise que cette aura
+        int32 deja = 0;
+    };
+    struct CoeurDeForgeDots final : public DataMap::Base
+    {
+        std::map<std::pair<ObjectGuid, uint32>, CoeurDeForgeDot> parLanceurEtSort;
+    };
+
+    bool EstDotAvecBonusDuLanceur(SpellInfo const* sort)
+    {
+        return sort && (sort->HasAura(SPELL_AURA_PERIODIC_DAMAGE) || sort->HasAura(SPELL_AURA_PERIODIC_LEECH));
+    }
+
+    // Pose ou rafraichissement d'une aura sur `porteur` (OnAuraApply) : retient la part de Coeur de forge du lanceur.
+    void RetenirCoeurDeForgeALaPose(Unit* porteur, Aura const* aura)
+    {
+        if (!AuraCoeurDeForge || !porteur || !aura || aura->GetType() != UNIT_AURA_TYPE || !EstDotAvecBonusDuLanceur(aura->GetSpellInfo()))
+            return;
+        Unit const* lanceur = aura->GetCaster();
+        int32 const deja = (lanceur && lanceur->IsPlayer()) ? CoeurDeForgePorte(lanceur, false) : 0;
+        std::pair<ObjectGuid, uint32> const cle{ aura->GetCasterGUID(), aura->GetId() };
+        if (deja)
+            porteur->CustomData.GetDefault<CoeurDeForgeDots>(CLE_COEUR_DOT)->parLanceurEtSort[cle] = { aura, deja };
+        else if (CoeurDeForgeDots* d = porteur->CustomData.Get<CoeurDeForgeDots>(CLE_COEUR_DOT))
+            d->parLanceurEtSort.erase(cle);
+    }
+
+    // Retrait d'une aura de `porteur` (OnAuraRemove) : oublie ce qui avait ete retenu pour CETTE aura.
+    void OublierCoeurDeForge(Unit* porteur, Aura const* aura)
+    {
+        if (!AuraCoeurDeForge || !porteur || !aura || aura->GetType() != UNIT_AURA_TYPE || !EstDotAvecBonusDuLanceur(aura->GetSpellInfo()))
+            return;
+        CoeurDeForgeDots* d = porteur->CustomData.Get<CoeurDeForgeDots>(CLE_COEUR_DOT);
+        if (!d)
+            return;
+        auto it = d->parLanceurEtSort.find({ aura->GetCasterGUID(), aura->GetId() });
+        if (it != d->parLanceurEtSort.end() && it->second.aura == aura)
+            d->parLanceurEtSort.erase(it);
+    }
+
+    // Tic de degats sur la duree de `source` sur `cible` (ModifyPeriodicDamageAurasTick), en dix-milliemes.
+    uint32 CorrectionCoeurDeForgeTic(Unit const* source, Unit const* cible, SpellInfo const* sort)
+    {
+        if (!AuraCoeurDeForge || !source || !source->IsPlayer() || !cible || !EstDotAvecBonusDuLanceur(sort))
+            return 10000;
+        if (CoeurDeForgeDots const* d = cible->CustomData.Get<CoeurDeForgeDots>(CLE_COEUR_DOT))
+        {
+            auto it = d->parLanceurEtSort.find({ source->GetGUID(), sort->Id });
+            if (it != d->parLanceurEtSort.end())
+                return RatioCoeurDeForge(CoeurDeForgeVoulu(source, cible, false), it->second.deja);
+        }
+        // Rien de retenu. Aura d'unite : posee sans Coeur de forge, rien a corriger. Aura de zone : bonus calcule au tic.
+        if (!source->HasAura(AuraCoeurDeForge))
+            return 10000;
+        Aura const* aura = cible->GetAura(sort->Id, source->GetGUID());
+        if (aura && aura->GetType() == DYNOBJ_AURA_TYPE)
+            return CorrectionCoeurDeForge(source, cible, false);
+        return 10000;
     }
 
     template <typename T>
@@ -2117,13 +2211,22 @@ namespace
         // DealDamage n'a pas d'interrupteur de crochet : ScriptMgr::DealDamage appelle tous les UnitScript (UnitScript.cpp:69).
         ArtisanatUnit() : UnitScript("CoaArtisanatUnit", true, { UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
             UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_MODIFY_HEAL_RECEIVED, UNITHOOK_ON_DAMAGE, UNITHOOK_ON_HEAL,
-            UNITHOOK_ON_UNIT_DEATH, UNITHOOK_ON_AURA_APPLY }) { }
+            UNITHOOK_ON_UNIT_DEATH, UNITHOOK_ON_AURA_APPLY, UNITHOOK_ON_AURA_REMOVE }) { }
 
         // Moisson (D-PO-49) : apres l'application des effets (Unit.cpp:5150) et a chaque rafraichissement (:5009).
         void OnAuraApply(Unit* porteur, Aura* aura) override
         {
             if (MoissonVerifiee && aura && EstSortMoisson(aura->GetId()) && porteur && porteur->IsPlayer())
                 AppliquerMoisson(porteur->ToPlayer(), aura);
+            // Coeur de forge : part figee dans le montant d'un DoT a la pose (constat 13).
+            RetenirCoeurDeForgeALaPose(porteur, aura);
+        }
+
+        // Coeur de forge : oublie la part retenue pour un DoT retire (Unit.cpp:5243, toute fin d'application).
+        void OnAuraRemove(Unit* porteur, AuraApplication* application, AuraRemoveMode /*mode*/) override
+        {
+            if (AuraCoeurDeForge && application)
+                OublierCoeurDeForge(porteur, application->GetBase());
         }
 
         // Banc G1 : apres DealDamage (Egide comprise) et l'AI de la victime, avant la soustraction (Unit.cpp:991-1006).
@@ -2189,7 +2292,8 @@ namespace
                 TicDeSoin = sort->Id;   // valable pour l'appel ModifyHealReceived suivant, du meme sort seulement
                 return;
             }
-            AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
+            // Part de Coeur de forge figee a la pose (aura d'unite) ou calculee au tic (aura de zone) : constat 13.
+            AppliquerCorrection(degats, CorrectionCoeurDeForgeTic(attaquant, cible, sort));
         }
 
         // Deux appelants, deux ordres : Unit::HealBySpell (Unit.cpp:8761) passe (soigneur, soigne) ; le tic de soin
