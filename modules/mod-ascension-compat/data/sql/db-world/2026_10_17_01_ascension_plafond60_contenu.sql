@@ -1,5 +1,7 @@
 -- Plafond du jeu au niveau 60, lot 4 : contenu du monde (docs/PLAN-plafond-60.md § 3.1, décisions § 4 :
--- D-C1 a, D-C2 b, D-C3 a, D-C4 a, D-C5 a, D-K2 a). Écrit le 17/10/2026 (Paris) pour le PTR (acore_world_ptr).
+-- D-C1 a, D-C2 b, D-C3 a, D-C4 a, D-K2 a). Écrit le 17/10/2026 (Paris) pour le PTR (acore_world_ptr).
+-- Onyxia (D-C5) n'est PAS ouverte au 60, après revue : c'est le raid du 80 (Onyxia niveau 83, créatures
+-- de la carte 249 niveau 80 à 83, butin ItemLevel 232 niveau requis 80, mesuré le 17/10). Décision rendue au PO.
 -- Aucun nom de base : appliquer-sql-module.sh choisit la base selon --cible.
 --
 -- RETOUR ARRIÈRE : ../retour/2026_10_17_01_ascension_plafond60_contenu-RETOUR.sql
@@ -11,7 +13,7 @@
 -- ORDRE D'APPLICATION (plan § 3.1) : le 571 doit déjà être retiré de `AiPlayerbot.RandomBotMaps` et des
 -- cartes du Directeur quand ce fichier est joué, sinon le journal se remplit de « forbidden map ».
 -- Tout est lu au démarrage (disables, transports, areatrigger_teleport, trainer_spell, battleground_template,
--- dungeon_access_template, item_loot_template) : royaume ARRÊTÉ, comme le fait appliquer-sql-module.sh.
+-- item_loot_template) : royaume ARRÊTÉ, comme le fait appliquer-sql-module.sh.
 --
 -- Une seule transaction : en cas d'erreur, le client mysql sort et rien n'est écrit.
 -- Les INSERT de `disables` ne sont PAS précédés d'un DELETE : aucune de ces clés n'existe sur le PTR
@@ -22,6 +24,12 @@ SET NAMES utf8mb4;
 START TRANSACTION;
 
 -- 1. Norfendre fermé (D-C1/D-C3). DisableMgr.cpp : carte MAP_COMMON => flags 0 obligatoire.
+--    Préalable : plus AUCUN personnage dans le 571 quand ce fichier est joué (réinitialisation des bots,
+--    plan § 0.2). Le refus de carte ne joue qu'à TeleportTo : un personnage déconnecté dans le 571 s'y
+--    reconnecte, et s'il y meurt, le retour au cimetière (TeleportTo vers 571) est refusé [S, lu dans le code].
+--    Mesuré le 17/10 : 16 personnages au PTR dans le 571, niveau 68 et plus ; 401 bots au Live (relevé de
+--    la revue indépendante). Contrôle au lot 8 :
+--    SELECT COUNT(*) FROM characters WHERE map = 571  -- doit rendre 0.
 INSERT INTO `disables` (`sourceType`, `entry`, `flags`, `params_0`, `params_1`, `comment`) VALUES
 (2, 571, 0, '', '', 'Plafond 60 : Norfendre ferme');
 
@@ -72,9 +80,53 @@ DELETE FROM `trainer_spell` WHERE `TrainerId` = 200001 AND `SpellId` IN
 -- 8. Œil du cyclone ouvert au 60 (D-C4 a ; même geste qu'Armageddon, sql/05).
 UPDATE `battleground_template` SET `MinLvl` = 60 WHERE `ID` = 7 AND `MinLvl` = 61;
 
--- 9. Onyxia (249) au 60 (D-C5 a), 10 et 25 joueurs.
-UPDATE `dungeon_access_template` SET `min_level` = 60
-WHERE `map_id` = 249 AND `difficulty` IN (0, 1) AND `min_level` = 80;
+-- 9. Téléportations vers l'Outreterre (carte 530, qu'on ne peut pas fermer : zones de départ elfes de sang
+--    et draeneï). sourceType 0, flags 1 = SPELL_DISABLE_PLAYER : Spell::prepare (Spell.cpp:3532) refuse le
+--    sort quels que soient les drapeaux de déclenchement, donc aussi quand mod-teleport-actionbar le lance
+--    depuis l'objet (CastFromItem). 33 sorts, tous présents dans le Spell.dbc du PTR ET du Live (lu le 17/10).
+--    - Mages : 33690 et 35715 « Teleport: Shattrath » sont enseignés AU NIVEAU 60 (trainer_spell 26 et 27,
+--      ReqLevel 60) et par l'Arcane Tome 1000537 (RequiredLevel 60) : voie ouverte mesurée.
+--      33691 et 35717 « Portal: Shattrath » (niveau 65) : fermés par cohérence.
+--    - Pierres de retraite (Stone of Retreat, objets RequiredLevel 0 qui apprennent le sort par 55884
+--      « Learning ») dont la cible (spell_target_position) est en Outreterre : 102178-102201, 777016-777019,
+--      777022 (et donc les objets 1175644-1175646, qui apprennent 102182, 777019, 777018).
+--    Gardés : 777014 (Silvermoon) et 777015 (Exodar), zones de départ. Non couverts (supposé sans canal à
+--    60) : Blessed Medallion of Karabor 41234 (RequiredLevel 68 à 70), objets de quête de l'Outreterre.
+--    Au 17/10, 0 personnage du PTR connaît l'un de ces sorts et 0 de ces objets existe (mesuré).
+INSERT INTO `disables` (`sourceType`, `entry`, `flags`, `params_0`, `params_1`, `comment`) VALUES
+(0, 33690, 1, '', '', 'Plafond 60 : Teleport: Shattrath (mage, dresseur 26, niveau 60 ; Arcane Tome 1000537)'),
+(0, 35715, 1, '', '', 'Plafond 60 : Teleport: Shattrath (mage, dresseurs 26 et 27, niveau 60)'),
+(0, 33691, 1, '', '', 'Plafond 60 : Portal: Shattrath (mage, niveau 65 ; Arcane Tome 1000524)'),
+(0, 35717, 1, '', '', 'Plafond 60 : Portal: Shattrath (mage, niveau 65)'),
+(0, 102178, 1, '', '', 'Plafond 60 : Stone of Retreat: Allerian Stronghold'),
+(0, 102179, 1, '', '', 'Plafond 60 : Stone of Retreat: Altar of Shatar'),
+(0, 102180, 1, '', '', 'Plafond 60 : Stone of Retreat: Cenarion Refuge'),
+(0, 102181, 1, '', '', 'Plafond 60 : Stone of Retreat: Cosmowrench'),
+(0, 102182, 1, '', '', 'Plafond 60 : Stone of Retreat: Evergrove'),
+(0, 102183, 1, '', '', 'Plafond 60 : Stone of Retreat: Falcon Watch'),
+(0, 102184, 1, '', '', 'Plafond 60 : Stone of Retreat: Garadar'),
+(0, 102185, 1, '', '', 'Plafond 60 : Stone of Retreat: Honor Hold'),
+(0, 102186, 1, '', '', 'Plafond 60 : Stone of Retreat: Ogri''la'),
+(0, 102187, 1, '', '', 'Plafond 60 : Stone of Retreat: Orebor Harborage'),
+(0, 102188, 1, '', '', 'Plafond 60 : Stone of Retreat: Sanctum of the Stars'),
+(0, 102189, 1, '', '', 'Plafond 60 : Stone of Retreat: Shadowmoon Village'),
+(0, 102190, 1, '', '', 'Plafond 60 : Stone of Retreat: Stonebreaker Hold'),
+(0, 102191, 1, '', '', 'Plafond 60 : Stone of Retreat: Swamprat Post'),
+(0, 102192, 1, '', '', 'Plafond 60 : Stone of Retreat: Sylvanaar'),
+(0, 102193, 1, '', '', 'Plafond 60 : Stone of Retreat: Telaar'),
+(0, 102194, 1, '', '', 'Plafond 60 : Stone of Retreat: Telredor'),
+(0, 102195, 1, '', '', 'Plafond 60 : Stone of Retreat: Temple of Telhamat'),
+(0, 102196, 1, '', '', 'Plafond 60 : Stone of Retreat: The Stormspire'),
+(0, 102197, 1, '', '', 'Plafond 60 : Stone of Retreat: Thrallmar'),
+(0, 102198, 1, '', '', 'Plafond 60 : Stone of Retreat: Thunderlord Stronghold'),
+(0, 102199, 1, '', '', 'Plafond 60 : Stone of Retreat: Toshley''s Station'),
+(0, 102200, 1, '', '', 'Plafond 60 : Stone of Retreat: Wildhammer Stronghold'),
+(0, 102201, 1, '', '', 'Plafond 60 : Stone of Retreat: Zabra''jin'),
+(0, 777016, 1, '', '', 'Plafond 60 : Stone of Retreat: Shattrath'),
+(0, 777017, 1, '', '', 'Plafond 60 : Stone of Retreat: Area 52'),
+(0, 777018, 1, '', '', 'Plafond 60 : Stone of Retreat: Altar of Sha''tar'),
+(0, 777019, 1, '', '', 'Plafond 60 : Stone of Retreat: Sanctum of the Stars'),
+(0, 777022, 1, '', '', 'Plafond 60 : Stone of Retreat: Area 52 (objet Stormspire, Deprecated)');
 
 -- 10. Coffres Manastorm de fin de partie (D-K2 a). AscensionManastormRules.h::CacheForLevel :
 --     97883 = joueur au-dessus de 59 hors fin de partie ; 1278050 (profondeur < 25) et 1278051 (>= 25)

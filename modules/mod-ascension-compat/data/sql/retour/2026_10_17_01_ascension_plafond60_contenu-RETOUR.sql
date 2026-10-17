@@ -11,12 +11,13 @@
 SET NAMES utf8mb4;
 START TRANSACTION;
 
--- 1-4. disables : aucune de ces clés n'existait avant l'aller (mesuré le 17/10).
+-- 1-4 et 9. disables : aucune de ces clés n'existait avant l'aller (mesuré le 17/10).
 DELETE FROM `disables` WHERE
    (`sourceType` = 2 AND `entry` = 571)
 OR (`sourceType` = 8 AND `entry` IN (540, 542, 543, 545, 546, 547, 556, 557, 558))
 OR (`sourceType` = 1 AND `entry` IN (9407, 10119, 9441, 11451))
-OR (`sourceType` = 0 AND `entry` IN (36890, 36941));
+OR (`sourceType` = 0 AND `entry` IN (36890, 36941))
+OR (`sourceType` = 0 AND `entry` IN (33690, 35715, 33691, 35717, 102178, 102179, 102180, 102181, 102182, 102183, 102184, 102185, 102186, 102187, 102188, 102189, 102190, 102191, 102192, 102193, 102194, 102195, 102196, 102197, 102198, 102199, 102200, 102201, 777016, 777017, 777018, 777019, 777022));
 
 -- 5. areatrigger_teleport 4354
 INSERT INTO `areatrigger_teleport` (`ID`, `Name`, `target_map`, `target_position_x`, `target_position_y`, `target_position_z`, `target_orientation`) VALUES (4354,'Dark Portal To Outland',530,-248.149,921.875,84.3885,1.58415);
@@ -48,9 +49,6 @@ INSERT INTO `trainer_spell` (`TrainerId`, `SpellId`, `MoneyCost`, `ReqSkillLine`
 -- 8. Œil du cyclone : MinLvl d'origine 61.
 UPDATE `battleground_template` SET `MinLvl` = 61 WHERE `ID` = 7 AND `MinLvl` = 60;
 
--- 9. Onyxia : min_level d'origine 80 (ids 15 et 16).
-UPDATE `dungeon_access_template` SET `min_level` = 80
-WHERE `map_id` = 249 AND `difficulty` IN (0, 1) AND `min_level` = 60;
 
 -- 10. Coffres Manastorm 97883 (2 592 lignes), 1278050 (207), 1278051 (1 480) : contenu d'origine entier.
 DELETE FROM `item_loot_template` WHERE `Entry` IN (97883, 1278050, 1278051);
