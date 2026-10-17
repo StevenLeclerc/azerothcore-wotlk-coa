@@ -53,7 +53,9 @@ namespace CoaArtisanatIds
     // (gameobject_loot_template), ScriptName = SCRIPT_FILON_MERE, entree dans 9101000-9101099 (refusee aux bots,
     // mod-playerbots LootObjectStack / LootAction).
     constexpr uint32 GO_FILON_MERE = 9101090;                   // dev-monde d379182 (coffre sans verrou, go_coa_filon_mere)
-    constexpr uint32 PNJ_COLOSSE_ORAGE = 9105000;               // dev-monde d379182 (elite, niveau 80)
+    // Niveau et experience du Colosse : donnees de dev-monde (creature_template). Plafond 60 (D-A5 (a), PLAN-plafond-60.md
+    // § 3.5) : 60/60 elite, exp 0 (il etait 80/80, exp 2 ; le LevelScaling ne fait jamais descendre une creature).
+    constexpr uint32 PNJ_COLOSSE_ORAGE = 9105000;               // dev-monde d379182 (elite)
 
     // ---- Fixes par ce module ou mesures ---------------------------------------------------------------------------
 
@@ -90,6 +92,13 @@ namespace CoaArtisanatIds
     // joueur tue compte donc encore. En arene 1c1 contre un gladiateur : aura laissee, montants a 0. Degats d'Ombre
     // declenches : valeur JcJ si la cible est controlee par un joueur, 0 en arene 1c1. Non ramenes : le soin de 5 % (9112073)
     // et le mana de 4 % (9112081), effets instantanes hors aura.
+    //
+    // Plafond 60 (PLAN-plafond-60.md § 3.5, D-PO-53) : valeurs fixes redosees au 60 en meme temps que les donnees de
+    // dev-monde (generer.py, MOISSON) : +120 caracteristique / puissance des sorts -> 25, +250 puissance d'attaque -> 50,
+    // degats d'Ombre 1 200 / 900 / 1 400 -> 300 / 225 / 350 ; valeurs JcJ dans la meme proportion qu'au 80 (2/3, 0,64,
+    // 1/2, arrondies a l'entier le plus proche) ; pourcentages (8 % de degats, 6 % de hate) inchanges. Ces nombres sont
+    // ceux de la proposition retenue par le PO ; si les donnees posees different, le temoin du demarrage le dit
+    // (« moisson jcj : n/11 ... INERTE ») et la valeur JcJ reste inactive : changer les deux ensemble.
     struct MoissonAura
     {
         uint32 sort;
@@ -101,13 +110,13 @@ namespace CoaArtisanatIds
     constexpr std::array<MoissonAura, 8> MOISSON_AURAS =
     {{
         { 9112072, 0, 79, 8, 4 },        // degats physiques en %
-        { 9112073, 1, 29, 120, 80 },     // Force
-        { 9112074, 0, 99, 250, 160 },    // puissance d'attaque
-        { 9112074, 1, 124, 250, 160 },   // puissance d'attaque a distance
+        { 9112073, 1, 29, 25, 17 },      // Force (80 : 120 / 80)
+        { 9112074, 0, 99, 50, 32 },      // puissance d'attaque (80 : 250 / 160)
+        { 9112074, 1, 124, 50, 32 },     // puissance d'attaque a distance (80 : 250 / 160)
         { 9112077, 0, 138, 6, 3 },       // hate de melee en %
-        { 9112078, 0, 29, 120, 80 },     // Agilite
-        { 9112081, 1, 13, 120, 80 },     // puissance des sorts (degats)
-        { 9112081, 2, 135, 120, 80 },    // puissance des sorts (soins)
+        { 9112078, 0, 29, 25, 17 },      // Agilite (80 : 120 / 80)
+        { 9112081, 1, 13, 25, 17 },      // puissance des sorts, degats (80 : 120 / 80)
+        { 9112081, 2, 135, 25, 17 },     // puissance des sorts, soins (80 : 120 / 80)
     }};
     struct MoissonDegats
     {
@@ -117,9 +126,9 @@ namespace CoaArtisanatIds
     };
     constexpr std::array<MoissonDegats, 3> MOISSON_DEGATS =
     {{
-        { 9112076, 1200, 600 },
-        { 9112079, 900, 450 },
-        { 9112083, 1400, 700 },
+        { 9112076, 300, 150 },           // 80 : 1 200 / 600
+        { 9112079, 225, 113 },           // 80 : 900 / 450
+        { 9112083, 350, 175 },           // 80 : 1 400 / 700
     }};
 
     // ---- Dosages [H] (spec T1-4, conception § 2) ------------------------------------------------------------------
@@ -143,7 +152,8 @@ namespace CoaArtisanatIds
     constexpr uint32 CHANCE_COEUR_POUR_CENT = 25;               // hors garanti hebdomadaire
     constexpr uint32 COMPTES_HUMAINS_GARANTI = 2;               // comptes humains distincts pour le garanti
     constexpr uint32 PART_PARTICIPATION_POUR_MILLE = 20;        // 2 % des PV du Colosse, inflige ou soigne
-    constexpr uint8 NIVEAU_RECOMPENSE = 70;
+    // Plafond 60 (D-A5 (a)) : plafond moins 10, meme logique qu'au 80 (il etait 70).
+    constexpr uint8 NIVEAU_RECOMPENSE = 50;
     constexpr uint32 RECOMPENSES_PAR_JOUR = 2;
     constexpr uint32 RESSOURCES_VERTES = 2;
     constexpr uint32 CHANCE_RARE_POUR_CENT = 50;

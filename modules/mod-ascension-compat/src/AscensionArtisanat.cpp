@@ -77,10 +77,14 @@ namespace
     // 63001-63014 : Faille ; 63015-63018 : Nuit (D-PO-49) ; reserve jusqu'a 63020, comme le generateur de dev-monde
     // (outils/artisanat/generer.py, plage « sets » 63001-63020).
     constexpr uint32 ARTISANAT_SET_MAX = 63020;
-    constexpr uint32 ARTISANAT_GRILLE_MIN = 708;
-    constexpr uint32 ARTISANAT_GRILLE_MAX = 1999;
-    constexpr uint8 NIVEAU_EVEIL = 80;
-    constexpr uint32 ITEM_LEVEL_EVEILLE = 213;
+    // Plafond au 60 (PLAN-plafond-60.md § 3.5, D-PO-53) : l'eveil se fait au 60 ; c'est aussi le plafond des jalons et
+    // des points de talent (Plafond, Jalons). Le repli d'eveil par grille (version eveillee au niveau d'objet 213) est
+    // retire : l'eveil ne passe plus que par la table coa_artisanat_etape (0 piece a grille en base, mesure le 17/10).
+    constexpr uint8 NIVEAU_EVEIL = 60;
+    // Niveau auquel les valeurs fixes des signatures (coa_artisanat_signature.valeur, valeur_arene) sont dosees : la
+    // valeur vaut « valeur x min(niveau, ref) / ref ». Constante du module, PAS CONFIG_MAX_PLAYER_LEVEL : un passage du
+    // royaume au 70 ne doit pas rescaler les valeurs sans le dire (D-A4).
+    constexpr uint8 NIVEAU_REFERENCE_VALEURS = 60;
 
     constexpr std::string_view PREFIXE_ADDON = "COA_ATL\t";   // CONCEPTION-artisanat-C-atelier.md, messages d'addon
     std::string const CLE_DONNEES = "CoaArtisanatRecopie";
@@ -354,51 +358,8 @@ namespace
 
     // ---- Eveil par message d'addon (repli de D-PO-01) ----------------------------------------------------------
 
-    // Version eveillee de chaque piece de base, lue dans item_template au demarrage : une base porte une grille
-    // d'heritage (ScalingStatDistribution 708-1999) ; sa version eveillee est l'unique piece de la plage, du meme
-    // nom, du meme emplacement, de la meme classe et du meme set, au niveau d'objet 213, sans grille.
-    std::unordered_map<uint32, uint32> VersionEveillee;
-
-    void ChargerVersionsEveillees()
-    {
-        VersionEveillee.clear();
-        std::unordered_map<uint32, std::vector<uint32>> candidats;
-        ItemTemplateContainer const* gabarits = sObjectMgr->GetItemTemplateStore();
-        std::vector<ItemTemplate const*> bases, eveillees;
-        for (auto const& [entree, proto] : *gabarits)
-        {
-            if (!EstPieceArtisanat(&proto))
-                continue;
-            if (proto.ScalingStatDistribution >= ARTISANAT_GRILLE_MIN && proto.ScalingStatDistribution <= ARTISANAT_GRILLE_MAX)
-                bases.push_back(&proto);
-            else if (!proto.ScalingStatDistribution && proto.ItemLevel == ITEM_LEVEL_EVEILLE)
-                eveillees.push_back(&proto);
-        }
-        uint32 ambigues = 0, orphelines = 0;
-        for (ItemTemplate const* b : bases)
-        {
-            uint32 trouvee = 0, nombre = 0;
-            for (ItemTemplate const* e : eveillees)
-                if (e->Name1 == b->Name1 && e->InventoryType == b->InventoryType && e->Class == b->Class
-                    && e->SubClass == b->SubClass && e->ItemSet == b->ItemSet)
-                {
-                    trouvee = e->ItemId;
-                    ++nombre;
-                }
-            if (nombre == 1)
-                VersionEveillee[b->ItemId] = trouvee;
-            else if (nombre == 0)
-                ++orphelines;
-            else
-            {
-                ++ambigues;
-                LOG_ERROR("module", "coa artisanat: piece de base {} : {} versions eveillees candidates, eveil refuse",
-                    b->ItemId, nombre);
-            }
-        }
-        LOG_INFO("module", "coa artisanat: {} pieces de base, {} versions eveillees appariees, {} sans version, {} ambigues",
-            uint32(bases.size()), uint32(VersionEveillee.size()), orphelines, ambigues);
-    }
+    // L'eveil ne passe que par la table coa_artisanat_etape (type 'eveil') : le repli par grille d'heritage (version
+    // eveillee au niveau d'objet 213, ChargerVersionsEveillees) est retire avec le plafond au 60.
 
     void Repondre(Player* joueur, std::string const& texte)
     {
@@ -484,7 +445,7 @@ namespace
                 e.orCuivre = f[4].Get<uint32>();
                 bool valide = (type == "eveil" || type == "palier")
                     && EstPieceArtisanat(sObjectMgr->GetItemTemplate(de)) && EstPieceArtisanat(sObjectMgr->GetItemTemplate(e.vers))
-                    && de != e.vers && e.niveau >= 1 && e.niveau <= DEFAULT_MAX_LEVEL;
+                    && de != e.vers && e.niveau >= 1 && e.niveau <= sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
                 if (e.orCuivre > MAX_MONEY_AMOUNT)
                     valide = false;
                 for (std::size_t i = 0; i < e.objets.size(); ++i)
@@ -509,13 +470,7 @@ namespace
                     continue;
                 }
                 if (e.eveil)
-                {
                     ++eveils;
-                    auto it = VersionEveillee.find(de);
-                    if (it != VersionEveillee.end() && it->second != e.vers)
-                        LOG_WARN("module", "coa artisanat: eveil de {} : la table dit {}, l'appariement par grille {} ; la table l'emporte",
-                            de, e.vers, it->second);
-                }
                 else
                     ++paliers;
                 Etapes[de] = e;
@@ -548,19 +503,10 @@ namespace
         if (piece->IsInTrade())
             return refuser("PIECE");
 
-        // L'etape : la table d'abord ; pour l'eveil seulement, l'appariement par grille (gratuit) en repli.
+        // L'etape : la table seule (le repli par grille est retire avec le plafond au 60).
         EtapeArtisanat const* etape = nullptr;
-        EtapeArtisanat repli;
         if (auto it = Etapes.find(piece->GetEntry()); it != Etapes.end() && it->second.eveil == eveil)
             etape = &it->second;
-        else if (eveil && it == Etapes.end())
-            if (auto v = VersionEveillee.find(piece->GetEntry()); v != VersionEveillee.end())
-            {
-                repli.vers = v->second;
-                repli.eveil = true;
-                repli.niveau = NIVEAU_EVEIL;
-                etape = &repli;
-            }
         if (!etape)
             return refuser("PIECE", eveil ? "Cette pièce ne peut pas être éveillée." : "Cette pièce ne peut pas être améliorée.");
         if (joueur->GetLevel() < etape->niveau)
@@ -717,26 +663,38 @@ namespace
 
     constexpr uint32 SKILL_FORGE = 164;
     // Les 6 rangs de la Forge (Apprenti 2018 ... Grand maitre 51300). Le livre des metiers d'Ascension lance le sort du
-    // rang de la competence max (Ranks[450] = 51300, patch-B ProfessionUtil.lua) : sans lui, la Forge ne s'ouvre pas (P-236).
+    // rang de la competence max (Ranks[max], patch-B ProfessionUtil.lua) : sans lui, la Forge ne s'ouvre pas (P-236).
+    // Plafond des metiers au 60 : 375 (D-C2 (b), Grand maitre retire du dresseur 200001) ; Ranks[375] = 29844 (Maitre,
+    // rang 5), lu dans ProfessionUtil.lua du patch-B. Le banc n'apprend donc que les 5 premiers rangs.
+    constexpr uint16 COMPETENCE_MAX = 375;
+    constexpr std::size_t RANGS_APPRIS = 5;
     constexpr std::array<uint32, 6> RANGS_FORGE = { 2018, 3100, 3538, 9785, 29844, 51300 };
     constexpr uint32 RECETTE_MIN = 9111000;
     constexpr uint32 RECETTE_MAX = 9113999;
     constexpr uint32 OR_MINIMUM = 1000000;           // 100 po
 
     // Ids v2 (artisanat/ids-figes-v2.json, D-PO-24) : le Heaume du Rempart (FAI-P2-07) et ses Garde-poignets (FAI-P2-01).
-    // « BASE » : la piece qu'on eveille, le palier 70.
+    // Versions par piece (generer.py, VF = 13) : 0-6 paliers 10-70, 7 eveillee, 8-12 rangs 1-5. Au plafond 60, les
+    // paliers 60 et 70 (versions 5 et 6) ne sont plus produits : « BASE » = la piece qu'on eveille, le palier 50
+    // (version 4 : 9101694 = palier50:FAI-P2-07, 9101616 = palier50:FAI-P2-01, lus dans ids-figes-v2.json).
     constexpr uint32 HEAUME_PALIER10 = 9101690;
-    constexpr uint32 HEAUME_BASE = 9101696;
+    constexpr uint32 HEAUME_BASE = 9101694;
     constexpr uint32 HEAUME_EVEILLE = 9101697;
-    constexpr uint32 GARDE_POIGNETS_BASE = 9101618;
-    // Etape 5 (fiche) : le set 63004 a versions melangees, 5 pieces au niveau 80 (Heaume palier 70, Gantelets palier 70,
-    // Ceinture palier 10, Garde-poignets 213, Solerets 213), et le set 820 (45377, 46154).
-    constexpr std::array<uint32, 7> PIECES_ETAPE5 = { HEAUME_BASE, 9101644, 9101651, 9101619, 9101632, 45377, 46154 };
-    // .artisanat banc set : 4 pieces palier 10 du set 63004 (niveau requis 10), portees par un bot de niveau 20-78.
+    constexpr uint32 GARDE_POIGNETS_BASE = 9101616;
+    constexpr uint32 PALIERS_JUSQUA_BASE = 4;         // palier 10 -> 20 -> 30 -> 40 -> 50
+    // Etape 5 (fiche) : le set 63004 a versions melangees, 5 pieces au niveau 60 (Heaume palier 50, Gantelets palier 50
+    // 9101642, Ceinture palier 10, Garde-poignets eveilles, Solerets eveilles), et un set de Blizzard du 60 a bonus a
+    // 2 pieces : Imperial Plate (ItemSet 321, seuils 2 du DBC du PTR ; Heaume 12427 niveau 54, Plastron 12422 niveau 55).
+    constexpr std::array<uint32, 7> PIECES_ETAPE5 = { HEAUME_BASE, 9101642, 9101651, 9101619, 9101632, 12427, 12422 };
+    // .artisanat banc set : 4 pieces palier 10 du set 63004 (niveau requis 10), portees par un bot de niveau 20 a
+    // NIVEAU_EVEIL - 2 (le banc monte de 2 niveaux).
     constexpr std::array<uint32, 4> PIECES_BANC_SET = { 9101625, 9101638, 9101651, 9101612 };
-    constexpr uint32 GEMME_META = 41398;              // Relentless Earthsiege Diamond
-    constexpr uint32 GEMME_ROUGE = 40111;             // Bold Cardinal Ruby
-    constexpr uint32 ARCANE = 44878;                  // Arcanum of the Stalwart Protector
+    // Gemmes et arcane du 60 (D-A2 (a) : plus de chasse meta au 60, aucune gemme meta utilisable au 60 [M]). Une chasse
+    // meta restante est laissee vide (GEMME_META = 0). Lus en base PTR le 17/10 : 23095 Bold Blood Garnet (niveau 58),
+    // 19782 Presence of Might (arcane de Zul'Gurub, niveau 0).
+    constexpr uint32 GEMME_META = 0;
+    constexpr uint32 GEMME_ROUGE = 23095;             // Bold Blood Garnet
+    constexpr uint32 ARCANE = 19782;                  // Presence of Might
     constexpr uint32 PARCHEMIN = 38771;               // Scroll of Enchant Bracer - Minor Stamina
     constexpr uint32 HUILE = 20748;                   // Brilliant Mana Oil : enchantement temporaire du banc
     constexpr uint32 SAC_VIDE = 41599;                // Frostweave Bag, 20 cases
@@ -747,11 +705,13 @@ namespace
         uint32 nombre;
     };
 
-    // Fiche de seance, § 1 (docs/LOT1-artisanat-seance.md).
-    constexpr std::array<Quantite, 12> INGREDIENTS_SEANCE =
+    // Fiche de seance, § 1 (docs/LOT1-artisanat-seance.md). Les barres du Norfendre (36913, 41163, 37663) sont retirees
+    // au plafond 60 : les reactifs hors de nos plages (composants rebases en Azeroth, PLAN-plafond-60.md § 3.5) sont lus
+    // dans les recettes de Forge en base (ReactifsExternesForge), jamais recopies a la main.
+    constexpr std::array<Quantite, 9> INGREDIENTS_SEANCE =
     {{
         { 5956, 1 }, { 2840, 4 }, { 9101200, 80 }, { 9100101, 80 }, { 9100106, 20 }, { 9100107, 1 },
-        { 36913, 2 }, { 41163, 1 }, { 37663, 1 }, { 9101230, 1 }, { 9101210, 2 }, { 9101208, 2 }
+        { 9101230, 1 }, { 9101210, 2 }, { 9101208, 2 }
     }};
     // Fiche de seance, § 8 : les cinq rangs du Heaume (9111550-9111554).
     constexpr std::array<Quantite, 6> REACTIFS_RANGS =
@@ -873,7 +833,7 @@ namespace
         return gemme ? gemme->spellitemenchantement : 0;
     }
 
-    // Sertit chaque chasse (meta : 41398, sinon 40111) et recalcule le bonus de chasse.
+    // Sertit chaque chasse (meta : GEMME_META, vide au 60 ; sinon GEMME_ROUGE) et recalcule le bonus de chasse.
     void Sertir(Player* joueur, Item* objet)
     {
         ItemTemplate const* proto = objet->GetTemplate();
@@ -912,6 +872,30 @@ namespace
         return recettes;
     }
 
+    // Reactifs des recettes de Forge de la plage qui ne sont pas a nous (entree < 9100000 : barres, cuirs, etoffes du
+    // jeu), chacun au plus grand nombre demande par UNE recette : de quoi lancer n'importe laquelle. Lus dans les sorts
+    // en base (spell_dbc compris), donc toujours a jour des composants regeneres (plafond 60 : Thorium, Arcanite...).
+    std::vector<Quantite> ReactifsExternesForge()
+    {
+        std::vector<Quantite> reactifs;
+        for (uint32 id : RecettesForge())
+        {
+            SpellInfo const* sort = sSpellMgr->GetSpellInfo(id);
+            for (uint8 i = 0; sort && i < MAX_SPELL_REAGENTS; ++i)
+            {
+                if (sort->Reagent[i] <= 0 || sort->ReagentCount[i] == 0 || uint32(sort->Reagent[i]) >= 9100000)
+                    continue;
+                uint32 const entree = uint32(sort->Reagent[i]);
+                auto q = std::find_if(reactifs.begin(), reactifs.end(), [&](Quantite const& r) { return r.entree == entree; });
+                if (q == reactifs.end())
+                    reactifs.push_back({ entree, sort->ReagentCount[i] });
+                else
+                    q->nombre = std::max(q->nombre, sort->ReagentCount[i]);
+            }
+        }
+        return reactifs;
+    }
+
     // Comme .character level : le crochet de niveau passe. Rend faux si un script a refuse le niveau.
     bool MettreAuNiveau(Player* joueur, uint8 niveau)
     {
@@ -939,15 +923,19 @@ namespace
         { 333, { 7411, 7412, 7413, 13920, 28029, 51313 } },    // Enchantement
         { 755, { 25229, 25230, 28894, 28895, 28897, 51311 } }, // Joaillerie
     }};
+    static_assert(RANGS_APPRIS <= std::tuple_size_v<decltype(RangsMetier::rangs)>, "RANGS_APPRIS depasse les rangs connus");
     // Les outils de recolte des 12 noeuds de la salle (item_template.RequiredSkill, rang 1), plus la griffe du coffre.
     constexpr std::array<uint32, 7> OUTILS_RECOLTE = { 5384, 5916, 5937, 16308, 23581, 23674, 5059 };
 
-    // Apprend les 6 rangs du metier et met la competence a `valeur`/450. Un rang dont le sort n'enseigne pas cette
-    // competence (SpellLearnSkill) est saute et journalise.
+    // Apprend les RANGS_APPRIS premiers rangs du metier et met la competence a `valeur`/COMPETENCE_MAX. Un rang dont le
+    // sort n'enseigne pas cette competence (SpellLearnSkill) est saute et journalise. Un rang 6 deja connu (banc d'avant
+    // le plafond) n'est pas retire : le client lit Ranks[COMPETENCE_MAX], le rang 5.
     void Metier(Player* joueur, RangsMetier const& m, uint16 valeur)
     {
-        for (uint32 rang : m.rangs)
+        valeur = std::clamp<uint16>(valeur, 1, COMPETENCE_MAX);
+        for (std::size_t r = 0; r < RANGS_APPRIS; ++r)
         {
+            uint32 const rang = m.rangs[r];
             SpellLearnSkillNode const* noeud = sSpellMgr->GetSpellLearnSkill(rang);
             if (!noeud || noeud->skill != m.competence)
             {
@@ -957,8 +945,8 @@ namespace
             if (!joueur->HasSpell(rang))
                 joueur->learnSpell(rang);
         }
-        // Rang 6 (max 450) en dur : apprendre un rang inferieur a un rang connu laisse GetSkillStep sur ce rang-la.
-        joueur->SetSkill(m.competence, uint16(m.rangs.size()), valeur, 450);
+        // Rang 5 (max 375) en dur : apprendre un rang inferieur a un rang connu laisse GetSkillStep sur ce rang-la.
+        joueur->SetSkill(m.competence, uint16(RANGS_APPRIS), valeur, COMPETENCE_MAX);
     }
 
     void Forge(Player* joueur, uint16 valeur)
@@ -1203,25 +1191,32 @@ namespace
         return std::find(METIERS_RECOLTE.begin(), METIERS_RECOLTE.end(), metier) != METIERS_RECOLTE.end();
     }
 
-    // Plafonds cumules par tranche de niveau (§ 1) : 10-19, 20-29, ..., 70-79, 80.
+    // Plafonds cumules par tranche de niveau, 6 tranches au plafond 60 (PLAN-plafond-60.md § 3.5, D-PO-53, D-A3 (a)) :
+    // 10-19, 20-29, 30-39, 40-49, 50-59, 60. Les plafonds finaux du 80 (72 et 48) sont gardes au 60 : arbres inchanges.
+    // Toujours egales a A.PLAFONDS_TALENTS de l'addon (CoA_Atelier_TalentsLogique.lua) et a talents.json (regles).
+    // Le niveau est borne a NIVEAU_EVEIL : un personnage au-dessus du 60 (bot d'avant le plafond) a le plafond du 60.
     uint32 Plafond(uint8 niveau, bool recolte)
     {
-        static constexpr std::array<uint8, 8> CREATION = { 6, 13, 20, 28, 36, 44, 50, 72 };
-        static constexpr std::array<uint8, 8> RECOLTE = { 4, 9, 14, 20, 26, 32, 37, 48 };
+        static constexpr std::array<uint8, 6> CREATION = { 7, 16, 25, 34, 44, 72 };
+        static constexpr std::array<uint8, 6> RECOLTE = { 5, 11, 17, 23, 32, 48 };
+        niveau = std::min(niveau, NIVEAU_EVEIL);
         if (niveau < 10)
             return 0;
-        std::size_t const tranche = niveau >= 80 ? 7 : std::size_t(niveau / 10 - 1);
+        std::size_t const tranche = niveau >= NIVEAU_EVEIL ? CREATION.size() - 1 : std::size_t(niveau / 10 - 1);
         return recolte ? RECOLTE[tranche] : CREATION[tranche];
     }
 
-    // Points gagnes par les jalons de niveau (D-PO-42, b1) : calcules, jamais stockes, donc retroactifs et hors de portee
-    // d'un oubli. Creation : 1 au 10 puis 1 a chaque niveau impair (6 en 10-19, 36 au 80). Recolte : 1 au 10 puis 1 tous
-    // les 3 niveaux (4 en 10-19, 24 au 80). Toujours sous Plafond().
+    // Points gagnes par les jalons de niveau (D-PO-42, b1 ; pente du 60, D-A3 (a)) : calcules, jamais stockes, donc
+    // retroactifs et hors de portee d'un oubli. Creation : 1 au 10 puis 7 par tranche de 10 niveaux (7 au 19, 36 au 60).
+    // Recolte : 1 au 10 puis 23 sur 50 niveaux (5 au 19, 24 au 60). Toujours sous Plafond() (verifie en fin de chaque
+    // tranche : creation 7/14/21/28/35/36, recolte 5/9/14/18/23/24). Borne a NIVEAU_EVEIL : sans elle, 50 et 33 au 80.
     uint32 Jalons(uint8 niveau, bool recolte)
     {
+        niveau = std::min(niveau, NIVEAU_EVEIL);
         if (niveau < 10)
             return 0;
-        return recolte ? 1 + (niveau - 10) / 3 : 1 + (niveau - 9) / 2;
+        uint32 const au10 = uint32(niveau) - 10;
+        return recolte ? 1 + au10 * 23 / 50 : 1 + au10 * 7 / 10;
     }
 
     struct TalentDef
@@ -1580,7 +1575,8 @@ namespace
     void EnvoyerEtat(Player* joueur)
     {
         EtatTalents* e = Etat(joueur);
-        uint8 const niveau = joueur->GetLevel();
+        // Borne au plafond de l'artisanat, comme Plafond() et Jalons() (et l'addon) : au-dessus du 60, l'etat du 60.
+        uint8 const niveau = std::min(joueur->GetLevel(), NIVEAU_EVEIL);
         Repondre(joueur, Acore::StringFormat("TALENTS:{}:{}:{}:{}:{}:{}:{}:{}", e->metierC, e->metierR, Disponibles(joueur, *e, false),
             Disponibles(joueur, *e, true), Plafond(niveau, false), Plafond(niveau, true), Jalons(niveau, false) + e->gagnesC,
             Jalons(niveau, true) + e->gagnesR));
@@ -1814,8 +1810,8 @@ namespace
     }
 
     // Egide (et tout effet « absorbe_sous_seuil ») : le coup qui ferait passer sous le seuil est absorbe a hauteur de la
-    // valeur (au niveau 80, x niveau / 80 ; valeur JcJ si l'attaquant est controle par un joueur), le reste devient un
-    // bouclier (sort d'effet). Recharge partagee par les sursauts de survie (groupe_sursaut).
+    // valeur (dosee au niveau NIVEAU_REFERENCE_VALEURS, x min(niveau, ref) / ref ; valeur JcJ si l'attaquant est controle
+    // par un joueur), le reste devient un bouclier (sort d'effet). Recharge partagee par les sursauts de survie (groupe_sursaut).
     void DeclencherSignatures(Player* joueur, Unit* attaquant, uint32& degats)
     {
         if (Signatures.empty() || !joueur->IsAlive())
@@ -1836,7 +1832,8 @@ namespace
             Milliseconds& recharge = s->groupeSursaut ? a->sursaut : a->recharges[s->enchant];
             if (maintenant < recharge)
                 continue;
-            uint32 const valeur = uint32(uint64(jcj ? s->valeurArene : s->valeur) * joueur->GetLevel() / DEFAULT_MAX_LEVEL);
+            uint32 const valeur = uint32(uint64(jcj ? s->valeurArene : s->valeur)
+                * std::min(joueur->GetLevel(), NIVEAU_REFERENCE_VALEURS) / NIVEAU_REFERENCE_VALEURS);
             // Un coup mortel meme apres absorption : rien ne se declenche, la recharge n'est pas consommee.
             if (uint64(degats) >= pv + valeur)
                 continue;
@@ -2155,7 +2152,10 @@ namespace
     // absorptions, Egide comprise), morts. L'adversaire du banc (ADVERSAIRE_GARDE, marque) voit ses coups de melee multiplies
     // par `pression` %. Ecrit par les crochets d'unite (fils de carte), lu et remis a zero par la commande (fil monde) : verrou.
     // Rien n'est compte tant qu'aucune mesure n'est ouverte (GardesOuvertes, lu sans verrou).
-    constexpr uint32 ADVERSAIRE_GARDE = 30888;   // « QA Test Dummy 80 Hostile Low Damage » [M creature_template : 80, normal, hostile]
+    // Adversaire du plafond 60 : « Outland Basilisk (Green) » [M creature_template PTR, 17/10 : 60/60, faction 14 (hostile a
+    // tous), rang 0, bete, aucun sort, aucun script ni SmartAI, aucune apparition, modele 16876, sans butin]. Il remplace 30888
+    // (« QA Test Dummy 80 Hostile Low Damage », 80) : aucun mannequin hostile du 60 n'existe (ceux du 60 sont faction 7).
+    constexpr uint32 ADVERSAIRE_GARDE = 17560;
     std::string const CLE_ADVERSAIRE_GARDE = "CoaArtisanatAdversaireGarde";
     struct AdversaireGarde final : public DataMap::Base
     {
@@ -2450,7 +2450,6 @@ namespace
 
         void OnStartup() override
         {
-            ChargerVersionsEveillees();
             ChargerEtapes();
             ChargerReglesMonde();
             ChargerTalents();
@@ -2734,15 +2733,15 @@ namespace
     // Une etape par section de docs/LOT1-artisanat-seance.md.
     constexpr std::array<Etape, 9> ETAPES =
     {{
-        { "Préparer", "niveau 80, Forge 1/450, 100 po, marteau et ingrédients du § 1" },
+        { "Préparer", "niveau 60, Forge 1/375, 100 po, marteau et ingrédients du § 1" },
         { "Maître", "comme 1, recettes de Forge du lot 1 désapprises" },
-        { "Fabriquer", "niveau 80, Forge 450/450, recettes apprises, marteau, ingrédients, 100 po" },
-        { "Récolte", "niveau 80 ; Forge, Couture, Cuir, Alchimie, Enchantement, Joaillerie à 450 (ou « .artisanat essai 4 <compétence> ») ; les 6 outils et la griffe 5059" },
-        { "Améliorer", "niveau 19 (redescendre efface les talents) ; Heaume palier 10 porté, coût des paliers 20 et 30 ; en sac : Heaume et Gantelets palier 70, Ceinture palier 10, Garde-poignets et Solerets 213, 45377, 46154" },
-        { "Éveil", "niveau 80 ; Heaume palier 70 porté + 1 en sac ; Garde-poignets palier 70 ; coût de 2 éveils" },
-        { "Châsses", "niveau 80 ; Heaume palier 70 « Fabriqué par » vous ; gemmes 41398 et 40111 ; arcane 44878 ; Garde-poignets palier 70 ; parchemin 38771 ; coût de 2 éveils" },
-        { "Rangs", "niveau 80 ; Heaume éveillé porté, serti, arcane posée, « Fabriqué par » vous ; réactifs des 5 rangs" },
-        { "Bascule", "niveau 80, Forge 450/450, recettes apprises" },
+        { "Fabriquer", "niveau 60, Forge 375/375, recettes apprises, marteau, ingrédients, 100 po" },
+        { "Récolte", "niveau 60 ; Forge, Couture, Cuir, Alchimie, Enchantement, Joaillerie à 375 (ou « .artisanat essai 4 <compétence> ») ; les 6 outils et la griffe 5059" },
+        { "Améliorer", "niveau 19 (redescendre efface les talents) ; Heaume palier 10 porté, coût des paliers 20 et 30 ; en sac : Heaume et Gantelets palier 50, Ceinture palier 10, Garde-poignets et Solerets éveillés, 12427, 12422" },
+        { "Éveil", "niveau 60 ; Heaume palier 50 porté + 1 en sac ; Garde-poignets palier 50 ; coût de 2 éveils" },
+        { "Châsses", "niveau 60 ; Heaume palier 50 « Fabriqué par » vous ; gemme 23095 ; arcane 19782 ; Garde-poignets palier 50 ; parchemin 38771 ; coût de 2 éveils" },
+        { "Rangs", "niveau 60 ; Heaume éveillé porté, serti, arcane posée, « Fabriqué par » vous ; réactifs des 5 rangs" },
+        { "Bascule", "niveau 60, Forge 375/375, recettes apprises" },
     }};
 
     // Cout cumule des etapes (eveils, ou paliers) de ces pieces (table coa_artisanat_etape), pour que le banc le
@@ -2788,6 +2787,7 @@ namespace
             case 2:
             case 3:
                 liste(INGREDIENTS_SEANCE);
+                liste(ReactifsExternesForge());
                 break;
             case 4:
                 for (uint32 outil : OUTILS_RECOLTE)
@@ -2815,7 +2815,7 @@ namespace
             case 7:
             {
                 cases += PremierTenu(joueur, HEAUME_BASE) ? 0 : 1;
-                for (uint32 entree : { GEMME_META, GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })
+                for (uint32 entree : { GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })   // pas de GEMME_META au 60
                     cases += CasesPour(joueur, entree, 1);
                 uint32 orCuivre = 0;
                 liste(CoutsEtapes({ HEAUME_BASE, GARDE_POIGNETS_BASE }, true, orCuivre));
@@ -2937,6 +2937,8 @@ namespace
             {
                 for (Quantite const& q : INGREDIENTS_SEANCE)
                     completer(q.entree, q.nombre);
+                for (Quantite const& q : ReactifsExternesForge())
+                    completer(q.entree, q.nombre);
                 if (joueur->GetMoney() < OR_MINIMUM)
                     joueur->ModifyMoney(int32(OR_MINIMUM - joueur->GetMoney()));
             };
@@ -2945,7 +2947,7 @@ namespace
             {
                 case 1:
                 case 2:
-                    niveau(80);
+                    niveau(NIVEAU_EVEIL);
                     Forge(joueur, 1);
                     ingredients();
                     if (*etape == 2)
@@ -2953,18 +2955,18 @@ namespace
                     break;
                 case 3:
                 case 9:
-                    niveau(80);
-                    Forge(joueur, 450);
+                    niveau(NIVEAU_EVEIL);
+                    Forge(joueur, COMPETENCE_MAX);
                     recettes(true);
                     if (*etape == 3)
                         ingredients();
                     break;
                 case 4:
                 {
-                    // Les 6 metiers de recolte a la meme competence (450 par defaut, ou celle donnee pour tester les
-                    // seuils de butin : 1, 150, 300, 425), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
-                    uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(450), 1, 450));
-                    niveau(80);
+                    // Les 6 metiers de recolte a la meme competence (COMPETENCE_MAX par defaut, ou celle donnee pour
+                    // tester les seuils de butin : 1, 150, 300, 375), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
+                    uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(COMPETENCE_MAX), 1, COMPETENCE_MAX));
+                    niveau(NIVEAU_EVEIL);
                     for (RangsMetier const& m : METIERS)
                         Metier(joueur, m, valeur);
                     recettes(true);
@@ -2990,11 +2992,11 @@ namespace
                 }
                 case 6:
                 {
-                    niveau(80);
+                    niveau(NIVEAU_EVEIL);
                     Item* porte = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD);
                     if (!porte || porte->GetEntry() != HEAUME_BASE)
                         porter(creer(HEAUME_BASE));
-                    // Le double : un Heaume palier 70 en sac en plus de celui qui est porte.
+                    // Le double : un Heaume palier 50 (la base) en sac en plus de celui qui est porte.
                     uint32 const enSac = joueur->GetItemCount(HEAUME_BASE, false) - (joueur->GetItemByPos(INVENTORY_SLOT_BAG_0,
                         EQUIPMENT_SLOT_HEAD) && joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_HEAD)->GetEntry() == HEAUME_BASE ? 1 : 0);
                     for (uint32 i = enSac; i < 1; ++i)
@@ -3004,18 +3006,18 @@ namespace
                     break;
                 }
                 case 7:
-                    niveau(80);
+                    niveau(NIVEAU_EVEIL);
                     // Un Heaume de base signe suffit : on n'en cree un que s'il n'y en a aucun.
                     if (!PremierTenu(joueur, HEAUME_BASE))
                         if (Item* heaume = creer(HEAUME_BASE))
                             SignerPar(joueur, heaume);
-                    for (uint32 entree : { GEMME_META, GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })
+                    for (uint32 entree : { GEMME_ROUGE, ARCANE, GARDE_POIGNETS_BASE, PARCHEMIN })   // pas de GEMME_META au 60
                         completer(entree, 1);
                     coutsEveil();
                     break;
                 case 8:
                 {
-                    niveau(80);
+                    niveau(NIVEAU_EVEIL);
                     // Le Heaume eveille deja tenu est repris (sans cumul), sinon cree ; il est mis en etat puis porte.
                     Item* heaume = PremierTenu(joueur, HEAUME_EVEILLE);
                     if (!heaume)
@@ -3165,7 +3167,7 @@ namespace
         }
 
         // Phase 1 : Heaume palier 10 fabrique par le personnage (sans chasse), enchantement permanent (parchemin) et
-        // temporaire (huile, 30 min). Phase 2 : les 6 paliers 10 -> 70 (AMELIORER). Phase 3 : eveil du palier 70. Phase 4 : rangs
+        // temporaire (huile, 30 min). Phase 2 : les 4 paliers 10 -> 50 (AMELIORER). Phase 3 : eveil du palier 50. Phase 4 : rangs
         // 1-5 depuis la piece portee. Chaque etape payante : refus sans reactifs et au niveau requis - 1 (premiere
         // etape), puis cout preleve et recopie verifies. Chaque phase sauvegarde le personnage : item_instance se lit
         // entre deux phases.
@@ -3186,7 +3188,7 @@ namespace
                 return true;
             if (j->GetLevel() != NIVEAU_EVEIL)
             {
-                handler->PSendSysMessage("banc recopie: {} doit etre niveau 80 (il est {}).", nom, uint32(j->GetLevel()));
+                handler->PSendSysMessage("banc recopie: {} doit etre niveau {} (il est {}).", nom, uint32(NIVEAU_EVEIL), uint32(j->GetLevel()));
                 return true;
             }
 
@@ -3209,7 +3211,7 @@ namespace
                 Item* piece = PremierTenu(j, HEAUME_PALIER10);
                 if (!piece)
                     return handler->SendSysMessage("banc recopie 2: aucun Heaume palier 10 (phase 1 d'abord)."), true;
-                for (uint32 n = 0; piece && piece->GetEntry() != HEAUME_BASE && n < 6; ++n)
+                for (uint32 n = 0; piece && piece->GetEntry() != HEAUME_BASE && n < PALIERS_JUSQUA_BASE; ++n)
                     piece = EtapeBanc(handler, j, piece, SorteEtape::Palier, Acore::StringFormat("banc recopie 2: palier {}", n + 1), n == 0);
                 handler->PSendSysMessage("banc recopie 2: fin sur {} (attendu {}).", piece ? piece->GetEntry() : 0, HEAUME_BASE);
                 j->SaveToDB(false, false);
@@ -3220,12 +3222,12 @@ namespace
             {
                 Item* heaume = PremierTenu(j, HEAUME_BASE);
                 if (!heaume)
-                    return handler->SendSysMessage("banc recopie 3: aucun Heaume palier 70 (phases 1 et 2 d'abord)."), true;
-                // Les paliers n'ont pas de chasse : on sertit la 213 apres l'eveil, pour que les rangs recopient des gemmes.
+                    return handler->SendSysMessage("banc recopie 3: aucun Heaume palier 50 (phases 1 et 2 d'abord)."), true;
+                // Les paliers n'ont pas de chasse : on sertit l'eveillee apres l'eveil, pour que les rangs recopient des gemmes.
                 if (Item* eveillee = EtapeBanc(handler, j, heaume, SorteEtape::Eveil, "banc recopie 3: eveil", true))
                 {
                     Sertir(j, eveillee);
-                    handler->PSendSysMessage("banc recopie 3: 213 sertie {}", Decrire(eveillee));
+                    handler->PSendSysMessage("banc recopie 3: eveillee sertie {}", Decrire(eveillee));
                 }
                 j->SaveToDB(false, false);
                 return true;
@@ -3276,7 +3278,7 @@ namespace
                     return sort ? j->CastSpell(j, sort, drapeaux, piece) : SPELL_FAILED_UNKNOWN;
                 };
 
-                // Refus : sans reactifs, puis au niveau 79. Un refus qui n'a pas lieu consomme la piece : on s'arrete.
+                // Refus : sans reactifs, puis au niveau NIVEAU_EVEIL - 1. Un refus qui n'a pas lieu consomme la piece : on s'arrete.
                 for (Quantite const& q : REACTIFS_RANGS)
                     if (uint32 const n = j->GetItemCount(q.entree, false))
                         j->DestroyItemCount(q.entree, n, true);
@@ -3292,8 +3294,8 @@ namespace
                 r = lancer();
                 j->SetLevel(NIVEAU_EVEIL);
                 intacte = j->GetItemByGuid(courant) != nullptr;
-                handler->PSendSysMessage("banc recopie 4: niveau 79 -> resultat {} (condition : 172), piece intacte={}, reactifs intacts={}",
-                    uint32(r), intacte ? "oui" : "NON", j->GetItemCount(9100101, false) == 24 ? "oui" : "NON");
+                handler->PSendSysMessage("banc recopie 4: niveau {} -> resultat {} (condition : 172), piece intacte={}, reactifs intacts={}",
+                    uint32(NIVEAU_EVEIL - 1), uint32(r), intacte ? "oui" : "NON", j->GetItemCount(9100101, false) == 24 ? "oui" : "NON");
                 if (!intacte)
                     return remettre(), true;
 
@@ -3476,7 +3478,7 @@ namespace
 
             if (action == "signature")
             {
-                Forge(j, 450);
+                Forge(j, COMPETENCE_MAX);
                 for (uint32 entree : { HEAUME_PALIER10, uint32(PIECES_BANC_SET[3]) })   // Heaume et Garde-poignets, palier 10
                     if (Item* piece = FabriquerBanc(handler, j, entree))
                     {
@@ -3508,8 +3510,8 @@ namespace
                 RecalculerSignatures(j);
                 SignaturesActives* sa = j->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
                 handler->PSendSysMessage("banc talent: {} pieces signees portees ; {} signature(s) active(s){}", portees,
-                    uint32(sa->actives.size()), sa->actives.empty() ? std::string() : Acore::StringFormat(" : {} rang {} valeur {} au 80",
-                    sa->actives[0]->forme, uint32(sa->actives[0]->rang), sa->actives[0]->valeur));
+                    uint32(sa->actives.size()), sa->actives.empty() ? std::string() : Acore::StringFormat(" : {} rang {} valeur {} au {}",
+                    sa->actives[0]->forme, uint32(sa->actives[0]->rang), sa->actives[0]->valeur, uint32(NIVEAU_REFERENCE_VALEURS)));
                 if (sa->actives.empty())
                     return true;
                 sa->sursaut = Milliseconds(0);
@@ -3913,7 +3915,7 @@ namespace
         // dans ses chasses, le recolteur en 9 (le bot), la facette Coeur de forge en 8 si c'est une Oeuvre, sinon une
         // signature en 7 ; la porte (l'equipement d'origine revient a la fin). Puis <n> renforcements (1-5) : pour chacun,
         // le sort de l'objet QUI CREE une piece de l'artisanat (pas le premier : sur une Oeuvre, le premier est la lueur),
-        // refus sans reactifs et au niveau 79 au premier, reactifs fournis, couts et recopie (Conforme : enchantements,
+        // refus sans reactifs et au niveau NIVEAU_EVEIL - 1 au premier, reactifs fournis, couts et recopie (Conforme : enchantements,
         // charges des emplacements 7-9, fabricant) verifies, gabarit de la piece neuve (sorts) rapporte. Reactifs du bot remis
         // a leur niveau d'avant ; la derniere piece est detruite, sauf « garder ».
         static uint32 SortDeCreation(ItemTemplate const* proto, uint8& index)
@@ -3974,7 +3976,8 @@ namespace
             if (!j)
                 return true;
             if (j->GetLevel() != NIVEAU_EVEIL)
-                return handler->PSendSysMessage("banc rang: {} doit etre niveau 80 (il est {}).", nom, uint32(j->GetLevel())), true;
+                return handler->PSendSysMessage("banc rang: {} doit etre niveau {} (il est {}).", nom, uint32(NIVEAU_EVEIL),
+                    uint32(j->GetLevel())), true;
             if (j->IsInFlight())
                 return handler->SendSysMessage("banc rang: le bot est en vol, relancer quand il sera pose."), true;
             ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
@@ -4100,7 +4103,8 @@ namespace
                         if (sort->Reagent[i] > 0)
                             Completer(j, uint32(sort->Reagent[i]), sort->ReagentCount[i]);
                     j->SetLevel(NIVEAU_EVEIL - 1);
-                    bool const intacte = testRefus("niveau 79 (condition 27)", SPELL_FAILED_CUSTOM_ERROR);
+                    std::string const tagNiveau = Acore::StringFormat("niveau {} (condition 27)", uint32(NIVEAU_EVEIL - 1));
+                    bool const intacte = testRefus(tagNiveau.c_str(), SPELL_FAILED_CUSTOM_ERROR);
                     j->SetLevel(NIVEAU_EVEIL);
                     if (!intacte)
                         break;
@@ -4443,7 +4447,8 @@ namespace
                 return true;
             uint8 const n = j->GetLevel();
             if (n < 20 || n + 2 > NIVEAU_EVEIL)
-                return handler->PSendSysMessage("banc set: {} doit etre entre les niveaux 20 et 78 (il est {}).", nom, uint32(n)), true;
+                return handler->PSendSysMessage("banc set: {} doit etre entre les niveaux 20 et {} (il est {}).", nom,
+                    uint32(NIVEAU_EVEIL - 2), uint32(n)), true;
             // Suivies par guid : un passage de niveau peut faire agir d'autres scripts sur l'inventaire.
             std::vector<std::pair<ObjectGuid, uint16>> pieces;   // piece, sa place en sac avant d'etre portee
             for (uint32 entree : PIECES_BANC_SET)
