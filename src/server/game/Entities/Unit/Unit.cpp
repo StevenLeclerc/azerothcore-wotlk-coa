@@ -4337,6 +4337,36 @@ void Unit::_UpdateAutoRepeatSpell()
             {
                 InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
             }
+            // The CoA classes taught Auto Shot (Witch Hunter, Ranger, Starcaller, Tinker): the client
+            // never swaps it for melee at contact, and a failing Auto Shot is never dropped, so the
+            // player kept no swing and a combat stance forever. Swap to melee when too close, drop
+            // the shot when it can never resume, otherwise wait like a hunter.
+            else if (IsPlayer() && IsAscensionClass(getClass()))
+            {
+                switch (result)
+                {
+                    case SPELL_FAILED_TOO_CLOSE:
+                    {
+                        Unit* target = m_currentSpells[CURRENT_AUTOREPEAT_SPELL]->m_targets.GetUnitTarget();
+                        InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+                        if (target && target->IsAlive() && IsValidAttackTarget(target))
+                            Attack(target, true);
+                        break;
+                    }
+                    // InterruptSpell also sends the auto repeat cancel that lowers the client's stance
+                    case SPELL_FAILED_TARGETS_DEAD:
+                    case SPELL_FAILED_BAD_TARGETS:
+                    case SPELL_FAILED_BAD_IMPLICIT_TARGETS:
+                    case SPELL_FAILED_TARGET_FRIENDLY:
+                    case SPELL_FAILED_EQUIPPED_ITEM_CLASS:
+                    case SPELL_FAILED_NO_AMMO:
+                    case SPELL_FAILED_CASTER_DEAD:
+                        InterruptSpell(CURRENT_AUTOREPEAT_SPELL);
+                        break;
+                    default: // moving, out of range, sight, facing, loss of control...
+                        break;
+                }
+            }
 
             return;
         }
