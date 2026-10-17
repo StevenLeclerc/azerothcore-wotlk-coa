@@ -1429,6 +1429,9 @@ namespace
         void SendCapability(Player* player, bool ready)
         {
             WorldPacket packet;
+            // Ne pas changer ces valeurs sans le client : LocalManastormCompat.lua (patch-B.MPQ) n'accepte le message
+            // que s'il vaut EXACTEMENT 1:16384:10:80 (sinon Manastorm local reste coupe). Le 80 n'y sert qu'a refuser un
+            // joueur de niveau superieur (C_LFG:CanUseManastorm) : sans effet sous le plafond 60.
             std::string const message = ready ? "LOCAL_MANASTORM\t1:16384:10:80" : "LOCAL_MANASTORM\t0:0:0:0";
             ChatHandler::BuildChatPacket(packet, CHAT_MSG_WHISPER, LANG_ADDON, player->GetGUID(), player->GetGUID(),
                 message, 0, player->GetName(), player->GetName(), 0, false);
