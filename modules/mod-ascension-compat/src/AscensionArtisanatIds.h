@@ -94,11 +94,11 @@ namespace CoaArtisanatIds
     // et le mana de 4 % (9112081), effets instantanes hors aura.
     //
     // Plafond 60 (PLAN-plafond-60.md § 3.5, D-PO-53) : valeurs fixes redosees au 60 en meme temps que les donnees de
-    // dev-monde (generer.py, MOISSON) : +120 caracteristique / puissance des sorts -> 25, +250 puissance d'attaque -> 50,
-    // degats d'Ombre 1 200 / 900 / 1 400 -> 300 / 225 / 350 ; valeurs JcJ dans la meme proportion qu'au 80 (2/3, 0,64,
-    // 1/2, arrondies a l'entier le plus proche) ; pourcentages (8 % de degats, 6 % de hate) inchanges. Ces nombres sont
-    // ceux de la proposition retenue par le PO ; si les donnees posees different, le temoin du demarrage le dit
-    // (« moisson jcj : n/11 ... INERTE ») et la valeur JcJ reste inactive : changer les deux ensemble.
+    // dev-monde (generer.py e2b4618, MOISSON : au60() = x 0,2) : +120 caracteristique / puissance des sorts -> 24, +250
+    // puissance d'attaque -> 50, degats d'Ombre 1 200 / 900 / 1 400 -> 240 / 180 / 280 ; valeurs JcJ dans la meme
+    // proportion qu'au 80 (2/3, 0,64, 1/2 : toutes entieres) ; pourcentages (8 % de degats, 6 % de hate) inchanges. Si
+    // les donnees posees different, le temoin du demarrage le dit (« moisson jcj : n/11 ... INERTE ») et la valeur JcJ
+    // reste inactive : changer les deux ensemble.
     struct MoissonAura
     {
         uint32 sort;
@@ -110,13 +110,13 @@ namespace CoaArtisanatIds
     constexpr std::array<MoissonAura, 8> MOISSON_AURAS =
     {{
         { 9112072, 0, 79, 8, 4 },        // degats physiques en %
-        { 9112073, 1, 29, 25, 17 },      // Force (80 : 120 / 80)
+        { 9112073, 1, 29, 24, 16 },      // Force (80 : 120 / 80)
         { 9112074, 0, 99, 50, 32 },      // puissance d'attaque (80 : 250 / 160)
         { 9112074, 1, 124, 50, 32 },     // puissance d'attaque a distance (80 : 250 / 160)
         { 9112077, 0, 138, 6, 3 },       // hate de melee en %
-        { 9112078, 0, 29, 25, 17 },      // Agilite (80 : 120 / 80)
-        { 9112081, 1, 13, 25, 17 },      // puissance des sorts, degats (80 : 120 / 80)
-        { 9112081, 2, 135, 25, 17 },     // puissance des sorts, soins (80 : 120 / 80)
+        { 9112078, 0, 29, 24, 16 },      // Agilite (80 : 120 / 80)
+        { 9112081, 1, 13, 24, 16 },      // puissance des sorts, degats (80 : 120 / 80)
+        { 9112081, 2, 135, 24, 16 },     // puissance des sorts, soins (80 : 120 / 80)
     }};
     struct MoissonDegats
     {
@@ -126,9 +126,9 @@ namespace CoaArtisanatIds
     };
     constexpr std::array<MoissonDegats, 3> MOISSON_DEGATS =
     {{
-        { 9112076, 300, 150 },           // 80 : 1 200 / 600
-        { 9112079, 225, 113 },           // 80 : 900 / 450
-        { 9112083, 350, 175 },           // 80 : 1 400 / 700
+        { 9112076, 240, 120 },           // 80 : 1 200 / 600
+        { 9112079, 180, 90 },            // 80 : 900 / 450
+        { 9112083, 280, 140 },           // 80 : 1 400 / 700
     }};
 
     // ---- Dosages [H] (spec T1-4, conception § 2) ------------------------------------------------------------------
