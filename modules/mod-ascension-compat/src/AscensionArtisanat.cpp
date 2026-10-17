@@ -896,6 +896,23 @@ namespace
         return reactifs;
     }
 
+    // Ingredients de la seance (§ 1) fusionnes avec les reactifs exterieurs de la Forge : une entree presente dans les
+    // deux listes (2840...) n'apparait qu'une fois, au plus grand des deux nombres. Completer() complete jusqu'a ce
+    // nombre sans cumuler : compter les deux listes a part surestimerait les cases (faux refus « sacs pleins »).
+    std::vector<Quantite> IngredientsEssai()
+    {
+        std::vector<Quantite> tout(INGREDIENTS_SEANCE.begin(), INGREDIENTS_SEANCE.end());
+        for (Quantite const& r : ReactifsExternesForge())
+        {
+            auto q = std::find_if(tout.begin(), tout.end(), [&](Quantite const& t) { return t.entree == r.entree; });
+            if (q == tout.end())
+                tout.push_back(r);
+            else
+                q->nombre = std::max(q->nombre, r.nombre);
+        }
+        return tout;
+    }
+
     // Comme .character level : le crochet de niveau passe. Rend faux si un script a refuse le niveau.
     bool MettreAuNiveau(Player* joueur, uint8 niveau)
     {
@@ -2786,8 +2803,7 @@ namespace
             case 1:
             case 2:
             case 3:
-                liste(INGREDIENTS_SEANCE);
-                liste(ReactifsExternesForge());
+                liste(IngredientsEssai());
                 break;
             case 4:
                 for (uint32 outil : OUTILS_RECOLTE)
@@ -2935,9 +2951,7 @@ namespace
             };
             auto ingredients = [&]
             {
-                for (Quantite const& q : INGREDIENTS_SEANCE)
-                    completer(q.entree, q.nombre);
-                for (Quantite const& q : ReactifsExternesForge())
+                for (Quantite const& q : IngredientsEssai())
                     completer(q.entree, q.nombre);
                 if (joueur->GetMoney() < OR_MINIMUM)
                     joueur->ModifyMoney(int32(OR_MINIMUM - joueur->GetMoney()));
@@ -2964,7 +2978,8 @@ namespace
                 case 4:
                 {
                     // Les 6 metiers de recolte a la meme competence (COMPETENCE_MAX par defaut, ou celle donnee pour
-                    // tester les seuils de butin : 1, 150, 300, 375), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
+                    // tester les seuils de butin des noeuds : 1, 150, 300 ; le palier 425 de generer.py est
+                    // inatteignable sous le plafond 375, ecart de donnees signale a dev-monde), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
                     uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(COMPETENCE_MAX), 1, COMPETENCE_MAX));
                     niveau(NIVEAU_EVEIL);
                     for (RangsMetier const& m : METIERS)
