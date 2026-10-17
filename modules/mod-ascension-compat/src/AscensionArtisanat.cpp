@@ -2978,8 +2978,9 @@ namespace
                 case 4:
                 {
                     // Les 6 metiers de recolte a la meme competence (COMPETENCE_MAX par defaut, ou celle donnee pour
-                    // tester les seuils de butin des noeuds : 1, 150, 300 ; le palier 425 de generer.py est
-                    // inatteignable sous le plafond 375, ecart de donnees signale a dev-monde), et les 6 outils : les 12 noeuds de la salle s'ouvrent.
+                    // tester les seuils de butin des noeuds : 1, 150, 300 ; le palier haut est a 300 depuis P-259, car au
+                    // niveau 60 une condition de competence au-dessus de 300 est rejetee au chargement), et les 6 outils :
+                    // les 12 noeuds de la salle s'ouvrent.
                     uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(COMPETENCE_MAX), 1, COMPETENCE_MAX));
                     niveau(NIVEAU_EVEIL);
                     for (RangsMetier const& m : METIERS)
