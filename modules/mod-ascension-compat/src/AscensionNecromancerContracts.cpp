@@ -127,6 +127,11 @@ void ApplyContracts(SpellInfo* info)
         info->Effects[0].ApplyAuraName = SPELL_AURA_MOD_ATTACK_POWER;
     if (id == 561318)
         info->Effects[0].ValueMultiplier = 1.0f;
+    // Harvest Plague, 10 ranks: effect 0 is SPELL_AURA_PERIODIC_LEECH with ValueMultiplier 0 in Spell.dbc, so the
+    // leech healed nothing (banc des soins 17/10/2026, docs/DIAG-equilibrage-classes-20261017.md N1). Same fix as 561318.
+    for (uint32 rank : {500968, 501890, 501891, 501892, 583255, 583256, 572842, 572843, 572844, 572845})
+        if (id == rank)
+            info->Effects[0].ValueMultiplier = 1.0f;
     if (id == 573131)
         AscensionContract::SetDuration(info, 1, "Necromancer"); // finite, refreshable ten-second army buff
     if (id == 807098)
