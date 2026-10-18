@@ -225,6 +225,23 @@ CoaArtisanat.AmeliorerParMessage = 1
 
 CoaArtisanat.TalentsParMessage = 1
 
+#    CoaArtisanat.ResignerParMessage
+#        Description: Message COA_ATL « RESIGNER:<sac>:<case>:<objet>[:PUR] » (talent Re-signer de l'Astrolabe, 18/10).
+#                     « :PUR » (Maj+clic dans l'Atelier) consomme un materiau pur de son metier pour le rang 4 ; sans lui,
+#                     aucun pur n'est pris. Coupe : RESIGNER_ERR:DESACTIVE.
+#        Default:     1
+
+CoaArtisanat.ResignerParMessage = 1
+
+#    CoaArtisanat.ComposantReserve
+#        Description: Talent « Composant d'artisan » (Forge, Cuir, Couture) : les recettes de composant d'artisan exigent
+#                     le talent chez le dresseur (trainer_spell.ReqAbility1, fichiers 3-contenu-composant-reserve.sql) et
+#                     sont retirees a la connexion aux non-specialistes. 0 : on ne retire rien (retour arriere ; remettre
+#                     aussi ReqAbility1 a 0 pour rouvrir le dresseur).
+#        Default:     1
+
+CoaArtisanat.ComposantReserve = 1
+
 #    CoaArtisanat.Monde.Objet.Vert / .Rare / .Epique
 #        Description: Materiaux de monde (D-PO-19) ajoutes au butin des creatures qui ont une table de butin et
 #                     rapportent de l'experience au detenteur du butin (ni grises pour lui, ni NO_XP).

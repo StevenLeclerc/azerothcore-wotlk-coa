@@ -2024,7 +2024,8 @@ namespace
         Milliseconds sursaut{ 0 };          // fin de la recharge partagee des sursauts de survie
         std::map<uint32, Milliseconds> recharges;   // autres signatures, par enchantement
         uint32 chargesCoeur = 0;            // critiques comptes pour Coeur de forge
-        uint32 egides = 0;                  // declenchements de sursaut de ce joueur (banc de garde G1)
+        uint32 egides = 0;                  // declenchements de l'Egide (absorbe_sous_seuil) de ce joueur (banc de garde G1)
+        uint32 pierres = 0;                 // lot T : declenchements de Pierre de garde (soin_sous_seuil), hors compteur G1
         uint32 coeurs = 0;                  // declenchements de Coeur de forge de ce joueur (banc de garde G1)
         int32 gardeParade = 0;              // Garde-lame pose : score de parade et de blocage (0 : aucune aura)
         int32 gardeBlocage = 0;
@@ -2290,9 +2291,14 @@ namespace
             int32 const bp = int32(uint64(valeurSursaut) * (jcjAllie ? bastion->valeurArene : bastion->valeur) / 100);
             if (bp <= 0)
                 continue;
-            joueur->CastCustomSpell(allie, bastion->sortEffet, &bp, nullptr, nullptr, true);
-            if (AuraEffect* bouclier = allie->GetAuraEffect(bastion->sortEffet, EFFECT_0, joueur->GetGUID()))
-                bouclier->ChangeAmount(bp);   // valeur fixe, comme l'Egide
+            // Le sort d'effet reprend le modele 7511, cible SOI (cible A = 1, portee 1) : lance par le porteur, il se
+            // poserait sur le porteur. L'allie le lance donc sur lui-meme, le porteur en lanceur d'origine (le bouclier
+            // porte son guid). Pas de bouclier trouve : ni recharge chez l'allie, ni compte, ni ligne de journal.
+            allie->CastCustomSpell(allie, bastion->sortEffet, &bp, nullptr, nullptr, true, nullptr, nullptr, joueur->GetGUID());
+            AuraEffect* bouclier = allie->GetAuraEffect(bastion->sortEffet, EFFECT_0, joueur->GetGUID());
+            if (!bouclier)
+                continue;
+            bouclier->ChangeAmount(bp);   // valeur fixe, comme l'Egide
             SignaturesActives* b = Actives(allie);
             b->sursaut = std::max(b->sursaut, maintenant + Milliseconds(rechargeMs));
             ++BastionsPoses;
@@ -2346,7 +2352,7 @@ namespace
                     joueur->CastCustomSpell(joueur, s->sortEffet, &bp, nullptr, nullptr, true);
                 }
                 ++DeclenchementsSignatures;
-                ++a->egides;
+                ++a->pierres;   // pas ++egides : le banc G1 lit egides comme le compte de l'Egide
                 LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} soin={} reduit={} main_constante={}",
                     joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, soigne, reduit,
                     a->constantes[i] ? 1 : 0);
@@ -2489,7 +2495,9 @@ namespace
             {
                 if (!joueur->IsValidAttackTarget(cible))
                     continue;
-                bool const jcj = ControleParUnJoueur(cible);
+                // Mecanisme fait des degats de ZONE (modele 26789, 8 m) : lance a la valeur hors JcJ, chaque victime
+                // controlee par un joueur est ramenee a la valeur JcJ dans ModifySpellDamageTaken (ReduireZoneEnJcJ).
+                bool const jcj = e == "proc_degats" && ControleParUnJoueur(cible);
                 int32 const v = int32(ValeurSignature(s, jcj, constantes[i], joueur->GetLevel()));
                 if (v <= 0)
                     continue;
@@ -2516,6 +2524,25 @@ namespace
             recharge = maintenant + Milliseconds(s->rechargeMs);
             ++DeclenchementsProcs;
         }
+    }
+
+    // Mecanisme (proc_degats_distance, lot T) : degats de zone lances a la valeur hors JcJ (DeclencherProcs) ; une victime
+    // controlee par un joueur recoit la part valeur_arene / valeur (garde JcJ D-PO-43), cible principale comprise. La
+    // signature est cherchee dans les places actives du lanceur (Get, jamais GetDefault : rien n'est cree ici).
+    void ReduireZoneEnJcJ(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort)
+    {
+        if (!sort || sort->Id < 9113440 || sort->Id > 9113499 || degats <= 0 || !attaquant || !attaquant->IsPlayer()
+            || !ControleParUnJoueur(cible))
+            return;
+        SignaturesActives const* a = attaquant->CustomData.Get<SignaturesActives>(CLE_SIGNATURES);
+        if (!a)
+            return;
+        for (SignatureDef const* s : a->actives)
+            if (s->effet == "proc_degats_distance" && s->sortEffet == sort->Id && s->valeur)
+            {
+                degats = int32(int64(degats) * s->valeurArene / s->valeur);
+                return;
+            }
     }
 
     // Coeur de forge (T1-5) : chaque critique (compte par les crochets de ArtisanatPlayer et ArtisanatSorts) charge la
@@ -2959,6 +2986,7 @@ namespace
         void ModifySpellDamageTaken(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort) override
         {
             ReduireDegatsPiege(cible, attaquant, degats, sort);   // lot T : Paratonnerre / Sceau mortuaire
+            ReduireZoneEnJcJ(cible, attaquant, degats, sort);     // lot T : Mecanisme, valeur JcJ par victime
             CorrigerDegatsMoisson(attaquant, cible, sort, degats);
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
         }
@@ -3023,7 +3051,9 @@ namespace
     public:
         ArtisanatSorts() : AllSpellScript("CoaArtisanatSorts", { ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_ON_CRIT_CHANCE }) { }
 
-        // Lot T, Baton serein : + valeur % de chance de critique des soins du porteur (soins directs et sur la duree).
+        // Lot T, Baton serein : + valeur % de chance de critique des soins DIRECTS du porteur. Ce crochet n'est appele que
+        // pour les coups directs (Spell.cpp, calcul du critique a l'impact) : les tics d'un soin sur la duree calculent leur
+        // critique dans l'aura, sans lui. Un sort qui porte un soin sur la duree et une part directe : la part directe.
         void OnSpellCritChance(Spell* sort, Unit* /*cible*/, float& chance) override
         {
             if (Signatures.empty() || !sort)
@@ -3416,6 +3446,33 @@ namespace
         return n;
     }
 
+    // Materiau pur : le butin d'un noeud est commun au groupe, et celui qui RAMASSE n'est pas forcement celui qui a
+    // extrait (Main pure). Source du butin (noeud) -> extracteur, retenu au tirage (fil de la carte), relu et oublie au
+    // ramassage (OnPlayerLootItem, meme carte). Plusieurs cartes tournent en parallele : verrou.
+    std::mutex VerrouExtracteurs;
+    std::unordered_map<ObjectGuid, ObjectGuid> Extracteurs;
+
+    void RetenirExtracteur(ObjectGuid source, ObjectGuid extracteur)
+    {
+        if (!source)
+            return;
+        std::lock_guard<std::mutex> verrou(VerrouExtracteurs);
+        if (Extracteurs.size() > 4096)   // purs jamais ramasses (noeud abandonne) : borne
+            Extracteurs.clear();
+        Extracteurs[source] = extracteur;
+    }
+
+    ObjectGuid ExtracteurDe(ObjectGuid source)
+    {
+        std::lock_guard<std::mutex> verrou(VerrouExtracteurs);
+        auto it = Extracteurs.find(source);
+        if (it == Extracteurs.end())
+            return ObjectGuid::Empty;
+        ObjectGuid const g = it->second;
+        Extracteurs.erase(it);
+        return g;
+    }
+
     void AjouterAuButin(Loot* butin, uint32 objet, uint32 nombre)
     {
         if (objet && nombre && sObjectMgr->GetItemTemplate(objet))
@@ -3461,6 +3518,7 @@ namespace
         if (n.pur && Tirage(PCT_MAIN_PURE_RANG * RangTalent(*e, m, "main-pure")))
         {
             AjouterAuButin(butin, n.pur, 1);
+            RetenirExtracteur(butin->sourceWorldObjectGUID, joueur->GetGUID());
             trace += Acore::StringFormat(" pur={}", n.pur);
         }
         if (!trace.empty())
@@ -3529,6 +3587,26 @@ namespace
         return 0;
     }
 
+    // Arene 1c1 contre un gladiateur : NeutraliseEnArene1c1 n'est lu qu'au recalcul des signatures, marque a l'entree
+    // sur la carte (OnPlayerMapChanged), donc AVANT Battleground::AddPlayer ; un recalcul fait avant l'arrivee de
+    // l'adversaire gardait Garde-lame et les passifs tout le match. A l'ouverture des portes (ArenaScript::OnArenaStart,
+    // Battleground.cpp:649, fil monde, les deux combattants presents), on recalcule chaque combattant. Le retour en monde
+    // ouvert recalcule par OnPlayerMapChanged.
+    class ArtisanatArene final : public ArenaScript
+    {
+    public:
+        ArtisanatArene() : ArenaScript("CoaArtisanatArene", { ARENAHOOK_ON_ARENA_START }) { }
+
+        void OnArenaStart(Battleground* bg) override
+        {
+            if (!bg || Signatures.empty() || bg->GetArenaType() != CoaArtisanatIds::TYPE_ARENE_1C1)
+                return;
+            for (auto const& [guid, p] : bg->GetPlayers())
+                if (p)
+                    RecalculerSignatures(p);
+        }
+    };
+
     class ArtisanatButinRecolte final : public MiscScript
     {
     public:
@@ -3543,7 +3621,15 @@ namespace
                 return;
             if (&magasin == &LootTemplates_Skinning)
             {
-                RecolterClassique(detenteur, 393, butin);
+                // LootTemplates_Skinning sert aussi aux creatures qui se recoltent au minage ou a l'herboristerie
+                // (CreatureTemplate::GetRequiredLootSkill) : ce sont alors les talents de CE metier qui s'appliquent ;
+                // l'ingenierie (recuperation) n'a pas d'arbre de recolte.
+                uint32 metier = 393;
+                if (butin->sourceWorldObjectGUID.IsCreature())
+                    if (Creature* c = detenteur->GetMap()->GetCreature(butin->sourceWorldObjectGUID))
+                        metier = uint32(c->GetCreatureTemplate()->GetRequiredLootSkill());
+                if (metier == 393 || metier == 186 || metier == 182)
+                    RecolterClassique(detenteur, metier, butin);
                 return;
             }
             if (&magasin != &LootTemplates_Gameobject || !butin->sourceWorldObjectGUID.IsGameObject())
@@ -3652,10 +3738,12 @@ namespace
         joueur->GetGameObjectListWithEntryInGrid(noeuds, famille, FLAIR_PORTEE);
         GameObject* proche = nullptr;
         float meilleur = FLAIR_PORTEE + 1.0f;
+        bool dernierPret = false;
         for (GameObject* go : noeuds)
         {
             if (!go->isSpawned() || go->getLootState() != GO_READY)
                 continue;
+            dernierPret = dernierPret || go->GetGUID() == f->dernier;
             float const d = joueur->GetDistance(go);
             if (d < meilleur)
             {
@@ -3663,6 +3751,10 @@ namespace
                 proche = go;
             }
         }
+        // Le noeud deja signale a ete recolte (plus GO_READY) ou est hors de portee : oublie, pour qu'il soit signale de
+        // nouveau a sa reapparition (meme GUID).
+        if (!dernierPret)
+            f->dernier.Clear();
         if (!proche || meilleur < FLAIR_DEJA_VU || proche->GetGUID() == f->dernier)
             return;
         f->dernier = proche->GetGUID();
@@ -3677,12 +3769,14 @@ namespace
         LOG_INFO("module", "coa recolte: flair joueur={} noeud={} distance={:.0f}", joueur->GetGUID().GetCounter(), proche->GetEntry(), meilleur);
     }
 
-    // Materiau pur : porte le nom de qui l'a extrait (ITEM_FIELD_CREATOR, conception T v2 § 4), pose au ramassage.
-    void GraverRecolteur(Player* joueur, Item* objet)
+    // Materiau pur : porte le nom de qui l'a extrait (ITEM_FIELD_CREATOR, conception T v2 § 4), pose au ramassage ;
+    // l'extracteur retenu au tirage (ExtracteurDe), sinon celui qui ramasse.
+    void GraverRecolteur(Player* joueur, Item* objet, ObjectGuid source)
     {
         if (!objet || !EstMateriauPur(objet->GetEntry()) || objet->GetGuidValue(ITEM_FIELD_CREATOR))
             return;
-        objet->SetGuidValue(ITEM_FIELD_CREATOR, joueur->GetGUID());
+        ObjectGuid const extracteur = ExtracteurDe(source);
+        objet->SetGuidValue(ITEM_FIELD_CREATOR, extracteur ? extracteur : joueur->GetGUID());
         objet->SetState(ITEM_CHANGED, joueur);
     }
 
@@ -3694,7 +3788,7 @@ namespace
     // de l'artisan qui re-signe. Reponses : RESIGNER_OK:<enchant>:<rang> ou RESIGNER_ERR:<cause>[:...].
     // Une piece portee par un autre (liee) ne peut pas lui etre confiee : le service passe par une piece non liee, ou par
     // l'artisan lui-meme (limite connue, l'emplacement « ne sera pas echange » de la fenetre d'echange n'est pas branche).
-    std::string Resigner(Player* joueur, Item* piece, uint32& enchantPose, uint8& rangPose)
+    std::string Resigner(Player* joueur, Item* piece, uint32& enchantPose, uint8& rangPose, bool avecPur)
     {
         using namespace CoaArtisanatIds;
         if (Talents.empty() || !TablesPersonnages)
@@ -3725,13 +3819,17 @@ namespace
         // materiau est consomme et son recolteur grave en emplacement 9 (conception T v2 § 4 : « Re-signer avec un nouveau
         // materiau pur remplace le recolteur grave par celui de ce materiau, puisque c'est lui qui donne le rang 4 »).
         Item* pur = nullptr;
-        if (rang >= 3 && actuelle.rang < 4)
+        if (avecPur && rang >= 3 && actuelle.rang < 4)
             for (auto const& pm : PURS_DU_METIER)
                 if (pm.metier == m)
                     for (uint32 entree : pm.purs)
                         if (!pur)
                             if (Item* x = joueur->GetItemByEntry(entree); x && !x->IsEquipped() && !x->IsInTrade())
                                 pur = x;
+        // Pur demande mais impossible (pas de Signature rang 3, aucun pur de son metier dans les sacs) : refus explicite
+        // plutot qu'une re-signature a son propre rang que le joueur n'a pas demandee.
+        if (avecPur && !pur && actuelle.rang < 4)
+            return "PUR";
         uint8 const cible = pur ? 4 : rang;
         if (cible <= actuelle.rang)
             return "RANG";
@@ -3773,6 +3871,7 @@ namespace
         {
             joueur->ApplyEnchantment(piece, EMPLACEMENT_SIGNATURE, true);
             MarquerSignatures(joueur);
+            Actives(joueur);   // Garde-lame et passifs a la nouvelle valeur tout de suite, comme OnPlayerEquip
         }
         piece->SetState(ITEM_CHANGED, joueur);
         joueur->DestroyItemCount(MONDE_RARE, RESIGNER_RARES, true);
@@ -3795,8 +3894,17 @@ namespace
         return {};
     }
 
+    // « RESIGNER:<sac>:<case>:<entree>[:PUR] ». Sans « PUR », aucun materiau pur n'est consomme (le joueur le garde pour
+    // la vente ou une autre piece) : Re-signer monte au rang de ses talents, comme avant le lot T. Avec « PUR » (Maj+clic
+    // dans l'Atelier, conception T v2 § 4 « Utiliser un materiau pur »), un pur de son metier donne le rang 4.
     void TraiterResigner(Player* joueur, std::string_view corps)
     {
+        bool avecPur = false;
+        if (std::size_t const fin = corps.rfind(':'); fin != std::string_view::npos && corps.substr(fin + 1) == "PUR")
+        {
+            avecPur = true;
+            corps = corps.substr(0, fin);
+        }
         std::array<std::string_view, 3> champs;
         for (std::size_t i = 0; i < champs.size(); ++i)
         {
@@ -3815,7 +3923,7 @@ namespace
             return Repondre(joueur, "RESIGNER_ERR:PIECE");
         uint32 enchant = 0;
         uint8 rang = 0;
-        std::string const cause = Resigner(joueur, piece, enchant, rang);
+        std::string const cause = Resigner(joueur, piece, enchant, rang, avecPur);
         if (!cause.empty())
             return Repondre(joueur, "RESIGNER_ERR:" + cause);
         Repondre(joueur, Acore::StringFormat("RESIGNER_OK:{}:{}", enchant, uint32(rang)));
@@ -3990,7 +4098,7 @@ namespace
             // photographie et la creation : il ne doit pas l'effacer. La garde instant + entree suffit contre un
             // etat perime.
             SpellInfo const* info = sort->GetSpellInfo();
-            NoterFabrication(joueur, info);
+            NoterFabrication(joueur, sort, info);
             uint32 const creee = EntreeCreeeArtisanat(info);
             if (!creee)
                 return;
@@ -4042,19 +4150,25 @@ namespace
         }
 
         // Astrolabe : une recette de metier qui cree un objet (talents a la fabrication, AppliquerTalentsDeFabrication). Les
-        // bots ne sont suivis que pour nos recettes (9111000-9113999) : pas de requete d'etat pour une recette du monde.
-        static void NoterFabrication(Player* joueur, SpellInfo const* info)
+        // bots ne sont jamais suivis (ils n'ont pas de talents d'Astrolabe ; Etat() ferait deux requetes synchrones). Une
+        // fabrication qui n'a PAS pris ses reactifs (sort declenche avec TRIGGERED_IGNORE_POWER_AND_REAGENT_COST, banc
+        // FabriquerBanc, .cast triggered d'un MJ, CanNoReagentCast) n'est pas notee : sinon Main econome, Economie et Serie
+        // rendraient des reactifs jamais pris (Spell.cpp, TakeReagents et la garde de TRIGGERED_IGNORE_POWER_AND_REAGENT_COST).
+        static void NoterFabrication(Player* joueur, Spell const* sort, SpellInfo const* info)
         {
             if (Talents.empty() || !info || !TablesPersonnages)
+                return;
+            if (joueur->GetSession() && joueur->GetSession()->IsBot())
+                return;
+            if (sort->HasTriggeredCastFlag(TRIGGERED_IGNORE_POWER_AND_REAGENT_COST) || joueur->CanNoReagentCast(info))
+                return;
+            if (Item* moyen = sort->m_CastItem; moyen && moyen->GetTemplate()->HasFlag(ITEM_FLAG_NO_REAGENT_COST))
                 return;
             uint32 entree = 0;
             for (uint8 i = 0; i < MAX_SPELL_EFFECTS && !entree; ++i)
                 if (info->Effects[i].Effect == SPELL_EFFECT_CREATE_ITEM || info->Effects[i].Effect == SPELL_EFFECT_CREATE_ITEM_2)
                     entree = info->Effects[i].ItemType;
             if (!entree)
-                return;
-            bool const bot = joueur->GetSession() && joueur->GetSession()->IsBot();
-            if (bot && (info->Id < 9111000 || info->Id > 9113999))
                 return;
             uint32 const metier = MetierDeRecette(info->Id);
             if (!metier)
@@ -4150,7 +4264,7 @@ namespace
 
         void OnPlayerLootItem(Player* joueur, Item* objet, uint32 /*count*/, ObjectGuid source) override
         {
-            GraverRecolteur(joueur, objet);   // lot T : un materiau pur porte le nom de qui l'a extrait
+            GraverRecolteur(joueur, objet, source);   // lot T : un materiau pur porte le nom de qui l'a extrait
             if (!source.IsGameObject())
                 return;
             bool const bot = joueur->GetSession() && joueur->GetSession()->IsBot();
@@ -6053,6 +6167,7 @@ void AddAscensionArtisanatScripts()
     new ArtisanatButinRecolte();
     new ArtisanatNoeuds();
     new ArtisanatUnit();
+    new ArtisanatArene();
     new ArtisanatSorts();
     new ArtisanatCommandes();
 }
