@@ -1610,7 +1610,8 @@ namespace
     }
 
     // Messages de l'atelier : « TALENT:<sort> », « METIER:<C|R>:<skill> », « TALENTS? ». Reponses : TALENT_OK:<sort>:<rang>
-    // ou TALENT_ERR:<cause> ; METIER_OK:<C|R>:<skill> ou METIER_ERR:<cause> ; l'etat (EnvoyerEtat).
+    // ou TALENT_ERR:<cause> ; METIER_OK:<C|R>:<skill> ou METIER_ERR:<cause> ; l'etat (EnvoyerEtat), aussi juste apres
+    // chaque OK.
     void TraiterTalentMessage(Player* joueur, std::string_view corps)
     {
         if (!sConfigMgr->GetOption<bool>("CoaArtisanat.TalentsParMessage", true))
@@ -1626,7 +1627,10 @@ namespace
             if (!cause.empty())
                 return Repondre(joueur, "TALENT_ERR:" + cause);
             auto it = Talents.find(uint32(n));
-            return Repondre(joueur, Acore::StringFormat("TALENT_OK:{}:{}", n, it != Talents.end() ? uint32(it->second.rang) : 0));
+            Repondre(joueur, Acore::StringFormat("TALENT_OK:{}:{}", n, it != Talents.end() ? uint32(it->second.rang) : 0));
+            // L'etat suit l'OK dans le meme traitement (18/10, fluidite de l'Astrolabe) : l'atelier n'a plus a le redemander
+            // par un « TALENTS? » 0,6 s plus tard, apres le delai partage de 500 ms. Un atelier plus ancien le lit aussi.
+            return EnvoyerEtat(joueur);
         }
         // METIER:<C|R>:<skill>
         std::string_view reste = corps.substr(7);
@@ -1636,6 +1640,7 @@ namespace
         if (!cause.empty())
             return Repondre(joueur, "METIER_ERR:" + cause);
         Repondre(joueur, Acore::StringFormat("METIER_OK:{}:{}", reste[0], n));
+        EnvoyerEtat(joueur);   // idem : points disponibles du metier choisi
     }
 
     // Signature a la fabrication : le specialiste (metier principal de creation = metier de la recette) qui connait une
