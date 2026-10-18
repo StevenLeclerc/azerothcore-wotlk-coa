@@ -205,6 +205,56 @@ namespace CoaArtisanatIds
     // Bastion d'orage : allies proteges (les plus blesses, en pourcentage de PV) et portee.
     constexpr uint32 BASTION_ALLIES = 2;
     constexpr float BASTION_PORTEE = 10.0f;
+
+    // ---- Lot T (18/10/2026) : arbre de recolte complet et autres metiers ---------------------------------------------
+    //
+    // Noeuds d'evenement : 9101000-9101089 (le Filon-mere 9101090 a son propre script). Materiau, rare, verte, competence
+    // de creation, metier de recolte et specialite sont LUS en base au demarrage (butin a reference et conditions de
+    // outils/artisanat/generer.py), jamais recopies ici. Seuls figurent les ids que la base ne relie pas entre eux.
+    constexpr uint32 NOEUD_RECOLTE_MIN = 9101000;
+    constexpr uint32 NOEUD_RECOLTE_MAX = 9101089;
+
+    // Materiaux purs (outils/artisanat-lot-t.py, artisanat/ids-figes-v2.json « objet:pur:<metier>:<code> ») : qualite 3,
+    // pile de 1, non lies ; chacun est le pur d'UN materiau de metier (celui du noeud qui le donne, Main pure).
+    struct MateriauPur
+    {
+        uint32 pur;
+        uint32 base;          // materiau de metier du noeud (9101200-9101211)
+    };
+    constexpr std::array<MateriauPur, 12> MATERIAUX_PURS =
+    {{
+        { 9101241, 9101200 }, { 9101242, 9101201 }, { 9101243, 9101210 }, { 9101244, 9101211 },   // Minage
+        { 9101245, 9101206 }, { 9101246, 9101207 }, { 9101247, 9101208 }, { 9101248, 9101209 },   // Herboristerie
+        { 9101249, 9101204 }, { 9101250, 9101205 }, { 9101251, 9101202 }, { 9101252, 9101203 },   // Depecage
+    }};
+    // Correspondance metier de creation -> materiaux purs utilisables (detail du 13/10, § 4) : Forge et Ingenierie les
+    // minerais, Joaillerie les geodes et cristaux, Cuir les peaux, Couture la soie et le linceul, Alchimie et Calligraphie
+    // les fleurs, Enchantement les echos et les ames.
+    struct PursDuMetier
+    {
+        uint32 metier;
+        std::array<uint32, 2> purs;
+    };
+    constexpr std::array<PursDuMetier, 8> PURS_DU_METIER =
+    {{
+        { 164, { 9101241, 9101242 } }, { 202, { 9101241, 9101242 } }, { 755, { 9101243, 9101244 } },
+        { 165, { 9101249, 9101250 } }, { 197, { 9101251, 9101252 } }, { 171, { 9101245, 9101246 } },
+        { 773, { 9101245, 9101246 } }, { 333, { 9101247, 9101248 } },
+    }};
+
+    // Dosages de l'arbre de recolte (artisanat/talents.json, gabarit_recolte ; detail du 13/10, § 4).
+    constexpr uint32 PCT_MAIN_SURE_RANG = 50;       // rang 1 : echec divise par 2 ; rang 2 : supprime
+    constexpr uint32 PCT_PAS_VIF = 30;              // temps de recolte -30 %
+    constexpr uint32 PCT_SAC_RECOLTEUR = 10;        // chance d'un materiau classique de plus
+    constexpr uint32 PCT_OEIL_EXERCE_RANG = 1;      // points de chance de rare par rang
+    constexpr uint32 PCT_RENDEMENT = 15;            // materiaux classiques
+    constexpr uint32 PCT_PAS_DE_LOUP_RANG = 10;     // par rang : chance relative du gardien surgissant en moins
+    constexpr uint32 PCT_PIEGE_REDUIT = 50;         // Paratonnerre / Sceau mortuaire : degats des pieges de sa specialite
+    constexpr uint32 PCT_MAIN_PURE_RANG = 1;        // par rang : chance d'un materiau pur (noeud non garde)
+    // Flair : un point d'interet sur la carte et la mini-carte vers le noeud de sa famille le plus proche.
+    constexpr float FLAIR_PORTEE = 300.0f;          // m
+    constexpr float FLAIR_DEJA_VU = 60.0f;          // m : plus pres, le noeud se voit, rien n'est signale
+    constexpr uint32 FLAIR_PERIODE_MS = 10000;
 }
 
 #endif

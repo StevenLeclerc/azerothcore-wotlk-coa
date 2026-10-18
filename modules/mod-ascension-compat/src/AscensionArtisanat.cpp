@@ -34,6 +34,7 @@
 #include "DatabaseEnv.h"
 #include "GameTime.h"
 #include "Formulas.h"
+#include "GameObject.h"
 #include "Group.h"
 #include "Item.h"
 #include "LootMgr.h"
@@ -67,6 +68,9 @@
 #include <vector>
 
 using namespace Acore::ChatCommands;
+
+// Lot T (Pas vif) : crochet du coeur, defini dans Unit.cpp (Unit::ModSpellCastTime), pose au demarrage par ce module.
+extern int32 (*CoaArtisanatTempsDeRecolte)(Player const* joueur, SpellInfo const* sort, int32 temps);
 
 namespace
 {
@@ -1303,6 +1307,7 @@ namespace
         uint32 pieceMasque = 0;
         uint32 dureeMs = 0;
         uint32 chanceCentiemes = 0;   // Fournaise, Entaille : chance par coup, en centiemes de % (400 = 4 %)
+        uint32 emplacements = 0;      // lot T : masque d'InventoryType des pieces couvertes (0 = toute piece)
         uint8 rang = 0;
         uint8 seuilPct = 0;
         uint8 groupeSursaut = 0;
@@ -1312,6 +1317,16 @@ namespace
         std::string effet;
     };
     std::unordered_map<uint32, SignatureDef> Signatures;      // par enchantement
+
+    // Lot T (18/10, talents.py --jeu t3, EFFETS_LOT_T) : effets des signatures des 7 autres metiers.
+    //  passif, passif_principal : aura passive tant que la piece est portee (AppliquerPassifs) ;
+    //  proc_aura (Echo), proc_aura_critique (Instinct), fil_orage, fil_accalmie, proc_degats (Conducteur),
+    //  proc_degats_distance (Mecanisme) : DeclencherProcs ; soin_sous_seuil (Pierre de garde) : DeclencherSignatures.
+    bool EstEffetLotT(std::string const& e)
+    {
+        return e == "passif" || e == "passif_principal" || e == "proc_aura" || e == "proc_aura_critique" || e == "proc_degats"
+            || e == "proc_degats_distance" || e == "fil_orage" || e == "fil_accalmie" || e == "soin_sous_seuil";
+    }
 
     // Pieces que couvre une ligne de signature : classe et masque de sous-classes ; pour une arme (classe 2), le bit 31 du
     // masque (aucune sous-classe d'arme ne l'atteint) ajoute les boucliers (classe 4, sous-classe 6) : voie du Fabricant
@@ -1324,6 +1339,9 @@ namespace
         if (s.pieceClasse == ITEM_CLASS_WEAPON && (s.pieceMasque & MASQUE_BOUCLIERS) && proto->Class == ITEM_CLASS_ARMOR
             && proto->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD)
             return true;
+        // Lot T : capes contre tissu, cou et doigt contre main gauche et bijou (meme classe et sous-classe).
+        if (s.emplacements && (proto->InventoryType >= 32 || !(s.emplacements & (1u << proto->InventoryType))))
+            return false;
         return proto->Class == s.pieceClasse && proto->SubClass < 31 && (s.pieceMasque & (1u << proto->SubClass));
     }
 
@@ -1404,10 +1422,13 @@ namespace
         AuraCoeurDeForge = 0;
         bool const avecChance = bool(WorldDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
             "AND TABLE_NAME = 'coa_artisanat_signature' AND COLUMN_NAME = 'chance_centiemes'"));
+        // Lot T (talents.py --jeu t3) : la colonne piece_emplacements peut manquer dans un jeu plus ancien.
+        bool const avecEmplacements = bool(WorldDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'coa_artisanat_signature' AND COLUMN_NAME = 'piece_emplacements'"));
         if (TableExiste(WorldDatabase, "coa_artisanat_signature"))
             if (QueryResult r = WorldDatabase.Query("SELECT enchant, metier, voie, forme, rang, effet, valeur, valeur_arene, recharge_ms, "
-                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet, duree_ms, {} FROM coa_artisanat_signature",
-                avecChance ? "chance_centiemes" : "0"))
+                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet, duree_ms, {}, {} FROM coa_artisanat_signature",
+                avecChance ? "chance_centiemes" : "0", avecEmplacements ? "piece_emplacements" : "0"))
                 do
                 {
                     Field* f = r->Fetch();
@@ -1428,10 +1449,24 @@ namespace
                     s.sortEffet = f[13].Get<uint32>();
                     s.dureeMs = f[14].Get<uint32>();
                     s.chanceCentiemes = f[15].Get<uint32>();
+                    s.emplacements = f[16].Get<uint32>();
                     bool const coeur = s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
                     // Astrolabe (18/10) : effets qui exigent leur sort d'effet ; Bastion d'orage est un pourcentage de l'Egide.
+                    // Lot T : tous les effets des 7 autres metiers (EstEffetLotT).
                     bool const avecSort = coeur || s.effet == "fournaise" || s.effet == "entaille" || s.effet == "garde_lame"
-                        || s.effet == "bastion_d_orage";
+                        || s.effet == "bastion_d_orage" || EstEffetLotT(s.effet);
+                    // Un effet a proportions (passifs, auras de proc) lit le point de base de l'effet 0 de son sort : nul, il
+                    // diviserait par zero (le sort d'effet de fil_orage, lui, recoit ses montants du C++).
+                    SpellInfo const* infoEffet = s.sortEffet ? sSpellMgr->GetSpellInfo(s.sortEffet) : nullptr;
+                    bool const proportions = s.effet == "passif" || s.effet == "passif_principal" || s.effet == "proc_aura"
+                        || s.effet == "proc_aura_critique";
+                    if (proportions && infoEffet && !infoEffet->Effects[EFFECT_0].BasePoints)
+                    {
+                        ++signaturesRejetees;
+                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} effet={} : sort d'effet {} a point de base nul",
+                            s.enchant, s.effet, s.sortEffet);
+                        continue;
+                    }
                     bool const pourcentage = coeur || s.effet == "bastion_d_orage";
                     // Coeur de forge : un pourcentage (au plus 100), une aura a poser (sort_effet), une recharge.
                     if (!sSpellItemEnchantmentStore.LookupEntry(s.enchant) || (s.sortEffet && !sSpellMgr->GetSpellInfo(s.sortEffet))
@@ -1991,6 +2026,7 @@ namespace
         int32 gardeParade = 0;              // Garde-lame pose : score de parade et de blocage (0 : aucune aura)
         int32 gardeBlocage = 0;
         uint32 gardeSort = 0;
+        std::map<uint32, std::array<int32, 3>> passifs;   // lot T : sort d'effet passif pose -> montants de ses 3 effets
     };
     std::atomic<uint32> DeclenchementsSignatures{ 0 };
     std::atomic<uint32> DeclenchementsCoeur{ 0 };
@@ -2044,6 +2080,78 @@ namespace
         }
     }
 
+    // Lot T : montants des effets d'un sort d'effet a proportions (passifs, auras de proc). L'effet 0 vaut `valeur` (signee
+    // par le point de base de l'effet 0 du DBC) ; l'effet k vaut valeur x base_k / |base_0| (Maille serree : esquive, puis
+    // armure en proportion). Le DBC porte les valeurs au rang 3 et au 60 (talents.py, sort_effet_lot_t).
+    std::array<int32, 3> MontantsProportionnels(SpellInfo const* info, int32 valeur)
+    {
+        std::array<int32, 3> m = { 0, 0, 0 };
+        int32 const base0 = info ? info->Effects[EFFECT_0].BasePoints : 0;
+        if (!base0)
+            return m;
+        for (uint8 k = 0; k < 3; ++k)
+        {
+            int64 const v = int64(valeur) * info->Effects[k].BasePoints;
+            m[k] = int32((v + (v >= 0 ? 1 : -1) * std::abs(base0) / 2) / std::abs(base0));   // arrondi au plus proche
+        }
+        return m;
+    }
+
+    // Caracteristique principale (la plus haute de Force, Agilite, Intelligence) : 0, 1 ou 2, comme Fournaise.
+    uint8 IndicePrincipale(Player const* joueur)
+    {
+        float const force = joueur->GetStat(STAT_STRENGTH), agilite = joueur->GetStat(STAT_AGILITY),
+            intelligence = joueur->GetStat(STAT_INTELLECT);
+        return force >= agilite && force >= intelligence ? 0 : (agilite >= intelligence ? 1 : 2);
+    }
+
+    // Lot T : signatures passives (passif, passif_principal) : leur sort d'effet est pose tant que la piece est portee,
+    // reposee seulement quand les montants changent (niveau, rang, Main constante, caracteristique principale). Arene 1c1
+    // contre un gladiateur : retirees. Meme regle que Garde-lame (AppliquerGardeLame), une aura par forme (pas de cumul).
+    void AppliquerPassifs(Player* joueur, SignaturesActives* a)
+    {
+        std::map<uint32, std::array<int32, 3>> voulus;
+        if (!NeutraliseEnArene1c1(joueur))
+            for (std::size_t i = 0; i < a->actives.size(); ++i)
+            {
+                SignatureDef const* s = a->actives[i];
+                if ((s->effet != "passif" && s->effet != "passif_principal") || !s->sortEffet)
+                    continue;
+                SpellInfo const* info = sSpellMgr->GetSpellInfo(s->sortEffet);
+                int32 const v = int32(ValeurSignature(s, false, a->constantes[i], joueur->GetLevel()));
+                if (!info || v <= 0)
+                    continue;
+                std::array<int32, 3> m = MontantsProportionnels(info, v);
+                if (s->effet == "passif_principal")   // effets 0 Force, 1 Agilite, 2 Intelligence : un seul compte
+                {
+                    uint8 const k = IndicePrincipale(joueur);
+                    for (uint8 j = 0; j < 3; ++j)
+                        if (j != k)
+                            m[j] = 0;
+                }
+                voulus[s->sortEffet] = m;
+            }
+        for (auto it = a->passifs.begin(); it != a->passifs.end();)
+        {
+            auto v = voulus.find(it->first);
+            if (v != voulus.end() && v->second == it->second && joueur->HasAura(it->first))
+            {
+                voulus.erase(v);   // deja pose a ces montants
+                ++it;
+                continue;
+            }
+            joueur->RemoveAurasDueToSpell(it->first);
+            it = a->passifs.erase(it);
+        }
+        for (auto const& [sort, m] : voulus)
+        {
+            joueur->RemoveAurasDueToSpell(sort);
+            joueur->CastCustomSpell(joueur, sort, &m[0], &m[1], &m[2], true);
+            if (joueur->HasAura(sort))
+                a->passifs[sort] = m;
+        }
+    }
+
     void RecalculerSignatures(Player* joueur)
     {
         SignaturesActives* a = joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
@@ -2055,6 +2163,7 @@ namespace
         if (Signatures.empty())
         {
             AppliquerGardeLame(joueur, a);
+            AppliquerPassifs(joueur, a);
             return;
         }
         std::vector<SignatureDef const*> facettes;
@@ -2103,6 +2212,7 @@ namespace
                 }
             }
         AppliquerGardeLame(joueur, a);
+        AppliquerPassifs(joueur, a);
     }
 
     // Arene 1 contre 1 contre un gladiateur (conception § 5, revue JcJ n° 7) : les effets d'artisanat y sont neutralises.
@@ -2194,7 +2304,8 @@ namespace
         for (std::size_t i = 0; i < a->actives.size(); ++i)
         {
             SignatureDef const* s = a->actives[i];
-            if (s->effet != "absorbe_sous_seuil" && s->effet != "egide")
+            bool const soin = s->effet == "soin_sous_seuil";   // lot T : Pierre de garde
+            if (s->effet != "absorbe_sous_seuil" && s->effet != "egide" && !soin)
                 continue;
             uint64 const pv = joueur->GetHealth();
             uint64 const apres = pv > degats ? pv - degats : 0;
@@ -2205,9 +2316,32 @@ namespace
                 continue;
             uint32 const valeur = ValeurSignature(s, jcj, a->constantes[i], joueur->GetLevel());
             // Un coup mortel meme apres absorption : rien ne se declenche, la recharge n'est pas consommee.
-            if (uint64(degats) >= pv + valeur)
+            if (!valeur || uint64(degats) >= pv + valeur)
                 continue;
             recharge = maintenant + Milliseconds(s->rechargeMs);
+            if (soin)
+            {
+                // Le soin part AVANT la soustraction du coup (crochet DealDamage) : ce qu'il ne pourrait pas rendre maintenant
+                // (PV manquants avant le coup) devient une reduction du coup, pour que le resultat soit celui d'un soin de
+                // `valeur` apres le coup (plafonne aux PV maximaux).
+                uint64 const manquants = joueur->GetMaxHealth() > pv ? joueur->GetMaxHealth() - pv : 0;
+                uint32 const soigne = uint32(std::min<uint64>(valeur, manquants));
+                uint32 const reduit = std::min(degats, valeur - soigne);
+                degats -= reduit;
+                if (soigne && s->sortEffet)
+                {
+                    int32 const bp = int32(soigne);
+                    joueur->CastCustomSpell(joueur, s->sortEffet, &bp, nullptr, nullptr, true);
+                }
+                ++DeclenchementsSignatures;
+                ++a->egides;
+                LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} soin={} reduit={} main_constante={}",
+                    joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, soigne, reduit,
+                    a->constantes[i] ? 1 : 0);
+                if (s->groupeSursaut)
+                    DeclencherBastion(joueur, a, valeur, s->rechargeMs, jcj);
+                return;   // un seul sursaut par coup
+            }
             uint32 const absorbe = std::min(degats, valeur);
             degats -= absorbe;
             if (uint32 const reste = valeur - absorbe; reste && s->sortEffet)
@@ -2237,8 +2371,16 @@ namespace
     //    duree_ms ; valeur JcJ identique.
     //  - Entaille : saignement de `valeur` (`valeur_arene` sur une cible controlee par un joueur) reparti sur les tics du
     //    sort d'effet ; coups seulement.
+    // Lot T (18/10) : les effets des 7 autres metiers, memes regles de piece, de chance et de recharge.
+    //  - proc_aura (Echo) : coups et sorts, chance ; aura du sort d'effet a montants proportionnels, duree_ms.
+    //  - proc_aura_critique (Instinct) : coup critique de la piece ; chance 0 = a chaque critique.
+    //  - proc_degats (Conducteur) : coups et sorts ; degats directs de `valeur` (`valeur_arene` sur un joueur).
+    //  - proc_degats_distance (Mecanisme) : tirs seulement (attaque a distance de la piece) ; degats de zone.
+    //  - fil_orage (Fil d'orage) : sort critique ; + valeur % de sa puissance des sorts (degats et soins), duree_ms.
+    //  - fil_accalmie (Fil d'accalmie) : soin critique ; rend valeur % de son mana maximal.
     // Arene 1c1 contre un gladiateur : rien.
-    void DeclencherProcs(Player* joueur, Unit* cible, Item const* objet)
+    void DeclencherProcs(Player* joueur, Unit* cible, Item const* objet, bool critique = false, bool soin = false,
+        bool distance = false)
     {
         // Un coup vise un autre que soi ; un sort (Fournaise) peut viser soi (soin, bouclier).
         if (Signatures.empty() || !joueur->IsAlive() || !cible || !cible->IsAlive() || (objet && cible == joueur))
@@ -2254,17 +2396,25 @@ namespace
         for (std::size_t i = 0; i < actives.size(); ++i)
         {
             SignatureDef const* s = actives[i];
-            bool const fournaise = s->effet == "fournaise";
-            if ((!fournaise && s->effet != "entaille") || !s->sortEffet || !s->chanceCentiemes)
+            std::string const& e = s->effet;
+            bool const fournaise = e == "fournaise";
+            // Effets qui passent par les sorts (objet nul) ; les autres ne tirent que sur un coup de la piece.
+            bool const parSort = fournaise || e == "proc_aura" || e == "proc_degats" || e == "fil_orage" || e == "fil_accalmie";
+            bool const parCoup = fournaise || e == "entaille" || e == "proc_aura" || e == "proc_aura_critique" || e == "proc_degats"
+                || e == "proc_degats_distance";
+            bool const surCritique = e == "proc_aura_critique" || e == "fil_orage" || e == "fil_accalmie";
+            if ((!parSort && !parCoup) || !s->sortEffet || (!surCritique && !s->chanceCentiemes))
                 continue;
-            if (objet ? objet->GetGUID() != pieces[i] : !fournaise)
+            if (objet ? (!parCoup || objet->GetGUID() != pieces[i]) : !parSort)
+                continue;
+            if ((surCritique && !critique) || (e == "fil_accalmie" && !soin) || (e == "proc_degats_distance" && !distance))
                 continue;
             if (!tire && NeutraliseEnArene1c1(joueur))
                 return;
             tire = true;
             Milliseconds const maintenant = GameTime::GetGameTimeMS();
             Milliseconds& recharge = a->recharges[s->enchant];
-            if (maintenant < recharge || urand(1, 10000) > s->chanceCentiemes)
+            if (maintenant < recharge || (s->chanceCentiemes && urand(1, 10000) > s->chanceCentiemes))
                 continue;
             SpellInfo const* info = sSpellMgr->GetSpellInfo(s->sortEffet);
             if (!info)
@@ -2275,10 +2425,8 @@ namespace
                 if (v <= 0)
                     continue;
                 // effets du sort : 0 Force, 1 Agilite, 2 Intelligence (talents.py, sort_effet_forme)
-                float const force = joueur->GetStat(STAT_STRENGTH), agilite = joueur->GetStat(STAT_AGILITY),
-                    intelligence = joueur->GetStat(STAT_INTELLECT);
                 int32 bp[3] = { 0, 0, 0 };
-                bp[force >= agilite && force >= intelligence ? 0 : (agilite >= intelligence ? 1 : 2)] = v;
+                bp[IndicePrincipale(joueur)] = v;
                 joueur->RemoveAurasDueToSpell(s->sortEffet);
                 joueur->CastCustomSpell(joueur, s->sortEffet, &bp[0], &bp[1], &bp[2], true);
                 if (s->dureeMs)
@@ -2289,6 +2437,53 @@ namespace
                     }
                 LOG_INFO("module", "coa artisanat: fournaise joueur={} enchant={} valeur={} caracteristique={}", joueur->GetGUID().GetCounter(),
                     s->enchant, v, bp[0] ? "force" : (bp[1] ? "agilite" : "intelligence"));
+            }
+            else if (e == "proc_aura" || e == "proc_aura_critique" || e == "fil_orage")
+            {
+                std::array<int32, 3> m = { 0, 0, 0 };
+                int32 v = int32(ValeurSignature(s, ControleParUnJoueur(cible), constantes[i], joueur->GetLevel()));
+                if (e == "fil_orage")   // valeur = % de la puissance des sorts : effet 0 degats, effet 1 soins
+                {
+                    m[0] = int32(int64(std::max(0, joueur->SpellBaseDamageBonusDone(SPELL_SCHOOL_MASK_MAGIC))) * v / 100);
+                    m[1] = int32(int64(std::max(0, joueur->SpellBaseHealingBonusDone(SPELL_SCHOOL_MASK_MAGIC))) * v / 100);
+                    v = std::max(m[0], m[1]);
+                }
+                else
+                    m = MontantsProportionnels(info, v);
+                if (v <= 0)
+                    continue;
+                joueur->RemoveAurasDueToSpell(s->sortEffet);
+                joueur->CastCustomSpell(joueur, s->sortEffet, &m[0], &m[1], &m[2], true);
+                if (s->dureeMs)
+                    if (Aura* aura = joueur->GetAura(s->sortEffet, joueur->GetGUID()))
+                    {
+                        aura->SetMaxDuration(int32(s->dureeMs));
+                        aura->SetDuration(int32(s->dureeMs));
+                    }
+                LOG_INFO("module", "coa artisanat: proc lot t joueur={} enchant={} effet={} montants={}/{}/{}", joueur->GetGUID().GetCounter(),
+                    s->enchant, e, m[0], m[1], m[2]);
+            }
+            else if (e == "fil_accalmie")
+            {
+                uint32 const mana = joueur->GetMaxPower(POWER_MANA);
+                int32 const v = int32(ValeurSignature(s, false, constantes[i], joueur->GetLevel()));
+                int32 const rendu = int32(uint64(mana) * uint32(std::max(0, v)) / 100);
+                if (rendu <= 0)
+                    continue;
+                joueur->CastCustomSpell(joueur, s->sortEffet, &rendu, nullptr, nullptr, true);
+                LOG_INFO("module", "coa artisanat: fil d'accalmie joueur={} enchant={} mana={}", joueur->GetGUID().GetCounter(), s->enchant, rendu);
+            }
+            else if (e == "proc_degats" || e == "proc_degats_distance")
+            {
+                if (!joueur->IsValidAttackTarget(cible))
+                    continue;
+                bool const jcj = ControleParUnJoueur(cible);
+                int32 const v = int32(ValeurSignature(s, jcj, constantes[i], joueur->GetLevel()));
+                if (v <= 0)
+                    continue;
+                joueur->CastCustomSpell(cible, s->sortEffet, &v, nullptr, nullptr, true);
+                LOG_INFO("module", "coa artisanat: degats lot t joueur={} cible={} enchant={} effet={} valeur={} jcj={}", joueur->GetGUID().GetCounter(),
+                    cible->GetGUID().ToString(), s->enchant, e, v, jcj ? 1 : 0);
             }
             else
             {
@@ -2676,6 +2871,8 @@ namespace
     }
 
     // Signatures a declencher (Egide : sursaut de survie) sur les degats subis par un joueur ; bonus de Coeur de forge.
+    void ReduireDegatsPiege(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort);   // lot T, plus bas
+
     class ArtisanatUnit final : public UnitScript
     {
     public:
@@ -2749,6 +2946,7 @@ namespace
 
         void ModifySpellDamageTaken(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort) override
         {
+            ReduireDegatsPiege(cible, attaquant, degats, sort);   // lot T : Paratonnerre / Sceau mortuaire
             CorrigerDegatsMoisson(attaquant, cible, sort, degats);
             AppliquerCorrection(degats, CorrectionCoeurDeForge(attaquant, cible, false));
         }
@@ -2823,7 +3021,7 @@ namespace
                 return;
             // Fournaise (Astrolabe) : « coups et sorts » ; un sort d'effet d'artisanat (9113440-9113499) ne declenche rien.
             if (cible && (info->Id < 9113440 || info->Id > 9113499))
-                DeclencherProcs(joueur, cible, nullptr);
+                DeclencherProcs(joueur, cible, nullptr, critique, soins > 0);
             if (critique && AuraCoeurDeForge)
                 ChargerCoeurDeForge(joueur);
         }
@@ -2970,6 +3168,493 @@ namespace
                 f.sort, objet->GetGUID().GetCounter(), entree, trace);
     }
 
+    // ---- Lot T (18/10) : l'arbre de recolte complet (Minage, Herboristerie, Depecage) -------------------------------
+    //
+    // Talents de l'arbre de recolte (artisanat/talents.json, gabarit_recolte ; docs/PROPOSITION-artisanat-arbres-detail.md
+    // § 4 ; docs/CONCEPTION-artisanat-T-sourcier.md v2 § 1), reconnus par leur code dans l'arbre du metier principal de
+    // RECOLTE (EtatTalents::metierR). Un talent n'agit que sur sa famille de noeuds : ceux dont le metier de recolte est le
+    // metier principal du personnage. Les noeuds d'evenement s'ouvrent pour tous avec l'outil du metier de creation
+    // (D-PO-06) ; le metier de recolte principal ameliore ce qu'ils donnent, il ne les reserve pas.
+    //   Main sure (2 rangs)       : noeud d'evenement sans son materiau de metier (echec, 15 %) : il est rendu a 50 % puis
+    //                               100 % des cas.
+    //   Pas vif                   : sorts de recolte de sa famille (ouverture des noeuds, Mining, Herb Gathering, Skinning)
+    //                               30 % plus rapides (crochet CoaArtisanatTempsDeRecolte de Unit::ModSpellCastTime).
+    //   Sac du recolteur          : 10 % de chance d'un materiau classique de plus (noeud classique, depecage).
+    //   Oeil exerce (3 rangs)     : noeud d'evenement sans rare : +1 point de chance de rare par rang.
+    //   Flair                     : un point d'interet vers le noeud d'evenement de sa famille le plus proche (300 m).
+    //   Rendement                 : +15 % de materiaux classiques (noeud classique, depecage).
+    //   Pas de loup (2 rangs)     : le gardien qui surgit d'un noeud de sa famille repart a 10 % puis 20 % des cas.
+    //   Specialite Orage/Ossuaire : la « voie » de la recolte (Faille ou Nuit), exigee par l'etage Expert.
+    //   Conducteur / Fossoyeur    : 1 materiau de metier de plus sur les noeuds de sa specialite.
+    //   Paratonnerre / Sceau      : plus d'echec sur sa specialite ; degats des pieges de ces noeuds -50 %.
+    //   Main pure (3 rangs)       : 1, 2 puis 3 % d'un materiau pur par noeud d'evenement (noeuds gardes : lot 2, absents).
+    // Les bots n'ont pas d'arbre (ni requete ni effet).
+
+    struct NoeudRecolte
+    {
+        uint32 entree = 0;
+        uint32 materiau = 0;      // materiau de metier (9101200-9101211), 85 % au butin
+        uint32 maxMateriau = 1;   // au palier le plus haut
+        uint32 rare = 0;          // ressource d'evenement rare (Coeur d'orage / Essence sepulcrale)
+        uint32 competence = 0;    // metier de CREATION dont la competence ouvre les paliers (conditions du butin)
+        uint32 metier = 0;        // metier de RECOLTE de la famille
+        uint32 pur = 0;           // materiau pur de ce noeud (Main pure)
+        bool orage = false;       // Faille (sinon Nuit)
+    };
+    std::unordered_map<uint32, NoeudRecolte> NoeudsRecolte;   // par gameobject_template.entry
+    std::unordered_map<uint32, uint32> SortsOuverture;        // sort d'ouverture d'un noeud -> entree du noeud
+    std::vector<uint32> EntreesNoeuds;                        // pour les recherches de Flair et des pieges
+    uint32 GardienRecolte = 0;                                // creature du gardien surgissant (smart_scripts, action 12)
+    uint32 PiegeRecolte = 0;                                  // sort du piege (smart_scripts, action 11)
+    std::atomic<uint32> RecoltesTalents{ 0 };                 // butins modifies par un talent de recolte
+    std::atomic<uint32> GardiensRenvoyes{ 0 };
+    std::atomic<uint32> PiegesReduits{ 0 };
+
+    // Metier de recolte d'un noeud, d'apres le metier de creation de son outil (generer.py, FAMILLE_RECOLTE).
+    uint32 MetierRecolteDeCreation(uint32 creation)
+    {
+        switch (creation)
+        {
+            case 164: case 755: return 186;   // Forge, Joaillerie -> Minage
+            case 171: case 333: return 182;   // Alchimie, Enchantement -> Herboristerie
+            case 165: case 197: return 393;   // Travail du cuir, Couture -> Depecage
+            default: return 0;
+        }
+    }
+
+    uint32 PurDuMateriau(uint32 base)
+    {
+        for (auto const& p : CoaArtisanatIds::MATERIAUX_PURS)
+            if (p.base == base)
+                return p.pur;
+        return 0;
+    }
+
+    bool EstMateriauPur(uint32 entree)
+    {
+        for (auto const& p : CoaArtisanatIds::MATERIAUX_PURS)
+            if (p.pur == entree)
+                return true;
+        return false;
+    }
+
+    void ChargerNoeudsRecolte()
+    {
+        using namespace CoaArtisanatIds;
+        NoeudsRecolte.clear();
+        SortsOuverture.clear();
+        EntreesNoeuds.clear();
+        GardienRecolte = PiegeRecolte = 0;
+        std::unordered_map<uint32, uint32> refVersNoeud;
+        if (QueryResult r = WorldDatabase.Query("SELECT g.Entry, g.Reference, r.Item, r.MaxCount FROM gameobject_loot_template g "
+            "JOIN reference_loot_template r ON r.Entry = g.Reference WHERE g.Entry BETWEEN {} AND {} AND g.Reference > 0",
+            NOEUD_RECOLTE_MIN, NOEUD_RECOLTE_MAX))
+            do
+            {
+                Field* f = r->Fetch();
+                uint32 const entree = f[0].Get<uint32>();
+                uint32 const item = f[2].Get<uint32>();
+                NoeudRecolte& n = NoeudsRecolte[entree];
+                n.entree = entree;
+                refVersNoeud[f[1].Get<uint32>()] = entree;
+                ItemTemplate const* proto = sObjectMgr->GetItemTemplate(item);
+                if (!proto)
+                    continue;
+                if (item >= 9101200 && item <= 9101211)
+                {
+                    n.materiau = item;
+                    n.maxMateriau = std::max<uint32>(n.maxMateriau, f[3].Get<uint8>());
+                }
+                else if (item == RESSOURCE_VERTE)
+                    n.orage = true;
+                else if (proto->Quality == ITEM_QUALITY_RARE)
+                    n.rare = item;
+            } while (r->NextRow());
+        if (QueryResult r = WorldDatabase.Query("SELECT SourceGroup, ConditionValue1 FROM conditions WHERE SourceTypeOrReferenceId = 10 "
+            "AND ConditionTypeOrReference = 7 AND NegativeCondition = 0"))
+            do
+            {
+                auto it = refVersNoeud.find(r->Fetch()[0].Get<uint32>());
+                if (it != refVersNoeud.end())
+                    NoeudsRecolte[it->second].competence = r->Fetch()[1].Get<uint32>();
+            } while (r->NextRow());
+        uint32 rejetes = 0;
+        for (auto it = NoeudsRecolte.begin(); it != NoeudsRecolte.end();)
+        {
+            NoeudRecolte& n = it->second;
+            n.metier = MetierRecolteDeCreation(n.competence);
+            n.pur = PurDuMateriau(n.materiau);
+            GameObjectTemplate const* t = sObjectMgr->GetGameObjectTemplate(n.entree);
+            if (!n.materiau || !n.metier || !t)
+            {
+                ++rejetes;
+                LOG_ERROR("module", "coa recolte: noeud {} ecarte (materiau {}, competence {}, gabarit {})", n.entree, n.materiau,
+                    n.competence, t ? "present" : "absent");
+                it = NoeudsRecolte.erase(it);
+                continue;
+            }
+            if (LockEntry const* verrou = sLockStore.LookupEntry(t->GetLockId()))
+                for (uint8 k = 0; k < MAX_LOCK_CASE; ++k)
+                    if (verrou->Type[k] == LOCK_KEY_SPELL && verrou->Index[k])
+                        SortsOuverture[verrou->Index[k]] = n.entree;
+            EntreesNoeuds.push_back(n.entree);
+            ++it;
+        }
+        if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT action_type, action_param1 FROM smart_scripts WHERE source_type = 1 "
+            "AND entryorguid BETWEEN {} AND {} AND event_type = 70 AND action_type IN (11, 12)", NOEUD_RECOLTE_MIN, NOEUD_RECOLTE_MAX))
+            do
+            {
+                uint32 const action = r->Fetch()[0].Get<uint32>(), valeur = r->Fetch()[1].Get<uint32>();
+                uint32& cible = action == 12 ? GardienRecolte : PiegeRecolte;
+                if (cible && cible != valeur)
+                    LOG_ERROR("module", "coa recolte: plusieurs {} sur les noeuds ({} et {}) : seul le premier est suivi",
+                        action == 12 ? "gardiens" : "pieges", cible, valeur);
+                else
+                    cible = valeur;
+            } while (r->NextRow());
+        uint32 parMetier[3] = { 0, 0, 0 };
+        for (auto const& [e, n] : NoeudsRecolte)
+            ++parMetier[n.metier == 186 ? 0 : (n.metier == 182 ? 1 : 2)];
+        LOG_INFO("module", "coa recolte: noeuds {} (minage {}, herboristerie {}, depecage {}), {} ecartes, sorts d'ouverture {}, "
+            "gardien {}, piege {}, purs {}", uint32(NoeudsRecolte.size()), parMetier[0], parMetier[1], parMetier[2], rejetes,
+            uint32(SortsOuverture.size()), GardienRecolte, PiegeRecolte,
+            uint32(std::count_if(NoeudsRecolte.begin(), NoeudsRecolte.end(), [](auto const& x) { return x.second.pur
+                && sObjectMgr->GetItemTemplate(x.second.pur); })));
+    }
+
+    // Etat des talents de recolte d'un humain dont le metier principal de recolte est `metier`, nul sinon (bots compris).
+    EtatTalents* EtatRecolte(Player const* joueur, uint32 metier)
+    {
+        if (!joueur || Talents.empty() || !TablesPersonnages || !joueur->GetSession() || joueur->GetSession()->IsBot())
+            return nullptr;
+        EtatTalents* e = Etat(const_cast<Player*>(joueur));
+        return e->metierR && e->metierR == metier ? e : nullptr;
+    }
+
+    // Metier de recolte d'un sort de recolte (0 : aucun) : ouverture de nos noeuds, puis Skinning et l'ouverture des
+    // noeuds classiques (Mining, Herb Gathering : verrou de competence minage ou herboristerie).
+    uint32 MetierDuSortDeRecolte(SpellInfo const* sort)
+    {
+        if (auto it = SortsOuverture.find(sort->Id); it != SortsOuverture.end())
+        {
+            auto n = NoeudsRecolte.find(it->second);
+            return n != NoeudsRecolte.end() ? n->second.metier : 0;
+        }
+        for (uint8 k = 0; k < MAX_SPELL_EFFECTS; ++k)
+        {
+            if (sort->Effects[k].Effect == SPELL_EFFECT_SKINNING)
+                return 393;
+            if (sort->Effects[k].Effect == SPELL_EFFECT_OPEN_LOCK)
+            {
+                if (sort->Effects[k].MiscValue == LOCKTYPE_MINING)
+                    return 186;
+                if (sort->Effects[k].MiscValue == LOCKTYPE_HERBALISM)
+                    return 182;
+            }
+        }
+        return 0;
+    }
+
+    // Pas vif : crochet du coeur (Unit::ModSpellCastTime, joueur seulement, temps > 0). Fil de carte du joueur.
+    int32 TempsDeRecolte(Player const* joueur, SpellInfo const* sort, int32 temps)
+    {
+        if (!sort || !joueur->GetSession() || joueur->GetSession()->IsBot())
+            return temps;
+        uint32 const metier = MetierDuSortDeRecolte(sort);
+        EtatTalents* e = metier ? EtatRecolte(joueur, metier) : nullptr;
+        if (!e || !RangTalent(*e, metier, "pas-vif"))
+            return temps;
+        return temps * int32(100 - CoaArtisanatIds::PCT_PAS_VIF) / 100;
+    }
+
+    // Specialite connue (« orage », « ossuaire » ou vide) et le noeud en est-il ?
+    bool DeSaSpecialite(EtatTalents const& e, uint32 metier, NoeudRecolte const& n, std::string& specialite)
+    {
+        specialite = VoieConnue(e, metier);
+        return !specialite.empty() && (specialite == "orage") == n.orage;
+    }
+
+    // Nombre visible par le joueur d'un objet du butin (conditions de palier comprises : le tirage ignore les conditions,
+    // l'affichage les applique, LootItem::AllowedForPlayer).
+    uint32 VisiblePour(Loot const* butin, Player const* joueur, uint32 objet)
+    {
+        uint32 n = 0;
+        for (LootItem const& li : butin->items)
+            if (li.itemid == objet && !li.is_looted && li.AllowedForPlayer(joueur, butin->sourceWorldObjectGUID))
+                n += li.count;
+        return n;
+    }
+
+    void AjouterAuButin(Loot* butin, uint32 objet, uint32 nombre)
+    {
+        if (objet && nombre && sObjectMgr->GetItemTemplate(objet))
+            butin->AddItem(LootStoreItem(objet, 0, 100.0f, false, LOOT_MODE_DEFAULT, 0, int32(nombre), uint8(nombre)));
+    }
+
+    void RecolterNoeud(Player* joueur, NoeudRecolte const& n, Loot* butin)
+    {
+        using namespace CoaArtisanatIds;
+        EtatTalents* e = EtatRecolte(joueur, n.metier);
+        // Sans la competence du metier de creation du noeud, son butin reste invisible (conditions de palier) : les talents
+        // n'y ajoutent rien non plus (sinon un recolteur sans ce metier en tirerait des materiaux que personne ne voit).
+        if (!e || !joueur->GetSkillValue(n.competence))
+            return;
+        uint32 const m = n.metier;
+        std::string specialite;
+        bool const deSpe = DeSaSpecialite(*e, m, n, specialite);
+        std::string trace;
+        // Palier du butin de ce joueur : 1-3 materiaux au palier haut, 1-2 dessous (generer.py, paliers des noeuds).
+        uint32 const maxi = joueur->GetSkillValue(n.competence) >= 300 ? std::max<uint32>(2, n.maxMateriau) : 2;
+        if (!VisiblePour(butin, joueur, n.materiau))
+        {
+            uint32 pct = PCT_MAIN_SURE_RANG * RangTalent(*e, m, "main-sure");
+            if (deSpe && RangTalent(*e, m, "paratonnerre-sceau:" + specialite))
+                pct = 100;
+            if (Tirage(std::min<uint32>(pct, 100)))
+            {
+                uint32 const k = urand(1, maxi);
+                AjouterAuButin(butin, n.materiau, k);
+                trace += Acore::StringFormat(" echec_rendu={}x{}", n.materiau, k);
+            }
+        }
+        if (deSpe && RangTalent(*e, m, "conducteur-fossoyeur:" + specialite))
+        {
+            AjouterAuButin(butin, n.materiau, 1);
+            trace += Acore::StringFormat(" specialite={}x1", n.materiau);
+        }
+        if (n.rare && !VisiblePour(butin, joueur, n.rare) && Tirage(PCT_OEIL_EXERCE_RANG * RangTalent(*e, m, "oeil-exerce")))
+        {
+            AjouterAuButin(butin, n.rare, 1);
+            trace += Acore::StringFormat(" rare={}", n.rare);
+        }
+        if (n.pur && Tirage(PCT_MAIN_PURE_RANG * RangTalent(*e, m, "main-pure")))
+        {
+            AjouterAuButin(butin, n.pur, 1);
+            trace += Acore::StringFormat(" pur={}", n.pur);
+        }
+        if (!trace.empty())
+        {
+            ++RecoltesTalents;
+            LOG_INFO("module", "coa recolte: talents joueur={} noeud={} metier={} specialite={}{}", joueur->GetGUID().GetCounter(),
+                n.entree, m, specialite.empty() ? "-" : specialite, trace);
+        }
+    }
+
+    // Noeud classique (minerai, herbe) ou depecage : Sac du recolteur et Rendement, sur les seuls materiaux classiques
+    // (marchandises hors de nos plages), jamais sur un objet de quete.
+    void RecolterClassique(Player* joueur, uint32 metier, Loot* butin)
+    {
+        using namespace CoaArtisanatIds;
+        EtatTalents* e = EtatRecolte(joueur, metier);
+        if (!e)
+            return;
+        bool const sac = RangTalent(*e, metier, "sac-recolteur") && Tirage(PCT_SAC_RECOLTEUR);
+        bool const rendement = RangTalent(*e, metier, "rendement") != 0;
+        if (!sac && !rendement)
+            return;
+        std::string trace;
+        bool sacPose = false;
+        for (LootItem& li : butin->items)
+        {
+            ItemTemplate const* proto = sObjectMgr->GetItemTemplate(li.itemid);
+            if (!proto || proto->Class != ITEM_CLASS_TRADE_GOODS || !EstMateriauClassique(li.itemid) || li.needs_quest || !li.count)
+                continue;
+            uint32 plus = rendement ? ArrondiAuHasard(uint64(li.count) * PCT_RENDEMENT) : 0;
+            if (sac && !sacPose)
+            {
+                ++plus;
+                sacPose = true;
+            }
+            uint32 const neuf = std::min<uint32>({ uint32(li.count) + plus, proto->GetMaxStackSize(), 255u });
+            if (neuf > li.count)
+            {
+                trace += Acore::StringFormat(" {}:{}->{}", li.itemid, uint32(li.count), neuf);
+                li.count = uint8(neuf);
+            }
+        }
+        if (!trace.empty())
+        {
+            ++RecoltesTalents;
+            LOG_INFO("module", "coa recolte: classique joueur={} metier={} sac={} rendement={}{}", joueur->GetGUID().GetCounter(), metier,
+                sacPose ? 1 : 0, rendement ? 1 : 0, trace);
+        }
+    }
+
+    // Metier de recolte d'un noeud classique (coffre a verrou de competence minage ou herboristerie), 0 sinon.
+    uint32 MetierDuNoeudClassique(GameObject const* go)
+    {
+        GameObjectTemplate const* t = go ? go->GetGOInfo() : nullptr;
+        if (!t || t->type != GAMEOBJECT_TYPE_CHEST)
+            return 0;
+        LockEntry const* verrou = sLockStore.LookupEntry(t->GetLockId());
+        for (uint8 k = 0; verrou && k < MAX_LOCK_CASE; ++k)
+            if (verrou->Type[k] == LOCK_KEY_SKILL)
+            {
+                if (verrou->Index[k] == LOCKTYPE_MINING)
+                    return 186;
+                if (verrou->Index[k] == LOCKTYPE_HERBALISM)
+                    return 182;
+            }
+        return 0;
+    }
+
+    class ArtisanatButinRecolte final : public MiscScript
+    {
+    public:
+        ArtisanatButinRecolte() : MiscScript("CoaArtisanatButinRecolte", { MISCHOOK_ON_AFTER_LOOT_TEMPLATE_PROCESS }) { }
+
+        // Apres le tirage du modele (Loot::FillLoot), avant les droits de groupe : comme les materiaux de monde.
+        void OnAfterLootTemplateProcess(Loot* butin, LootTemplate const* /*modele*/, LootStore const& magasin, Player* detenteur,
+            bool /*personnel*/, bool /*sansErreur*/, uint16 mode) override
+        {
+            if (!butin || !detenteur || !mode || Talents.empty() || !detenteur->IsInWorld() || !detenteur->GetSession()
+                || detenteur->GetSession()->IsBot())
+                return;
+            if (&magasin == &LootTemplates_Skinning)
+            {
+                RecolterClassique(detenteur, 393, butin);
+                return;
+            }
+            if (&magasin != &LootTemplates_Gameobject || !butin->sourceWorldObjectGUID.IsGameObject())
+                return;
+            GameObject* go = detenteur->GetMap()->GetGameObject(butin->sourceWorldObjectGUID);
+            if (!go)
+                return;
+            if (auto it = NoeudsRecolte.find(go->GetEntry()); it != NoeudsRecolte.end())
+                RecolterNoeud(detenteur, it->second, butin);
+            else if (uint32 const metier = MetierDuNoeudClassique(go))
+                RecolterClassique(detenteur, metier, butin);
+        }
+    };
+
+    // Pas de loup : apres l'IA du noeud (GameObject::SetLootState appelle AI()->OnStateChanged, donc le SmartAI qui fait
+    // surgir le gardien, PUIS ce crochet), le gardien que ce noeud vient d'invoquer repart avec la chance du talent.
+    class ArtisanatNoeuds final : public AllGameObjectScript
+    {
+    public:
+        ArtisanatNoeuds() : AllGameObjectScript("CoaArtisanatNoeuds") { }
+
+        void OnGameObjectLootStateChanged(GameObject* go, uint32 etat, Unit* unite) override
+        {
+            if (etat != GO_ACTIVATED || !GardienRecolte || !go || !unite || !unite->IsPlayer())
+                return;
+            auto it = NoeudsRecolte.find(go->GetEntry());
+            if (it == NoeudsRecolte.end())
+                return;
+            Player* joueur = unite->ToPlayer();
+            EtatTalents* e = EtatRecolte(joueur, it->second.metier);
+            uint32 const rang = e ? RangTalent(*e, it->second.metier, "pas-de-loup") : 0;
+            if (!rang)
+                return;
+            std::list<Creature*> gardiens;
+            go->GetCreatureListWithEntryInGrid(gardiens, GardienRecolte, 10.0f);
+            for (Creature* c : gardiens)
+            {
+                TempSummon* invoque = c->ToTempSummon();
+                if (!invoque || invoque->GetSummonerGUID() != go->GetGUID() || !c->IsAlive())
+                    continue;
+                if (Tirage(CoaArtisanatIds::PCT_PAS_DE_LOUP_RANG * rang))
+                {
+                    ++GardiensRenvoyes;
+                    LOG_INFO("module", "coa recolte: pas de loup joueur={} noeud={} gardien renvoye ({})", joueur->GetGUID().GetCounter(),
+                        go->GetEntry(), c->GetGUID().ToString());
+                    invoque->UnSummon();
+                }
+                break;   // un seul gardien par ouverture
+            }
+        }
+    };
+
+    // Paratonnerre / Sceau mortuaire : le piege d'un noeud (sort PiegeRecolte, lance par le declencheur WORLD_TRIGGER que le
+    // noeud invoque a sa place, GameObject::CastSpell) fait moitie moins a qui connait le talent de la specialite du noeud.
+    void ReduireDegatsPiege(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort)
+    {
+        if (!PiegeRecolte || !sort || sort->Id != PiegeRecolte || degats <= 0 || !cible || !cible->IsPlayer() || !attaquant
+            || attaquant->GetEntry() != WORLD_TRIGGER || EntreesNoeuds.empty())
+            return;
+        std::list<GameObject*> noeuds;
+        attaquant->GetGameObjectListWithEntryInGrid(noeuds, EntreesNoeuds, 3.0f);
+        if (noeuds.empty())
+            return;
+        auto it = NoeudsRecolte.find(noeuds.front()->GetEntry());
+        if (it == NoeudsRecolte.end())
+            return;
+        Player* joueur = cible->ToPlayer();
+        EtatTalents* e = EtatRecolte(joueur, it->second.metier);
+        std::string specialite;
+        if (!e || !DeSaSpecialite(*e, it->second.metier, it->second, specialite)
+            || !RangTalent(*e, it->second.metier, "paratonnerre-sceau:" + specialite))
+            return;
+        int32 const avant = degats;
+        degats = degats * int32(100 - CoaArtisanatIds::PCT_PIEGE_REDUIT) / 100;
+        ++PiegesReduits;
+        LOG_INFO("module", "coa recolte: piege reduit joueur={} noeud={} degats {} -> {}", joueur->GetGUID().GetCounter(),
+            it->second.entree, avant, degats);
+    }
+
+    // Flair : toutes les FLAIR_PERIODE_MS, le noeud d'evenement de sa famille le plus proche (entre FLAIR_DEJA_VU et
+    // FLAIR_PORTEE) s'affiche en point d'interet (carte et mini-carte, comme les indications des gardes). Un seul a la fois ;
+    // reenvoye quand le plus proche change.
+    struct FlairEtat final : public DataMap::Base
+    {
+        uint32 cumul = 0;
+        ObjectGuid dernier;
+    };
+    std::string const CLE_FLAIR = "CoaArtisanatFlair";
+
+    void MettreAJourFlair(Player* joueur, uint32 diff)
+    {
+        using namespace CoaArtisanatIds;
+        FlairEtat* f = joueur->CustomData.GetDefault<FlairEtat>(CLE_FLAIR);
+        f->cumul += diff;
+        if (f->cumul < FLAIR_PERIODE_MS)
+            return;
+        f->cumul = 0;
+        EtatTalents* e = Etat(joueur);
+        if (!e->metierR || !RangTalent(*e, e->metierR, "flair") || !joueur->IsInWorld() || joueur->IsInCombat())
+            return;
+        std::vector<uint32> famille;
+        for (auto const& [entree, n] : NoeudsRecolte)
+            if (n.metier == e->metierR)
+                famille.push_back(entree);
+        std::list<GameObject*> noeuds;
+        joueur->GetGameObjectListWithEntryInGrid(noeuds, famille, FLAIR_PORTEE);
+        GameObject* proche = nullptr;
+        float meilleur = FLAIR_PORTEE + 1.0f;
+        for (GameObject* go : noeuds)
+        {
+            if (!go->isSpawned() || go->getLootState() != GO_READY)
+                continue;
+            float const d = joueur->GetDistance(go);
+            if (d < meilleur)
+            {
+                meilleur = d;
+                proche = go;
+            }
+        }
+        if (!proche || meilleur < FLAIR_DEJA_VU || proche->GetGUID() == f->dernier)
+            return;
+        f->dernier = proche->GetGUID();
+        WorldPacket data(SMSG_GOSSIP_POI, 4 + 4 + 4 + 4 + 4 + 40);
+        data << uint32(99);                  // drapeaux des indications de garde (points_of_interest, Flags 99 : le plus courant)
+        data << float(proche->GetPositionX());
+        data << float(proche->GetPositionY());
+        data << uint32(7);                   // icone (points_of_interest, Icon 7 : le drapeau des gardes)
+        data << uint32(0);
+        data << proche->GetGOInfo()->name;
+        joueur->SendDirectMessage(&data);
+        LOG_INFO("module", "coa recolte: flair joueur={} noeud={} distance={:.0f}", joueur->GetGUID().GetCounter(), proche->GetEntry(), meilleur);
+    }
+
+    // Materiau pur : porte le nom de qui l'a extrait (ITEM_FIELD_CREATOR, conception T v2 § 4), pose au ramassage.
+    void GraverRecolteur(Player* joueur, Item* objet)
+    {
+        if (!objet || !EstMateriauPur(objet->GetEntry()) || objet->GetGuidValue(ITEM_FIELD_CREATOR))
+            return;
+        objet->SetGuidValue(ITEM_FIELD_CREATOR, joueur->GetGUID());
+        objet->SetState(ITEM_CHANGED, joueur);
+    }
+
     // ---- Astrolabe (18/10) : Re-signer -------------------------------------------------------------------------------
     //
     // « RESIGNER:<sac>:<case>:<entree> » (position comme EVEIL) : un specialiste qui connait Re-signer monte la signature
@@ -3005,12 +3690,33 @@ namespace
             if (auto t = Talents.find(sort); t != Talents.end() && t->second.metier == m
                 && !t->second.talent.starts_with(PREFIXE_TALENT_FACETTE))
                 rang = std::max(rang, t->second.signatureRang);
-        if (rang <= actuelle.rang)
+        // Lot T : un specialiste au rang 3 qui porte un materiau pur de son metier (PURS_DU_METIER) re-signe au rang 4 ; le
+        // materiau est consomme et son recolteur grave en emplacement 9 (conception T v2 § 4 : « Re-signer avec un nouveau
+        // materiau pur remplace le recolteur grave par celui de ce materiau, puisque c'est lui qui donne le rang 4 »).
+        Item* pur = nullptr;
+        if (rang >= 3 && actuelle.rang < 4)
+            for (auto const& pm : PURS_DU_METIER)
+                if (pm.metier == m)
+                    for (uint32 entree : pm.purs)
+                        if (!pur)
+                            if (Item* x = joueur->GetItemByEntry(entree); x && !x->IsEquipped() && !x->IsInTrade())
+                                pur = x;
+        uint8 const cible = pur ? 4 : rang;
+        if (cible <= actuelle.rang)
             return "RANG";
         SignatureDef const* neuve = nullptr;
         for (auto const& [enchant, s] : Signatures)
-            if (s.metier == m && s.voie == actuelle.voie && s.forme == actuelle.forme && s.rang == rang)
+            if (s.metier == m && s.voie == actuelle.voie && s.forme == actuelle.forme && s.rang == cible)
                 neuve = &s;
+        if (!neuve && pur)   // pas de ligne au rang 4 : re-signer sans le materiau pur, a son propre rang
+        {
+            pur = nullptr;
+            if (rang <= actuelle.rang)
+                return "RANG";
+            for (auto const& [enchant, s] : Signatures)
+                if (s.metier == m && s.voie == actuelle.voie && s.forme == actuelle.forme && s.rang == rang)
+                    neuve = &s;
+        }
         if (!neuve)
             return "RANG";
         uint32 composant = 0;
@@ -3040,11 +3746,21 @@ namespace
         piece->SetState(ITEM_CHANGED, joueur);
         joueur->DestroyItemCount(MONDE_RARE, RESIGNER_RARES, true);
         joueur->DestroyItemCount(composant, 1, true);
+        uint32 recolteur = 0, purEntree = 0;
+        if (pur)
+        {
+            recolteur = pur->GetGuidValue(ITEM_FIELD_CREATOR).GetCounter();
+            purEntree = pur->GetEntry();
+            uint32 un = 1;
+            joueur->DestroyItemCount(pur, un, true);
+            if (recolteur)
+                PoserExtrait(joueur, piece, recolteur);
+        }
         enchantPose = neuve->enchant;
-        rangPose = rang;
-        LOG_INFO("module", "coa artisanat: re-signer joueur={} piece={} ({}) forme={} rang {} -> {} enchant {} -> {} main_constante={} cout={}x{} {}x1",
+        rangPose = neuve->rang;
+        LOG_INFO("module", "coa artisanat: re-signer joueur={} piece={} ({}) forme={} rang {} -> {} enchant {} -> {} main_constante={} cout={}x{} {}x1 pur={} recolteur={}",
             joueur->GetGUID().GetCounter(), piece->GetGUID().GetCounter(), piece->GetEntry(), actuelle.forme, uint32(actuelle.rang),
-            uint32(rang), actuelle.enchant, neuve->enchant, constante, MONDE_RARE, RESIGNER_RARES, composant);
+            uint32(neuve->rang), actuelle.enchant, neuve->enchant, constante, MONDE_RARE, RESIGNER_RARES, composant, purEntree, recolteur);
         return {};
     }
 
@@ -3116,6 +3832,8 @@ namespace
             ChargerEtapes();
             ChargerReglesMonde();
             ChargerTalents();
+            ChargerNoeudsRecolte();   // lot T : apres les gabarits d'objets du monde et Lock.dbc
+            CoaArtisanatTempsDeRecolte = &TempsDeRecolte;
             VerifierMoisson();   // apres le chargement des sorts (spell_dbc compris)
         }
 
@@ -3134,7 +3852,15 @@ namespace
             PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT,
             PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_EQUIP, PLAYERHOOK_ON_UNEQUIP_ITEM, PLAYERHOOK_ON_AFTER_SET_VISIBLE_ITEM_SLOT,
             PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_CAN_CAST_ITEM_COMBAT_SPELL, PLAYERHOOK_ON_APPLY_ITEM_MODS_BEFORE,
-            PLAYERHOOK_ON_MAP_CHANGED }) { }
+            PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_UPDATE }) { }
+
+        // Lot T, Flair : une recherche toutes les FLAIR_PERIODE_MS, humains seulement (aucune requete pour un bot).
+        void OnPlayerUpdate(Player* joueur, uint32 diff) override
+        {
+            if (NoeudsRecolte.empty() || Talents.empty() || !TablesPersonnages || !joueur->GetSession() || joueur->GetSession()->IsBot())
+                return;
+            MettreAJourFlair(joueur, diff);
+        }
 
         // Coup de maitre (Astrolabe) : les caracteristiques d'une piece « de maitre » portee comptent BONUS_DE_MAITRE_POUR_CENT de
         // plus. Appele a la pose ET au retrait des caracteristiques de la piece (Player::_ApplyItemBonuses, objet deja dans sa
@@ -3158,7 +3884,7 @@ namespace
 
         // Coeur de forge : coups blancs et sorts de melee ou de distance (Player::CastItemCombatSpell, appele pour CHAQUE
         // objet porte) ; on ne compte que pour la piece qui porte la facette, une fois par coup. Ne refuse jamais rien.
-        bool OnPlayerCanCastItemCombatSpell(Player* joueur, Unit* cible, WeaponAttackType /*type*/, uint32 procVictime,
+        bool OnPlayerCanCastItemCombatSpell(Player* joueur, Unit* cible, WeaponAttackType type, uint32 procVictime,
             uint32 resultat, Item* objet, ItemTemplate const* /*proto*/) override
         {
             if (AuraCoeurDeForge && (resultat & PROC_HIT_CRITICAL) && objet)
@@ -3168,7 +3894,7 @@ namespace
             // Fournaise et Entaille (Astrolabe) : un coup qui touche et blesse ; seule la piece qui porte la signature tire.
             if (objet && cible && (procVictime & PROC_FLAG_TAKEN_DAMAGE) && (resultat & (PROC_HIT_NORMAL | PROC_HIT_CRITICAL))
                 && (objet->GetEnchantmentId(EMPLACEMENT_SIGNATURE) || objet->GetEnchantmentId(EMPLACEMENT_FACETTE)))
-                DeclencherProcs(joueur, cible, objet);
+                DeclencherProcs(joueur, cible, objet, (resultat & PROC_HIT_CRITICAL) != 0, false, type == RANGED_ATTACK);
             return true;
         }
 
@@ -3373,8 +4099,9 @@ namespace
             }
         }
 
-        void OnPlayerLootItem(Player* joueur, Item* /*objet*/, uint32 /*count*/, ObjectGuid source) override
+        void OnPlayerLootItem(Player* joueur, Item* objet, uint32 /*count*/, ObjectGuid source) override
         {
+            GraverRecolteur(joueur, objet);   // lot T : un materiau pur porte le nom de qui l'a extrait
             if (!source.IsGameObject())
                 return;
             bool const bot = joueur->GetSession() && joueur->GetSession()->IsBot();
@@ -5274,6 +6001,8 @@ void AddAscensionArtisanatScripts()
     new ArtisanatWorld();
     new ArtisanatPlayer();
     new ArtisanatButinMonde();
+    new ArtisanatButinRecolte();
+    new ArtisanatNoeuds();
     new ArtisanatUnit();
     new ArtisanatSorts();
     new ArtisanatCommandes();

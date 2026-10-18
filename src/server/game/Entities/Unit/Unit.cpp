@@ -12377,10 +12377,17 @@ int32 Unit::ModSpellDuration(SpellInfo const* spellProto, Unit const* target, in
     return std::max(duration, 0);
 }
 
+// CoA, artisanat (lot T, talent de recolte « Pas vif ») : pose par mod-ascension-compat au demarrage (AscensionArtisanat.cpp),
+// nul sinon. Rend le temps d'incantation d'un sort de recolte d'un joueur, apres les modificateurs de sort. Pas d'en-tete
+// partage : seul ce fichier se recompile.
+int32 (*CoaArtisanatTempsDeRecolte)(Player const* joueur, SpellInfo const* sort, int32 temps) = nullptr;
+
 void Unit::ModSpellCastTime(SpellInfo const* spellInfo, int32& castTime, Spell* spell)
 {
     if (!spellInfo || castTime < 0)
         return;
+    if (CoaArtisanatTempsDeRecolte && castTime > 0 && IsPlayer())
+        castTime = CoaArtisanatTempsDeRecolte(ToPlayer(), spellInfo, castTime);
     if (IsPlayer() && getClass() == CLASS_NECROMANCER && spellInfo->Id == 803741 &&
         GetPower(POWER_RUNIC_POWER) > 500)
     {
