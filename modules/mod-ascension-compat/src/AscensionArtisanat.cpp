@@ -99,17 +99,20 @@ namespace
     // Emplacements recopies. BONUS_ENCHANTMENT_SLOT (bonus de chasse) se recalcule sur la piece neuve. Les
     // PROP_ENCHANTMENT_SLOT_* servent aux suffixes aleatoires, que nos pieces n'ont pas (0 piece de 9101200-9104999 avec
     // RandomProperty ou RandomSuffix, mesure le 15/10) : le 7 porte la signature de l'artisan (lot T, D-PO-34), le 8 la
-    // facette d'une Oeuvre legendaire, le 9 le recolteur (GUID bas dans les charges, ENCHANT_EXTRAIT ; lot T1, T1-5).
+    // facette d'une Oeuvre legendaire, le 9 le recolteur (GUID bas dans les charges, ENCHANT_EXTRAIT ; lot T1, T1-5), le 10
+    // la marque « De maitre » (Coup de maitre, Astrolabe du 18/10, ENCHANT_DE_MAITRE). Les charges du 7 valent 1 quand
+    // l'artisan connaissait Main constante (types d'effet 0 : le coeur ne les decompte jamais, verdict T1-1).
     // Tous suivent la piece aux paliers, a l'eveil et aux rangs.
-    constexpr std::array<EnchantmentSlot, 9> EMPLACEMENTS_RECOPIES =
+    constexpr std::array<EnchantmentSlot, 10> EMPLACEMENTS_RECOPIES =
     {
         PERM_ENCHANTMENT_SLOT, TEMP_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT, SOCK_ENCHANTMENT_SLOT_2,
         SOCK_ENCHANTMENT_SLOT_3, PRISMATIC_ENCHANTMENT_SLOT, PROP_ENCHANTMENT_SLOT_0, PROP_ENCHANTMENT_SLOT_1,
-        PROP_ENCHANTMENT_SLOT_2
+        PROP_ENCHANTMENT_SLOT_2, PROP_ENCHANTMENT_SLOT_3
     };
     constexpr EnchantmentSlot EMPLACEMENT_SIGNATURE = PROP_ENCHANTMENT_SLOT_0;   // 7
     constexpr EnchantmentSlot EMPLACEMENT_FACETTE = PROP_ENCHANTMENT_SLOT_1;     // 8
     constexpr EnchantmentSlot EMPLACEMENT_EXTRAIT = PROP_ENCHANTMENT_SLOT_2;     // 9
+    constexpr EnchantmentSlot EMPLACEMENT_DE_MAITRE = PROP_ENCHANTMENT_SLOT_3;   // 10
 
     bool EstOeuvre(uint32 entree)
     {
@@ -217,11 +220,19 @@ namespace
                 ++perdus;
                 continue;
             }
+            // « De maitre » change les caracteristiques de la piece (crochet OnPlayerApplyItemModsBefore) : sur une piece
+            // portee, retirer ses caracteristiques AVANT de poser la marque et les rendre APRES, sinon le retrait suivant
+            // enleverait 5 % qui n'avaient jamais ete ajoutes.
+            bool const maitre = portee && slot == EMPLACEMENT_DE_MAITRE && !cible->IsBroken();
+            if (maitre)
+                joueur->_ApplyItemBonuses(proto, cible->GetSlot(), false);
             if (portee)
                 joueur->ApplyEnchantment(cible, slot, false);
             cible->SetEnchantment(slot, e.id, e.duree, e.charges, joueur->GetGUID());
             if (portee)
                 joueur->ApplyEnchantment(cible, slot, true);   // reprend aussi la duree (apply_dur)
+            if (maitre)
+                joueur->_ApplyItemBonuses(proto, cible->GetSlot(), true);
             ++recopies;
         }
 
@@ -488,6 +499,16 @@ namespace
         std::string avis;
     };
 
+    // Astrolabe (18/10), defini avec les talents : remise des talents sur un palier (or en %, materiaux de monde en %).
+    struct RemisePalier
+    {
+        uint32 pctOr = 0;       // Epargne + Economie d'expert, pieces de son metier
+        uint32 pctMonde = 0;    // Savoir de la voie, pieces de sa voie
+    };
+    RemisePalier RemiseDesTalents(Player* joueur, Item const* piece);
+    void Rendre(Player* joueur, uint32 entree, uint32 nombre, char const* pourquoi);
+    uint32 ArrondiAuHasard(uint64 centiemes);
+
     // L'etape elle-meme, commune aux messages d'addon (EVEIL, AMELIORER) et au banc d'essai. Rend la piece neuve, ou
     // nullptr et la cause du refus. Rien n'est pris avant que la piece neuve existe : pas de perte sur un refus.
     Item* Avancer(Player* joueur, Item* piece, SorteEtape sorte, RefusEveil& refus, char const* voie)
@@ -517,6 +538,12 @@ namespace
         if (joueur->IsInCombat())
             return refuser("COMBAT", "Impossible en combat.");
 
+        // Talents de l'Astrolabe (18/10) sur un palier : l'or du est remise d'avance (Epargne, Economie d'expert) ; les
+        // materiaux de monde sont exiges en entier puis une part est rendue (Savoir de la voie), pour que le controle et
+        // l'affichage de l'Atelier restent ceux de la table.
+        RemisePalier const remise = eveil ? RemisePalier{} : RemiseDesTalents(joueur, piece);
+        uint32 const orDu = uint32(uint64(etape->orCuivre) * (100 - std::min<uint32>(remise.pctOr, 100)) / 100);
+
         // Reactifs et or, banque exclue. DestroyItemCount puise la banque en dernier recours seulement : le controle
         // ci-dessous garantit assez hors banque, et ChargerEtapes refuse un meme objet sur deux colonnes.
         std::string manques, noms;
@@ -531,9 +558,9 @@ namespace
             ItemTemplate const* proto = sObjectMgr->GetItemTemplate(objet);
             noms += Acore::StringFormat("{}{} x{}", noms.empty() ? "" : ", ", proto ? proto->Name1 : std::to_string(objet), nombre - tenus);
         }
-        if (joueur->GetMoney() < etape->orCuivre)
+        if (joueur->GetMoney() < orDu)
         {
-            uint32 const manque = etape->orCuivre - uint32(joueur->GetMoney());
+            uint32 const manque = orDu - uint32(joueur->GetMoney());
             manques += Acore::StringFormat("{}or={}", manques.empty() ? "" : ",", manque);
             noms += Acore::StringFormat("{}{} po {} pa {} pc", noms.empty() ? "" : ", ", manque / 10000, (manque / 100) % 100, manque % 100);
         }
@@ -566,11 +593,21 @@ namespace
                 joueur->DestroyItemCount(objet, nombre, true);
                 cout += Acore::StringFormat(" {}x{}", objet, nombre);
             }
-        if (etape->orCuivre)
+        if (orDu)
         {
-            joueur->ModifyMoney(-int32(etape->orCuivre));
-            cout += Acore::StringFormat(" or={}", etape->orCuivre);
+            joueur->ModifyMoney(-int32(orDu));
+            cout += Acore::StringFormat(" or={}", orDu);
         }
+        if (remise.pctOr)
+            cout += Acore::StringFormat(" (or -{}% : {} au lieu de {})", remise.pctOr, orDu, etape->orCuivre);
+        if (remise.pctMonde)
+            for (auto const& [objet, nombre] : etape->objets)
+                if (objet >= CoaArtisanatIds::MONDE_MIN && objet <= CoaArtisanatIds::MONDE_MAX)
+                    if (uint32 const rendus = ArrondiAuHasard(uint64(nombre) * remise.pctMonde))
+                    {
+                        Rendre(joueur, objet, rendus, "savoir de la voie");
+                        cout += Acore::StringFormat(" rendu={}x{}", objet, rendus);
+                    }
 
         LOG_INFO("module", "coa artisanat: {} par {} joueur={} piece={} ({}) -> {} ({}) emplacements={} perdus={} cout={}",
             eveil ? "eveil" : "palier", voie, joueur->GetGUID().GetCounter(), ancienGuid, ancienne,
@@ -1265,6 +1302,7 @@ namespace
         uint32 sortEffet = 0;
         uint32 pieceMasque = 0;
         uint32 dureeMs = 0;
+        uint32 chanceCentiemes = 0;   // Fournaise, Entaille : chance par coup, en centiemes de % (400 = 4 %)
         uint8 rang = 0;
         uint8 seuilPct = 0;
         uint8 groupeSursaut = 0;
@@ -1274,6 +1312,27 @@ namespace
         std::string effet;
     };
     std::unordered_map<uint32, SignatureDef> Signatures;      // par enchantement
+
+    // Pieces que couvre une ligne de signature : classe et masque de sous-classes ; pour une arme (classe 2), le bit 31 du
+    // masque (aucune sous-classe d'arme ne l'atteint) ajoute les boucliers (classe 4, sous-classe 6) : voie du Fabricant
+    // d'armes, « melee et boucliers » (talents.py, BIT_BOUCLIERS).
+    constexpr uint32 MASQUE_BOUCLIERS = 1u << 31;
+    bool PieceDeLaSignature(SignatureDef const& s, ItemTemplate const* proto)
+    {
+        if (!proto)
+            return false;
+        if (s.pieceClasse == ITEM_CLASS_WEAPON && (s.pieceMasque & MASQUE_BOUCLIERS) && proto->Class == ITEM_CLASS_ARMOR
+            && proto->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD)
+            return true;
+        return proto->Class == s.pieceClasse && proto->SubClass < 31 && (s.pieceMasque & (1u << proto->SubClass));
+    }
+
+    // Metier (SkillLine) d'une piece de l'artisanat : celui de la recette qui la fabrique, propage le long des paliers et de
+    // l'eveil (coa_artisanat_etape). Construit par ChargerTalents, apres ChargerEtapes. Absente : 0.
+    std::unordered_map<uint32, uint32> MetierDesPieces;
+    // Composant d'artisan (Astrolabe) : recettes que le dresseur reserve a qui connait le talent (trainer_spell.ReqAbility1 =
+    // sort marqueur d'un talent « composant »), par marqueur. Sans le talent, le personnage les oublie (SynchroniserMarqueurs).
+    std::unordered_map<uint32, std::vector<uint32>> RecettesReservees;
     // La facette Coeur de forge (effet EFFET_COEUR_DE_FORGE) : son aura (sort_effet) est lue a chaque coup par les crochets
     // de degats et de soins ; 0 : pas de ligne, rien n'est lu.
     uint32 AuraCoeurDeForge = 0;
@@ -1343,9 +1402,12 @@ namespace
 
         uint32 signaturesRejetees = 0;
         AuraCoeurDeForge = 0;
+        bool const avecChance = bool(WorldDatabase.Query("SELECT 1 FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'coa_artisanat_signature' AND COLUMN_NAME = 'chance_centiemes'"));
         if (TableExiste(WorldDatabase, "coa_artisanat_signature"))
             if (QueryResult r = WorldDatabase.Query("SELECT enchant, metier, voie, forme, rang, effet, valeur, valeur_arene, recharge_ms, "
-                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet, duree_ms FROM coa_artisanat_signature"))
+                "seuil_pv_pct, groupe_sursaut, piece_classe, piece_masque, sort_effet, duree_ms, {} FROM coa_artisanat_signature",
+                avecChance ? "chance_centiemes" : "0"))
                 do
                 {
                     Field* f = r->Fetch();
@@ -1365,15 +1427,20 @@ namespace
                     s.pieceMasque = f[12].Get<uint32>();
                     s.sortEffet = f[13].Get<uint32>();
                     s.dureeMs = f[14].Get<uint32>();
+                    s.chanceCentiemes = f[15].Get<uint32>();
                     bool const coeur = s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
+                    // Astrolabe (18/10) : effets qui exigent leur sort d'effet ; Bastion d'orage est un pourcentage de l'Egide.
+                    bool const avecSort = coeur || s.effet == "fournaise" || s.effet == "entaille" || s.effet == "garde_lame"
+                        || s.effet == "bastion_d_orage";
+                    bool const pourcentage = coeur || s.effet == "bastion_d_orage";
                     // Coeur de forge : un pourcentage (au plus 100), une aura a poser (sort_effet), une recharge.
                     if (!sSpellItemEnchantmentStore.LookupEntry(s.enchant) || (s.sortEffet && !sSpellMgr->GetSpellInfo(s.sortEffet))
-                        || s.forme.empty() || !s.rang || s.seuilPct > 100
-                        || (coeur && (!s.sortEffet || s.valeur > 100 || s.valeurArene > 100)))
+                        || s.forme.empty() || !s.rang || s.seuilPct > 100 || s.chanceCentiemes > 10000
+                        || (avecSort && !s.sortEffet) || (pourcentage && (s.valeur > 100 || s.valeurArene > 100)))
                     {
                         ++signaturesRejetees;
-                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} (enchantement ou sort d'effet inconnu, forme ou rang vide, "
-                            "ou coeur_de_forge sans aura ou au-dela de 100 %)", s.enchant);
+                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} effet={} (enchantement ou sort d'effet inconnu, forme ou "
+                            "rang vide, effet sans son sort d'effet, pourcentage au-dela de 100 ou chance au-dela de 10000)", s.enchant, s.effet);
                         continue;
                     }
                     if (coeur)
@@ -1390,6 +1457,49 @@ namespace
         LOG_INFO("module", "coa artisanat: talents : {} sorts ({} marqueurs de metier), {} rejetes ; signatures : {}, {} rejetees ; tables personnages {}",
             uint32(Talents.size()), uint32(MarqueursMetier.size()), rejetes, uint32(Signatures.size()), signaturesRejetees,
             TablesPersonnages ? "presentes" : "ABSENTES");
+
+        // Astrolabe (18/10) : metier des pieces (recettes de nos plages, puis paliers et eveil).
+        MetierDesPieces.clear();
+        for (SkillLineAbilityEntry const* sla : sSkillLineAbilityStore)
+        {
+            if (!sla || sla->Spell < 9111000 || sla->Spell > 9113999)
+                continue;
+            if (SpellInfo const* info = sSpellMgr->GetSpellInfo(sla->Spell))
+                if (uint32 const piece = EntreeCreeeArtisanat(info))
+                    MetierDesPieces[piece] = sla->SkillLine;
+        }
+        uint32 const fabriquees = uint32(MetierDesPieces.size());
+        for (bool change = true; change;)
+        {
+            change = false;
+            for (auto const& [de, etape] : Etapes)
+                if (auto it = MetierDesPieces.find(de); it != MetierDesPieces.end() && !MetierDesPieces.count(etape.vers))
+                {
+                    MetierDesPieces[etape.vers] = it->second;
+                    change = true;
+                }
+        }
+        // Composant d'artisan : recettes reservees par le dresseur au talent « composant » (ReqAbility1 = son marqueur).
+        RecettesReservees.clear();
+        uint32 reservees = 0;
+        if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT SpellId, ReqAbility1 FROM trainer_spell WHERE ReqAbility1 BETWEEN 9113000 AND 9113439"))
+            do
+            {
+                uint32 const recette = r->Fetch()[0].Get<uint32>();
+                uint32 const marqueur = r->Fetch()[1].Get<uint32>();
+                auto it = Talents.find(marqueur);
+                if (it == Talents.end() || it->second.talent != "composant" || !sSpellMgr->GetSpellInfo(recette))
+                    continue;
+                auto& liste = RecettesReservees[marqueur];
+                if (std::find(liste.begin(), liste.end(), recette) == liste.end())
+                {
+                    liste.push_back(recette);
+                    ++reservees;
+                }
+            } while (r->NextRow());
+        LOG_INFO("module", "coa artisanat: astrolabe : {} pieces rattachees a un metier ({} fabriquees), {} recettes reservees au Composant d'artisan ; "
+            "De maitre {}", uint32(MetierDesPieces.size()), fabriquees, reservees,
+            sSpellItemEnchantmentStore.LookupEntry(CoaArtisanatIds::ENCHANT_DE_MAITRE) ? "actif" : "INERTE (enchantement absent)");
 
         // Lot T1 (Sourcier) : ce qui attend un identifiant d'un autre agent reste inerte, et le dit.
         using namespace CoaArtisanatIds;
@@ -1471,6 +1581,113 @@ namespace
         return plafond > depenses ? plafond - depenses : 0;
     }
 
+    // ---- Astrolabe de la Forge, arbre complet (18/10) : effets des talents du gabarit de creation ------------------------
+    //
+    // Un talent se reconnait a son code (coa_artisanat_talent_def.talent) dans l'arbre du metier principal de creation ;
+    // son rang est celui du dernier marqueur connu (rangs chaines par « prerequis »). Les dosages sont dans
+    // AscensionArtisanatIds.h (talents.json, D-PO-34 § 2).
+
+    uint8 RangTalent(EtatTalents const& e, uint32 metier, std::string_view code)
+    {
+        uint8 rang = 0;
+        if (!metier)
+            return 0;
+        for (uint32 sort : e.sorts)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier && it->second.talent == code)
+                rang = std::max(rang, it->second.rang);
+        return rang;
+    }
+
+    // Voie connue dans l'arbre du metier (talent « voie:<voie> »), vide sinon.
+    std::string VoieConnue(EtatTalents const& e, uint32 metier)
+    {
+        for (uint32 sort : e.sorts)
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier && it->second.talent.starts_with("voie:"))
+                return it->second.talent.substr(5);
+        return {};
+    }
+
+    uint32 MetierDePiece(uint32 entree)
+    {
+        auto it = MetierDesPieces.find(entree);
+        return it != MetierDesPieces.end() ? it->second : 0;
+    }
+
+    // Une piece est « de sa voie » si une ligne de signature de ce metier et de cette voie la couvre (memes pieces que la
+    // signature : plaque pour l'Armurier, armes de melee et boucliers pour le Fabricant d'armes).
+    bool PieceDeLaVoie(uint32 metier, std::string const& voie, ItemTemplate const* proto)
+    {
+        for (auto const& [enchant, s] : Signatures)
+            if (s.metier == metier && s.voie == voie && PieceDeLaSignature(s, proto))
+                return true;
+        return false;
+    }
+
+    // Partie entiere de centiemes/100, plus 1 avec une chance egale au reste : en moyenne, exactement le pourcentage voulu
+    // (2 Poussieres a -15 % : 30 % de chances d'en recuperer une).
+    uint32 ArrondiAuHasard(uint64 centiemes)
+    {
+        uint32 n = uint32(centiemes / 100);
+        if (uint32 const reste = uint32(centiemes % 100); reste && urand(0, 99) < reste)
+            ++n;
+        return n;
+    }
+
+    // Rend `nombre` objets au joueur : dans ses sacs si la place y est, sinon par courrier (rien ne se perd).
+    void Rendre(Player* joueur, uint32 entree, uint32 nombre, char const* pourquoi)
+    {
+        if (!nombre || !sObjectMgr->GetItemTemplate(entree))
+            return;
+        ItemPosCountVec dest;
+        if (joueur->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, entree, nombre) == EQUIP_ERR_OK)
+        {
+            if (Item* objet = joueur->StoreNewItem(dest, entree, true))
+            {
+                joueur->SendNewItem(objet, nombre, true, false);
+                return;
+            }
+        }
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        MailDraft draft("Atelier", Acore::StringFormat("Votre talent d'artisan ({}) vous rend ceci : vos sacs étaient pleins.", pourquoi));
+        ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
+        uint32 const pile = std::max<uint32>(1, proto->GetMaxStackSize());
+        uint32 joints = 0;
+        for (uint32 reste = nombre; reste && joints < MAX_MAIL_ITEMS;)
+        {
+            uint32 const n = std::min(reste, pile);
+            if (Item* objet = Item::CreateItem(entree, n, joueur))
+            {
+                objet->SaveToDB(trans);
+                draft.AddItem(objet);
+                ++joints;
+            }
+            reste -= n;
+        }
+        draft.SendMailTo(trans, MailReceiver(joueur), MailSender(joueur));
+        CharacterDatabase.CommitTransaction(trans);
+        LOG_INFO("module", "coa artisanat: rendu par courrier joueur={} objet={} nombre={} ({})", joueur->GetGUID().GetCounter(), entree,
+            nombre, pourquoi);
+    }
+
+    // Palier d'une piece (AMELIORER) : Epargne et Economie d'expert (or) si la piece est de son metier principal de creation,
+    // Savoir de la voie (materiaux de monde) si elle est aussi de sa voie.
+    RemisePalier RemiseDesTalents(Player* joueur, Item const* piece)
+    {
+        RemisePalier r;
+        if (Talents.empty() || !TablesPersonnages || !piece)
+            return r;
+        EtatTalents* e = Etat(joueur);
+        uint32 const metier = MetierDePiece(piece->GetEntry());
+        if (!e->metierC || metier != e->metierC)
+            return r;
+        using namespace CoaArtisanatIds;
+        r.pctOr = (RangTalent(*e, metier, "epargne") ? PCT_EPARGNE : 0) + PCT_ECONOMIE * RangTalent(*e, metier, "economie");
+        std::string const voie = VoieConnue(*e, metier);
+        if (!voie.empty() && PieceDeLaVoie(metier, voie, piece->GetTemplate()))
+            r.pctMonde = PCT_SAVOIR * RangTalent(*e, metier, "savoir");
+        return r;
+    }
+
     // Les sorts marqueurs suivent la table : appris s'ils manquent, retires s'ils n'y sont plus (connexion, oubli).
     void SynchroniserMarqueurs(Player* joueur, EtatTalents const& e)
     {
@@ -1488,6 +1705,18 @@ namespace
             else if (!voulu && joueur->HasSpell(sort))
                 joueur->removeSpell(sort, SPEC_MASK_ALL, false);
         }
+        // Composant d'artisan (Astrolabe) : sans le talent, les recettes qu'il reserve sont oubliees (le non-specialiste ne
+        // fabrique pas le composant d'artisan, D-PO-34 § 2). CoaArtisanat.ComposantReserve = 0 : on ne retire rien.
+        if (!RecettesReservees.empty() && sConfigMgr->GetOption<bool>("CoaArtisanat.ComposantReserve", true))
+            for (auto const& [marqueur, recettes] : RecettesReservees)
+                if (!e.sorts.count(marqueur))
+                    for (uint32 recette : recettes)
+                        if (joueur->HasSpell(recette))
+                        {
+                            joueur->removeSpell(recette, SPEC_MASK_ALL, false);
+                            LOG_INFO("module", "coa artisanat: recette reservee retiree joueur={} recette={} (talent {} non connu)",
+                                joueur->GetGUID().GetCounter(), recette, marqueur);
+                        }
     }
 
     // Rend la cause du refus, vide si le talent est appris.
@@ -1674,16 +1903,17 @@ namespace
         if (forme.empty() || !rang)
             return;
         ItemTemplate const* proto = objet->GetTemplate();
+        // Main constante (Astrolabe) : +25 % sur l'effet de la signature, marque dans les charges de l'emplacement 7.
+        uint32 const constante = RangTalent(*e, e->metierC, "main-constante") ? 1 : 0;
         for (auto const& [enchant, s] : Signatures)
         {
             if (s.metier != e->metierC || s.forme != forme || (!voie.empty() && s.voie != voie) || s.rang != rang
-                || proto->Class != s.pieceClasse
-                || proto->SubClass >= 32 || !(s.pieceMasque & (1u << proto->SubClass)))
+                || !PieceDeLaSignature(s, proto))
                 continue;
-            objet->SetEnchantment(PROP_ENCHANTMENT_SLOT_0, enchant, 0, 0, joueur->GetGUID());
+            objet->SetEnchantment(PROP_ENCHANTMENT_SLOT_0, enchant, 0, constante, joueur->GetGUID());
             objet->SetState(ITEM_CHANGED, joueur);
-            LOG_INFO("module", "coa artisanat: signature posee joueur={} piece={} ({}) forme={} rang={} enchant={}",
-                joueur->GetGUID().GetCounter(), objet->GetGUID().GetCounter(), objet->GetEntry(), forme, uint32(rang), enchant);
+            LOG_INFO("module", "coa artisanat: signature posee joueur={} piece={} ({}) forme={} rang={} enchant={} main_constante={}",
+                joueur->GetGUID().GetCounter(), objet->GetGUID().GetCounter(), objet->GetEntry(), forme, uint32(rang), enchant, constante);
             return;
         }
     }
@@ -1744,26 +1974,89 @@ namespace
     // Signatures actives (T1-5) : d'abord la facette de l'Oeuvre portee (emplacement 8, elle prend une des 3 places), puis
     // les signatures (emplacement 7) dans l'ordre des emplacements d'equipement ; 3 au plus. Une facette ou une signature de
     // meme nature (metier, voie, forme) qu'une autre deja retenue ne s'y ajoute pas : la plus forte (valeur) des deux reste.
+    // Astrolabe (18/10) : chaque active garde aussi sa piece (Fournaise et Entaille ne se tirent qu'une fois par coup, sur
+    // la piece qui les porte), sa marque Main constante (+25 %) et la nature de la piece (bouclier : blocage de Garde-lame).
     struct SignaturesActives final : public DataMap::Base
     {
         std::vector<SignatureDef const*> actives;
+        std::vector<ObjectGuid> pieces;     // parallele a actives
+        std::vector<bool> constantes;       // parallele a actives : Main constante de l'artisan
+        std::vector<bool> boucliers;        // parallele a actives : piece = bouclier
         bool sale = true;                   // equipement change depuis le dernier calcul
         Milliseconds sursaut{ 0 };          // fin de la recharge partagee des sursauts de survie
         std::map<uint32, Milliseconds> recharges;   // autres signatures, par enchantement
         uint32 chargesCoeur = 0;            // critiques comptes pour Coeur de forge
         uint32 egides = 0;                  // declenchements de sursaut de ce joueur (banc de garde G1)
         uint32 coeurs = 0;                  // declenchements de Coeur de forge de ce joueur (banc de garde G1)
+        int32 gardeParade = 0;              // Garde-lame pose : score de parade et de blocage (0 : aucune aura)
+        int32 gardeBlocage = 0;
+        uint32 gardeSort = 0;
     };
     std::atomic<uint32> DeclenchementsSignatures{ 0 };
     std::atomic<uint32> DeclenchementsCoeur{ 0 };
+    std::atomic<uint32> DeclenchementsProcs{ 0 };     // Fournaise et Entaille
+    std::atomic<uint32> BastionsPoses{ 0 };           // boucliers du Bastion d'orage poses sur un allie
+
+    bool NeutraliseEnArene1c1(Player const* joueur);
+    bool SoinEnJcJ(Unit const* soigneur, Unit const* soigne);
+
+    // Valeur d'une signature au niveau du porteur (dosee a NIVEAU_REFERENCE_VALEURS), valeur JcJ si demandee, +25 % si
+    // l'artisan connaissait Main constante.
+    uint32 ValeurSignature(SignatureDef const* s, bool jcj, bool constante, uint8 niveau)
+    {
+        uint64 v = uint64(jcj ? s->valeurArene : s->valeur) * std::min(niveau, NIVEAU_REFERENCE_VALEURS) / NIVEAU_REFERENCE_VALEURS;
+        if (constante)
+            v = v * CoaArtisanatIds::MAIN_CONSTANTE_POUR_CENT / 100;
+        return uint32(v);
+    }
+
+    // Garde-lame : aura passive (sort d'effet, effet 0 parade, effet 1 blocage), posee tant que la piece est portee ;
+    // reposee seulement quand les montants changent. Arene 1c1 contre un gladiateur : retiree.
+    void AppliquerGardeLame(Player* joueur, SignaturesActives* a)
+    {
+        int32 parade = 0, blocage = 0;
+        uint32 sort = 0;
+        if (!NeutraliseEnArene1c1(joueur))
+            for (std::size_t i = 0; i < a->actives.size(); ++i)
+                if (SignatureDef const* s = a->actives[i]; s->effet == "garde_lame" && s->sortEffet)
+                {
+                    int32 const v = int32(ValeurSignature(s, false, a->constantes[i], joueur->GetLevel()));
+                    (a->boucliers[i] ? blocage : parade) += v;
+                    sort = s->sortEffet;
+                }
+        uint32 const ancien = a->gardeSort;
+        if (ancien && !joueur->HasAura(ancien))
+            a->gardeParade = a->gardeBlocage = 0;   // retiree par autre chose : a reposer
+        if (sort == ancien && parade == a->gardeParade && blocage == a->gardeBlocage && (!sort || joueur->HasAura(sort)))
+            return;
+        if (ancien)
+            joueur->RemoveAurasDueToSpell(ancien);
+        a->gardeSort = 0;
+        a->gardeParade = a->gardeBlocage = 0;
+        if (!sort || (!parade && !blocage))
+            return;
+        joueur->CastCustomSpell(joueur, sort, &parade, &blocage, nullptr, true);
+        if (joueur->HasAura(sort))
+        {
+            a->gardeSort = sort;
+            a->gardeParade = parade;
+            a->gardeBlocage = blocage;
+        }
+    }
 
     void RecalculerSignatures(Player* joueur)
     {
         SignaturesActives* a = joueur->CustomData.GetDefault<SignaturesActives>(CLE_SIGNATURES);
         a->actives.clear();
+        a->pieces.clear();
+        a->constantes.clear();
+        a->boucliers.clear();
         a->sale = false;
         if (Signatures.empty())
+        {
+            AppliquerGardeLame(joueur, a);
             return;
+        }
         std::vector<SignatureDef const*> facettes;
         for (EnchantmentSlot const emplacement : { EMPLACEMENT_FACETTE, EMPLACEMENT_SIGNATURE })
             for (uint8 slot = EQUIPMENT_SLOT_START; slot < EQUIPMENT_SLOT_END; ++slot)
@@ -1775,25 +2068,41 @@ namespace
                 if (it == Signatures.end())
                     continue;
                 SignatureDef const* s = &it->second;
+                bool const constante = emplacement == EMPLACEMENT_SIGNATURE && objet->GetEnchantmentCharges(EMPLACEMENT_SIGNATURE) != 0;
+                bool const bouclier = objet->GetTemplate()->Class == ITEM_CLASS_ARMOR
+                    && objet->GetTemplate()->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD;
                 auto meme = std::find_if(a->actives.begin(), a->actives.end(), [&](SignatureDef const* x)
                 {
                     return x->metier == s->metier && x->voie == s->voie && x->forme == s->forme;
                 });
                 if (meme != a->actives.end())
                 {
-                    // Deux signatures : le rang (regle d'avant T1). Une facette et une signature : la valeur.
+                    std::size_t const k = std::size_t(meme - a->actives.begin());
+                    // Deux signatures : le rang (regle d'avant T1), puis Main constante a rang egal. Une facette et une
+                    // signature : la valeur.
                     bool const facetteEnJeu = emplacement == EMPLACEMENT_FACETTE
                         || std::find(facettes.begin(), facettes.end(), *meme) != facettes.end();
-                    if (facetteEnJeu ? s->valeur > (*meme)->valeur : s->rang > (*meme)->rang)
+                    bool const meilleure = facetteEnJeu ? s->valeur > (*meme)->valeur
+                        : (s->rang > (*meme)->rang || (s->rang == (*meme)->rang && constante && !a->constantes[k]));
+                    if (meilleure)
+                    {
                         *meme = s;
+                        a->pieces[k] = objet->GetGUID();
+                        a->constantes[k] = constante;
+                        a->boucliers[k] = bouclier;
+                    }
                 }
                 else if (a->actives.size() < 3)
                 {
                     a->actives.push_back(s);
+                    a->pieces.push_back(objet->GetGUID());
+                    a->constantes.push_back(constante);
+                    a->boucliers.push_back(bouclier);
                     if (emplacement == EMPLACEMENT_FACETTE)
                         facettes.push_back(s);
                 }
             }
+        AppliquerGardeLame(joueur, a);
     }
 
     // Arene 1 contre 1 contre un gladiateur (conception § 5, revue JcJ n° 7) : les effets d'artisanat y sont neutralises.
@@ -1831,6 +2140,45 @@ namespace
         return a;
     }
 
+    // Bastion d'orage (facette tank de la Cuirasse du Maitre armurier) : quand un sursaut de survie vient de sauver le
+    // porteur, `valeur` % (`valeur_arene` % en JcJ) de ce que le sursaut valait protege les BASTION_ALLIES allies de son
+    // groupe les plus blesses a BASTION_PORTEE, et pose chez chacun la recharge de sursaut (il ne peut pas s'en servir
+    // pour lui-meme dans la foulee). Rien en arene 1c1 contre un gladiateur (deja exclu par l'appelant).
+    void DeclencherBastion(Player* joueur, SignaturesActives* a, uint32 valeurSursaut, uint32 rechargeMs, bool jcj)
+    {
+        SignatureDef const* bastion = nullptr;
+        for (SignatureDef const* s : a->actives)
+            if (s->effet == "bastion_d_orage" && s->sortEffet)
+                bastion = s;
+        Group* groupe = bastion ? joueur->GetGroup() : nullptr;
+        if (!groupe)
+            return;
+        std::vector<Player*> allies;
+        for (GroupReference* ref = groupe->GetFirstMember(); ref; ref = ref->next())
+            if (Player* p = ref->GetSource(); p && p != joueur && p->IsAlive() && p->IsInMap(joueur)
+                && joueur->IsWithinDistInMap(p, CoaArtisanatIds::BASTION_PORTEE) && p->GetHealth() < p->GetMaxHealth())
+                allies.push_back(p);
+        std::sort(allies.begin(), allies.end(), [](Player const* x, Player const* y) { return x->GetHealthPct() < y->GetHealthPct(); });
+        if (allies.size() > CoaArtisanatIds::BASTION_ALLIES)
+            allies.resize(CoaArtisanatIds::BASTION_ALLIES);
+        Milliseconds const maintenant = GameTime::GetGameTimeMS();
+        for (Player* allie : allies)
+        {
+            bool const jcjAllie = jcj || SoinEnJcJ(joueur, allie);
+            int32 const bp = int32(uint64(valeurSursaut) * (jcjAllie ? bastion->valeurArene : bastion->valeur) / 100);
+            if (bp <= 0)
+                continue;
+            joueur->CastCustomSpell(allie, bastion->sortEffet, &bp, nullptr, nullptr, true);
+            if (AuraEffect* bouclier = allie->GetAuraEffect(bastion->sortEffet, EFFECT_0, joueur->GetGUID()))
+                bouclier->ChangeAmount(bp);   // valeur fixe, comme l'Egide
+            SignaturesActives* b = Actives(allie);
+            b->sursaut = std::max(b->sursaut, maintenant + Milliseconds(rechargeMs));
+            ++BastionsPoses;
+            LOG_INFO("module", "coa artisanat: bastion d'orage joueur={} allie={} bouclier={} jcj={} pv_allie={:.0f}%",
+                joueur->GetGUID().GetCounter(), allie->GetGUID().GetCounter(), bp, jcjAllie ? 1 : 0, allie->GetHealthPct());
+        }
+    }
+
     // Egide (et tout effet « absorbe_sous_seuil ») : le coup qui ferait passer sous le seuil est absorbe a hauteur de la
     // valeur (dosee au niveau NIVEAU_REFERENCE_VALEURS, x min(niveau, ref) / ref ; valeur JcJ si l'attaquant est controle
     // par un joueur), le reste devient un bouclier (sort d'effet). Recharge partagee par les sursauts de survie (groupe_sursaut).
@@ -1843,8 +2191,9 @@ namespace
             return;
         Milliseconds const maintenant = GameTime::GetGameTimeMS();
         bool const jcj = ControleParUnJoueur(attaquant);
-        for (SignatureDef const* s : a->actives)
+        for (std::size_t i = 0; i < a->actives.size(); ++i)
         {
+            SignatureDef const* s = a->actives[i];
             if (s->effet != "absorbe_sous_seuil" && s->effet != "egide")
                 continue;
             uint64 const pv = joueur->GetHealth();
@@ -1854,8 +2203,7 @@ namespace
             Milliseconds& recharge = s->groupeSursaut ? a->sursaut : a->recharges[s->enchant];
             if (maintenant < recharge)
                 continue;
-            uint32 const valeur = uint32(uint64(jcj ? s->valeurArene : s->valeur)
-                * std::min(joueur->GetLevel(), NIVEAU_REFERENCE_VALEURS) / NIVEAU_REFERENCE_VALEURS);
+            uint32 const valeur = ValeurSignature(s, jcj, a->constantes[i], joueur->GetLevel());
             // Un coup mortel meme apres absorption : rien ne se declenche, la recharge n'est pas consommee.
             if (uint64(degats) >= pv + valeur)
                 continue;
@@ -1873,9 +2221,93 @@ namespace
             }
             ++DeclenchementsSignatures;
             ++a->egides;
-            LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} absorbe={} reste={}",
-                joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, absorbe, valeur - absorbe);
+            LOG_INFO("module", "coa artisanat: signature declenchee joueur={} enchant={} forme={} rang={} valeur={} jcj={} absorbe={} reste={} main_constante={}",
+                joueur->GetGUID().GetCounter(), s->enchant, s->forme, uint32(s->rang), valeur, jcj ? 1 : 0, absorbe, valeur - absorbe,
+                a->constantes[i] ? 1 : 0);
+            if (s->groupeSursaut)
+                DeclencherBastion(joueur, a, valeur, s->rechargeMs, jcj);
             return;   // un seul sursaut par coup
+        }
+    }
+
+    // Fournaise et Entaille (Astrolabe, 18/10) : a chaque coup qui touche (crochet d'objet de combat : une fois par piece
+    // portee ; seule la piece qui porte la signature tire) et, pour Fournaise, a chaque sort qui touche ou soigne
+    // (`objet` nul). Chance `chance_centiemes`, recharge interne `recharge_ms`.
+    //  - Fournaise : + valeur de la caracteristique principale (la plus haute de Force, Agilite, Intelligence) pendant
+    //    duree_ms ; valeur JcJ identique.
+    //  - Entaille : saignement de `valeur` (`valeur_arene` sur une cible controlee par un joueur) reparti sur les tics du
+    //    sort d'effet ; coups seulement.
+    // Arene 1c1 contre un gladiateur : rien.
+    void DeclencherProcs(Player* joueur, Unit* cible, Item const* objet)
+    {
+        // Un coup vise un autre que soi ; un sort (Fournaise) peut viser soi (soin, bouclier).
+        if (Signatures.empty() || !joueur->IsAlive() || !cible || !cible->IsAlive() || (objet && cible == joueur))
+            return;
+        SignaturesActives* a = Actives(joueur);
+        if (a->actives.empty())
+            return;
+        // Copie : un lancement ci-dessous ne doit pas pouvoir recalculer la liste pendant qu'on la parcourt.
+        std::vector<SignatureDef const*> const actives = a->actives;
+        std::vector<ObjectGuid> const pieces = a->pieces;
+        std::vector<bool> const constantes = a->constantes;
+        bool tire = false;
+        for (std::size_t i = 0; i < actives.size(); ++i)
+        {
+            SignatureDef const* s = actives[i];
+            bool const fournaise = s->effet == "fournaise";
+            if ((!fournaise && s->effet != "entaille") || !s->sortEffet || !s->chanceCentiemes)
+                continue;
+            if (objet ? objet->GetGUID() != pieces[i] : !fournaise)
+                continue;
+            if (!tire && NeutraliseEnArene1c1(joueur))
+                return;
+            tire = true;
+            Milliseconds const maintenant = GameTime::GetGameTimeMS();
+            Milliseconds& recharge = a->recharges[s->enchant];
+            if (maintenant < recharge || urand(1, 10000) > s->chanceCentiemes)
+                continue;
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(s->sortEffet);
+            if (!info)
+                continue;
+            if (fournaise)
+            {
+                int32 const v = int32(ValeurSignature(s, ControleParUnJoueur(cible), constantes[i], joueur->GetLevel()));
+                if (v <= 0)
+                    continue;
+                // effets du sort : 0 Force, 1 Agilite, 2 Intelligence (talents.py, sort_effet_forme)
+                float const force = joueur->GetStat(STAT_STRENGTH), agilite = joueur->GetStat(STAT_AGILITY),
+                    intelligence = joueur->GetStat(STAT_INTELLECT);
+                int32 bp[3] = { 0, 0, 0 };
+                bp[force >= agilite && force >= intelligence ? 0 : (agilite >= intelligence ? 1 : 2)] = v;
+                joueur->RemoveAurasDueToSpell(s->sortEffet);
+                joueur->CastCustomSpell(joueur, s->sortEffet, &bp[0], &bp[1], &bp[2], true);
+                if (s->dureeMs)
+                    if (Aura* aura = joueur->GetAura(s->sortEffet, joueur->GetGUID()))
+                    {
+                        aura->SetMaxDuration(int32(s->dureeMs));
+                        aura->SetDuration(int32(s->dureeMs));
+                    }
+                LOG_INFO("module", "coa artisanat: fournaise joueur={} enchant={} valeur={} caracteristique={}", joueur->GetGUID().GetCounter(),
+                    s->enchant, v, bp[0] ? "force" : (bp[1] ? "agilite" : "intelligence"));
+            }
+            else
+            {
+                if (!joueur->IsValidAttackTarget(cible))
+                    continue;
+                bool const jcj = ControleParUnJoueur(cible);
+                uint32 const total = ValeurSignature(s, jcj, constantes[i], joueur->GetLevel());
+                int32 const periode = info->Effects[EFFECT_0].Amplitude;
+                int32 const duree = info->GetMaxDuration();
+                uint32 const tics = periode > 0 && duree > 0 ? std::max<uint32>(1, uint32(duree / periode)) : 1;
+                int32 const parTic = int32(std::max<uint32>(1, total / tics));
+                if (!total)
+                    continue;
+                joueur->CastCustomSpell(cible, s->sortEffet, &parTic, nullptr, nullptr, true);
+                LOG_INFO("module", "coa artisanat: entaille joueur={} cible={} enchant={} total={} jcj={} tics={}x{}", joueur->GetGUID().GetCounter(),
+                    cible->GetGUID().ToString(), s->enchant, total, jcj ? 1 : 0, tics, parTic);
+            }
+            recharge = maintenant + Milliseconds(s->rechargeMs);
+            ++DeclenchementsProcs;
         }
     }
 
@@ -2381,15 +2813,19 @@ namespace
     public:
         ArtisanatSorts() : AllSpellScript("CoaArtisanatSorts", { ALLSPELLHOOK_ON_HIT_RESULT }) { }
 
-        void OnSpellHitResult(Spell* sort, Unit* /*cible*/, uint8 rate, uint32 degats, uint32 soins, bool critique) override
+        void OnSpellHitResult(Spell* sort, Unit* cible, uint8 rate, uint32 degats, uint32 soins, bool critique) override
         {
-            if (!critique || !AuraCoeurDeForge || rate != SPELL_MISS_NONE || (!degats && !soins) || !sort)
+            if (rate != SPELL_MISS_NONE || (!degats && !soins) || !sort || Signatures.empty())
                 return;
             Player* joueur = sort->GetCaster() ? sort->GetCaster()->ToPlayer() : nullptr;
             SpellInfo const* info = sort->GetSpellInfo();
             if (!joueur || !info || info->Id == AuraCoeurDeForge || (degats && PasseParObjetDeCombat(info)))
                 return;
-            ChargerCoeurDeForge(joueur);
+            // Fournaise (Astrolabe) : « coups et sorts » ; un sort d'effet d'artisanat (9113440-9113499) ne declenche rien.
+            if (cible && (info->Id < 9113440 || info->Id > 9113499))
+                DeclencherProcs(joueur, cible, nullptr);
+            if (critique && AuraCoeurDeForge)
+                ChargerCoeurDeForge(joueur);
         }
     };
 
@@ -2431,6 +2867,211 @@ namespace
                 if (!sCharacterCache->GetCharacterNameByGuid(ObjectGuid::Create<HighGuid::Player>(bas), nom))
                     nom = "un Sourcier disparu";
         Repondre(joueur, Acore::StringFormat("EXTRAIT:{}:{}:{}", sac, casse, nom));
+    }
+
+    // ---- Astrolabe (18/10) : talents a la fabrication ------------------------------------------------------------------
+    //
+    // Toute recette d'un metier (SkillLineAbility) qui cree un objet est notee a son lancement ; a la creation de l'objet
+    // (meme tour de monde, meme entree), les talents du metier principal de creation s'appliquent, s'il est celui de la
+    // recette. Les reactifs sont deja pris (Spell::TakeReagents avant les effets) : les remises sont RENDUES, au hasard
+    // pour la part fractionnaire (ArrondiAuHasard), si bien qu'en moyenne le cout baisse exactement du pourcentage.
+    //  - Main econome, Economie d'expert : -5 % par rang des materiaux classiques (reactifs qui ne sont pas a nous) ;
+    //  - Serie : piece fabriquee, 10 % de chances qu'un composant soit rendu ;
+    //  - Etabli d'appoint : composant fabrique, 5 % par rang d'un composant de plus ;
+    //  - Maitrise de voie : composant d'artisan fabrique, 5 % par rang d'un de plus (« en double ») ;
+    //  - Coup de maitre : piece fabriquee, 10 % de chances d'etre « de maitre » (emplacement 10, +5 % de caracteristiques).
+    std::string const CLE_FABRICATION = "CoaArtisanatFabrication";
+    struct FabricationEnAttente final : public DataMap::Base
+    {
+        uint32 sort = 0;
+        uint32 entree = 0;
+        uint32 metier = 0;
+        Milliseconds instant{ 0 };
+    };
+
+    std::atomic<uint32> PiecesDeMaitre{ 0 };
+
+    bool EstComposant(uint32 entree)
+    {
+        return entree >= CoaArtisanatIds::COMPOSANT_MIN && entree <= CoaArtisanatIds::COMPOSANT_MAX;
+    }
+
+    bool EstMateriauClassique(uint32 entree)
+    {
+        return entree < CoaArtisanatIds::NOS_OBJETS_MIN || entree > CoaArtisanatIds::NOS_OBJETS_MAX;
+    }
+
+    bool Tirage(uint32 pourCent)
+    {
+        return pourCent && urand(1, 100) <= pourCent;
+    }
+
+    void AppliquerTalentsDeFabrication(Player* joueur, Item* objet, FabricationEnAttente const& f)
+    {
+        using namespace CoaArtisanatIds;
+        if (Talents.empty() || !TablesPersonnages)
+            return;
+        EtatTalents* e = Etat(joueur);
+        if (!e->metierC || f.metier != e->metierC)
+            return;
+        SpellInfo const* info = sSpellMgr->GetSpellInfo(f.sort);
+        if (!info)
+            return;
+        uint32 const m = e->metierC;
+        std::string trace;
+        uint32 const pctClassique = PCT_MAIN_ECONOME * RangTalent(*e, m, "main-econome") + PCT_ECONOMIE * RangTalent(*e, m, "economie");
+        bool const piece = EstPieceArtisanat(objet->GetTemplate());
+        bool serieRendue = false;
+        bool const serie = piece && RangTalent(*e, m, "serie") && Tirage(PCT_SERIE);
+        for (uint8 i = 0; i < MAX_SPELL_REAGENTS; ++i)
+        {
+            if (info->Reagent[i] <= 0 || !info->ReagentCount[i])
+                continue;
+            uint32 const reactif = uint32(info->Reagent[i]);
+            uint32 rendus = 0;
+            if (pctClassique && EstMateriauClassique(reactif))
+                rendus = ArrondiAuHasard(uint64(info->ReagentCount[i]) * std::min<uint32>(pctClassique, 100));
+            if (serie && !serieRendue && EstComposant(reactif))
+            {
+                ++rendus;
+                serieRendue = true;
+            }
+            rendus = std::min<uint32>(rendus, info->ReagentCount[i]);
+            if (rendus)
+            {
+                Rendre(joueur, reactif, rendus, "fabrication");
+                trace += Acore::StringFormat(" rendu={}x{}", reactif, rendus);
+            }
+        }
+        uint32 const entree = objet->GetEntry();
+        if (EstComposant(entree))
+        {
+            uint32 plus = Tirage(PCT_ETABLI * RangTalent(*e, m, "etabli")) ? 1 : 0;
+            if (entree >= COMPOSANT_ARTISAN_MIN && Tirage(PCT_MAITRISE * RangTalent(*e, m, "maitrise")))
+                ++plus;
+            if (plus)
+            {
+                Rendre(joueur, entree, plus, "composant de plus");
+                trace += Acore::StringFormat(" composant+{}", plus);
+            }
+        }
+        if (piece && ENCHANT_DE_MAITRE && RangTalent(*e, m, "coup-de-maitre") && Tirage(PCT_COUP_DE_MAITRE)
+            && sSpellItemEnchantmentStore.LookupEntry(ENCHANT_DE_MAITRE) && !objet->IsEquipped()
+            && !objet->GetEnchantmentId(EMPLACEMENT_DE_MAITRE))
+        {
+            objet->SetEnchantment(EMPLACEMENT_DE_MAITRE, ENCHANT_DE_MAITRE, 0, 0, joueur->GetGUID());
+            objet->SetState(ITEM_CHANGED, joueur);
+            ++PiecesDeMaitre;
+            trace += " de_maitre";
+            ChatHandler(joueur->GetSession()).SendNotification("Coup de maître : une pièce de maître sort de vos mains.");
+        }
+        if (!trace.empty())
+            LOG_INFO("module", "coa artisanat: talents a la fabrication joueur={} recette={} objet={} ({}){}", joueur->GetGUID().GetCounter(),
+                f.sort, objet->GetGUID().GetCounter(), entree, trace);
+    }
+
+    // ---- Astrolabe (18/10) : Re-signer -------------------------------------------------------------------------------
+    //
+    // « RESIGNER:<sac>:<case>:<entree> » (position comme EVEIL) : un specialiste qui connait Re-signer monte la signature
+    // d'une piece (emplacement 7) de son metier et de sa voie a son propre rang de signature, meme forme. Cout : RESIGNER_RARES
+    // Fragments de resonance et 1 composant d'artisan du metier (RESIGNER_COMPOSANT). La marque Main constante devient celle
+    // de l'artisan qui re-signe. Reponses : RESIGNER_OK:<enchant>:<rang> ou RESIGNER_ERR:<cause>[:...].
+    // Une piece portee par un autre (liee) ne peut pas lui etre confiee : le service passe par une piece non liee, ou par
+    // l'artisan lui-meme (limite connue, l'emplacement « ne sera pas echange » de la fenetre d'echange n'est pas branche).
+    std::string Resigner(Player* joueur, Item* piece, uint32& enchantPose, uint8& rangPose)
+    {
+        using namespace CoaArtisanatIds;
+        if (Talents.empty() || !TablesPersonnages)
+            return "DESACTIVE";
+        if (joueur->GetTradeData() || piece->IsInTrade())
+            return "ECHANGE";
+        if (!joueur->IsAlive())
+            return "MORT";
+        if (joueur->IsInCombat())
+            return "COMBAT";
+        EtatTalents* e = Etat(joueur);
+        uint32 const m = e->metierC;
+        if (!m || !RangTalent(*e, m, "re-signer"))
+            return "TALENT";
+        auto it = Signatures.find(piece->GetEnchantmentId(EMPLACEMENT_SIGNATURE));
+        if (it == Signatures.end())
+            return "SIGNATURE";
+        SignatureDef const& actuelle = it->second;
+        std::string const voie = VoieConnue(*e, m);
+        if (actuelle.metier != m || actuelle.voie != voie)
+            return "METIER";
+        uint8 rang = 0;
+        for (uint32 sort : e->sorts)
+            if (auto t = Talents.find(sort); t != Talents.end() && t->second.metier == m
+                && !t->second.talent.starts_with(PREFIXE_TALENT_FACETTE))
+                rang = std::max(rang, t->second.signatureRang);
+        if (rang <= actuelle.rang)
+            return "RANG";
+        SignatureDef const* neuve = nullptr;
+        for (auto const& [enchant, s] : Signatures)
+            if (s.metier == m && s.voie == actuelle.voie && s.forme == actuelle.forme && s.rang == rang)
+                neuve = &s;
+        if (!neuve)
+            return "RANG";
+        uint32 composant = 0;
+        for (auto const& [metier, objet] : RESIGNER_COMPOSANT)
+            if (metier == m)
+                composant = objet;
+        if (!composant)
+            return "METIER";
+        std::string manques;
+        if (uint32 const n = joueur->GetItemCount(MONDE_RARE, false); n < RESIGNER_RARES)
+            manques += Acore::StringFormat("{}={}", MONDE_RARE, RESIGNER_RARES - n);
+        if (!joueur->GetItemCount(composant, false))
+            manques += Acore::StringFormat("{}{}=1", manques.empty() ? "" : ",", composant);
+        if (!manques.empty())
+            return "REACTIFS:" + manques;
+
+        uint32 const constante = RangTalent(*e, m, "main-constante") ? 1 : 0;
+        bool const portee = piece->IsEquipped();
+        if (portee)
+            joueur->ApplyEnchantment(piece, EMPLACEMENT_SIGNATURE, false);
+        piece->SetEnchantment(EMPLACEMENT_SIGNATURE, neuve->enchant, 0, constante, joueur->GetGUID());
+        if (portee)
+        {
+            joueur->ApplyEnchantment(piece, EMPLACEMENT_SIGNATURE, true);
+            MarquerSignatures(joueur);
+        }
+        piece->SetState(ITEM_CHANGED, joueur);
+        joueur->DestroyItemCount(MONDE_RARE, RESIGNER_RARES, true);
+        joueur->DestroyItemCount(composant, 1, true);
+        enchantPose = neuve->enchant;
+        rangPose = rang;
+        LOG_INFO("module", "coa artisanat: re-signer joueur={} piece={} ({}) forme={} rang {} -> {} enchant {} -> {} main_constante={} cout={}x{} {}x1",
+            joueur->GetGUID().GetCounter(), piece->GetGUID().GetCounter(), piece->GetEntry(), actuelle.forme, uint32(actuelle.rang),
+            uint32(rang), actuelle.enchant, neuve->enchant, constante, MONDE_RARE, RESIGNER_RARES, composant);
+        return {};
+    }
+
+    void TraiterResigner(Player* joueur, std::string_view corps)
+    {
+        std::array<std::string_view, 3> champs;
+        for (std::size_t i = 0; i < champs.size(); ++i)
+        {
+            std::size_t const sep = corps.find(':');
+            if (i + 1 < champs.size() && sep == std::string_view::npos)
+                return Repondre(joueur, "RESIGNER_ERR:FORMAT");
+            champs[i] = i + 1 < champs.size() ? corps.substr(0, sep) : corps;
+            corps.remove_prefix(i + 1 < champs.size() ? sep + 1 : corps.size());
+        }
+        int32 sac = 0, casse = 0, entree = 0;
+        if (!LireEntier(champs[0], sac) || !LireEntier(champs[1], casse) || !LireEntier(champs[2], entree))
+            return Repondre(joueur, "RESIGNER_ERR:FORMAT");
+        uint8 bag = 0, slot = 0;
+        Item* piece = PositionServeur(joueur, sac, casse, bag, slot) ? joueur->GetItemByPos(bag, slot) : nullptr;
+        if (!piece || int32(piece->GetEntry()) != entree)
+            return Repondre(joueur, "RESIGNER_ERR:PIECE");
+        uint32 enchant = 0;
+        uint8 rang = 0;
+        std::string const cause = Resigner(joueur, piece, enchant, rang);
+        if (!cause.empty())
+            return Repondre(joueur, "RESIGNER_ERR:" + cause);
+        Repondre(joueur, Acore::StringFormat("RESIGNER_OK:{}:{}", enchant, uint32(rang)));
     }
 
     // ---- Scripts --------------------------------------------------------------------------------------------------
@@ -2492,17 +3133,42 @@ namespace
         ArtisanatPlayer() : PlayerScript("CoaArtisanatPlayer", { PLAYERHOOK_ON_SPELL_CAST, PLAYERHOOK_ON_CREATE_ITEM,
             PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT,
             PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_EQUIP, PLAYERHOOK_ON_UNEQUIP_ITEM, PLAYERHOOK_ON_AFTER_SET_VISIBLE_ITEM_SLOT,
-            PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_CAN_CAST_ITEM_COMBAT_SPELL }) { }
+            PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_CAN_CAST_ITEM_COMBAT_SPELL, PLAYERHOOK_ON_APPLY_ITEM_MODS_BEFORE,
+            PLAYERHOOK_ON_MAP_CHANGED }) { }
+
+        // Coup de maitre (Astrolabe) : les caracteristiques d'une piece « de maitre » portee comptent BONUS_DE_MAITRE_POUR_CENT de
+        // plus. Appele a la pose ET au retrait des caracteristiques de la piece (Player::_ApplyItemBonuses, objet deja dans sa
+        // case dans les deux cas) : meme valeur rendue, donc symetrique tant que la marque ne change pas sur une piece portee
+        // (Recopier retire et rend les caracteristiques autour de la pose). Objets a ScalingStatValue : crochet non appele.
+        void OnPlayerApplyItemModsBefore(Player* joueur, uint8 slot, bool /*pose*/, uint8 /*indice*/, uint32 /*type*/, int32& valeur) override
+        {
+            if (!valeur || !CoaArtisanatIds::ENCHANT_DE_MAITRE || slot >= EQUIPMENT_SLOT_END)
+                return;
+            Item* objet = joueur->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+            if (objet && objet->GetEnchantmentId(EMPLACEMENT_DE_MAITRE) == CoaArtisanatIds::ENCHANT_DE_MAITRE)
+                valeur += (valeur * int32(CoaArtisanatIds::BONUS_DE_MAITRE_POUR_CENT) + (valeur > 0 ? 50 : -50)) / 100;
+        }
+
+        // Arene 1c1 contre un gladiateur : Garde-lame (aura passive) y est retiree, et rendue a la sortie.
+        void OnPlayerMapChanged(Player* joueur) override
+        {
+            MarquerSignatures(joueur);
+            Actives(joueur);
+        }
 
         // Coeur de forge : coups blancs et sorts de melee ou de distance (Player::CastItemCombatSpell, appele pour CHAQUE
         // objet porte) ; on ne compte que pour la piece qui porte la facette, une fois par coup. Ne refuse jamais rien.
-        bool OnPlayerCanCastItemCombatSpell(Player* joueur, Unit* /*cible*/, WeaponAttackType /*type*/, uint32 /*procVictime*/,
+        bool OnPlayerCanCastItemCombatSpell(Player* joueur, Unit* cible, WeaponAttackType /*type*/, uint32 procVictime,
             uint32 resultat, Item* objet, ItemTemplate const* /*proto*/) override
         {
             if (AuraCoeurDeForge && (resultat & PROC_HIT_CRITICAL) && objet)
                 if (auto it = Signatures.find(objet->GetEnchantmentId(EMPLACEMENT_FACETTE));
                     it != Signatures.end() && it->second.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE)
                     ChargerCoeurDeForge(joueur);
+            // Fournaise et Entaille (Astrolabe) : un coup qui touche et blesse ; seule la piece qui porte la signature tire.
+            if (objet && cible && (procVictime & PROC_FLAG_TAKEN_DAMAGE) && (resultat & (PROC_HIT_NORMAL | PROC_HIT_CRITICAL))
+                && (objet->GetEnchantmentId(EMPLACEMENT_SIGNATURE) || objet->GetEnchantmentId(EMPLACEMENT_FACETTE)))
+                DeclencherProcs(joueur, cible, objet);
             return true;
         }
 
@@ -2522,16 +3188,20 @@ namespace
             if (!Talents.empty() && !(joueur->GetSession() && joueur->GetSession()->IsBot()))
                 SynchroniserMarqueurs(joueur, *Etat(joueur));
             MarquerSignatures(joueur);
+            Actives(joueur);   // Garde-lame (aura passive, non sauvegardee) des la connexion
         }
 
+        // Equipement change : recalcul tout de suite (Garde-lame est un passif, il ne peut pas attendre le coup suivant).
         void OnPlayerEquip(Player* joueur, Item* /*objet*/, uint8 /*sac*/, uint8 /*emplacement*/, bool /*maj*/) override
         {
             MarquerSignatures(joueur);
+            Actives(joueur);
         }
 
         void OnPlayerUnequip(Player* joueur, Item* /*objet*/) override
         {
             MarquerSignatures(joueur);
+            Actives(joueur);
         }
 
         void OnPlayerAfterSetVisibleItemSlot(Player* joueur, uint8 /*emplacement*/, Item* /*objet*/) override
@@ -2545,6 +3215,7 @@ namespace
             // photographie et la creation : il ne doit pas l'effacer. La garde instant + entree suffit contre un
             // etat perime.
             SpellInfo const* info = sort->GetSpellInfo();
+            NoterFabrication(joueur, info);
             uint32 const creee = EntreeCreeeArtisanat(info);
             if (!creee)
                 return;
@@ -2595,8 +3266,40 @@ namespace
             }
         }
 
+        // Astrolabe : une recette de metier qui cree un objet (talents a la fabrication, AppliquerTalentsDeFabrication). Les
+        // bots ne sont suivis que pour nos recettes (9111000-9113999) : pas de requete d'etat pour une recette du monde.
+        static void NoterFabrication(Player* joueur, SpellInfo const* info)
+        {
+            if (Talents.empty() || !info || !TablesPersonnages)
+                return;
+            uint32 entree = 0;
+            for (uint8 i = 0; i < MAX_SPELL_EFFECTS && !entree; ++i)
+                if (info->Effects[i].Effect == SPELL_EFFECT_CREATE_ITEM || info->Effects[i].Effect == SPELL_EFFECT_CREATE_ITEM_2)
+                    entree = info->Effects[i].ItemType;
+            if (!entree)
+                return;
+            bool const bot = joueur->GetSession() && joueur->GetSession()->IsBot();
+            if (bot && (info->Id < 9111000 || info->Id > 9113999))
+                return;
+            uint32 const metier = MetierDeRecette(info->Id);
+            if (!metier)
+                return;
+            FabricationEnAttente* f = joueur->CustomData.GetDefault<FabricationEnAttente>(CLE_FABRICATION);
+            f->sort = info->Id;
+            f->entree = entree;
+            f->metier = metier;
+            f->instant = GameTime::GetGameTimeMS();
+        }
+
         void OnPlayerCreateItem(Player* joueur, Item* objet, uint32 /*count*/) override
         {
+            if (FabricationEnAttente* f = joueur->CustomData.Get<FabricationEnAttente>(CLE_FABRICATION);
+                f && f->sort && f->instant == GameTime::GetGameTimeMS() && objet->GetEntry() == f->entree)
+            {
+                FabricationEnAttente const copie = *f;
+                f->sort = 0;   // une fois par fabrication
+                AppliquerTalentsDeFabrication(joueur, objet, copie);
+            }
             RecopieEnAttente* attente = joueur->CustomData.Get<RecopieEnAttente>(CLE_DONNEES);
             if (!attente || !attente->entreeCreee)
                 return;
@@ -2647,6 +3350,8 @@ namespace
         {
             if (!RecalculSuspendu)
                 RecalculerBonusDeSet(joueur);
+            MarquerSignatures(joueur);   // Garde-lame suit le niveau du porteur
+            Actives(joueur);
             // Jalons (D-PO-42, b3) : le compteur de l'atelier bouge tout de suite. Jamais pour un bot : Etat() lance deux
             // requetes synchrones a son premier appel.
             if (!Talents.empty() && std::max(ancien, joueur->GetLevel()) >= 10 && joueur->GetSession() && !joueur->GetSession()->IsBot())
@@ -2693,7 +3398,8 @@ namespace
             bool const eveil = corps.starts_with("EVEIL:");
             bool const talent = corps.starts_with("TALENT:") || corps.starts_with("METIER:") || corps == "TALENTS?";
             bool const extrait = corps.starts_with("EXTRAIT?");
-            if (!eveil && !talent && !extrait && !corps.starts_with("AMELIORER:"))
+            bool const resigner = corps.starts_with("RESIGNER:");
+            if (!eveil && !talent && !extrait && !resigner && !corps.starts_with("AMELIORER:"))
                 return true;
             // Consomme meme desactive ; jamais relaye a un autre joueur.
             if (destinataire != joueur || message.size() > 255)
@@ -2723,7 +3429,7 @@ namespace
                 // Reponse explicite (l'atelier grise le bouton jusqu'a la reponse), une seule par fenetre.
                 if (!delai->delaiRepondu)
                     Repondre(joueur, talent ? (corps.starts_with("METIER:") ? "METIER_ERR:DELAI" : "TALENT_ERR:DELAI")
-                        : eveil ? "EVEIL_ERR:DELAI" : "AMELIORER_ERR:DELAI");
+                        : resigner ? "RESIGNER_ERR:DELAI" : eveil ? "EVEIL_ERR:DELAI" : "AMELIORER_ERR:DELAI");
                 delai->delaiRepondu = true;
                 return false;
             }
@@ -2732,6 +3438,14 @@ namespace
             if (talent)
             {
                 TraiterTalentMessage(joueur, corps);
+                return false;
+            }
+            if (resigner)
+            {
+                if (!sConfigMgr->GetOption<bool>("CoaArtisanat.ResignerParMessage", true))
+                    Repondre(joueur, "RESIGNER_ERR:DESACTIVE");
+                else
+                    TraiterResigner(joueur, corps.substr(9));
                 return false;
             }
             if (eveil && !sConfigMgr->GetOption<bool>("CoaArtisanat.EveilParMessage", true))

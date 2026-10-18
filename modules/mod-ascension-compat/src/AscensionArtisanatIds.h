@@ -160,6 +160,51 @@ namespace CoaArtisanatIds
     constexpr uint32 CHANCE_EPIQUE_POUR_MILLE = 30;
     // PV du Colosse en % de son modele, selon le nombre d'humains du groupe presents a RAYON_DOSAGE (1 a 5 et plus).
     constexpr std::array<uint8, 5> PV_COLOSSE_POUR_CENT = { 40, 55, 70, 85, 100 };
+
+    // ---- Astrolabe de la Forge, arbre complet (18/10/2026, chantier « 16 talents a venir ») -------------------------
+    //
+    // Effets des talents du gabarit de creation (docs/PROPOSITION-artisanat-arbres-detail.md § 2 ; talents.json).
+    // Les talents sont reconnus par leur CODE (coa_artisanat_talent_def.talent), jamais par un id : les ids sont ceux
+    // de outils/artisanat/talents.py --jeu t2, figes dans artisanat/ids-figes-v2.json.
+
+    // « De maitre » (Coup de maitre) : enchantement NEUTRE (types 0, duree 0) en emplacement 10 (PROP_ENCHANTMENT_SLOT_3,
+    // libre sur nos pieces : aucun suffixe aleatoire). Les caracteristiques de la piece portee gagnent BONUS_DE_MAITRE_POUR_CENT
+    // par le crochet OnPlayerApplyItemModsBefore (symetrique a la pose et au retrait). 0 : Coup de maitre inerte.
+    constexpr uint32 ENCHANT_DE_MAITRE = 7197;                  // outils/artisanat-astrolabe-dbc.py « enchant:artisanat:de-maitre »
+
+    // Composants (item_template du PTR, lu le 18/10) : 9101220-9101230 composants de base et intermediaires (qualite 1-2),
+    // 9101231-9101239 composants d'artisan, ceux des rangs 1-5 (Plaques, Lanieres, Trames d'orage, qualite 2-4, non lies).
+    constexpr uint32 COMPOSANT_MIN = 9101220;
+    constexpr uint32 COMPOSANT_ARTISAN_MIN = 9101231;
+    constexpr uint32 COMPOSANT_MAX = 9101239;
+    // Materiaux de monde (D-PO-24, generer.py ID_MONDE) : Poussiere d'echo, Fragment de resonance, Larme d'Azeroth.
+    constexpr uint32 MONDE_MIN = 9101212;
+    constexpr uint32 MONDE_MAX = 9101214;
+    constexpr uint32 MONDE_RARE = 9101213;                      // Fragment de resonance (qualite 3)
+    // Un materiau « classique » est un reactif qui n'est pas a nous : hors de 9100000-9109999 (ressources d'evenement,
+    // materiaux, composants, pieces).
+    constexpr uint32 NOS_OBJETS_MIN = 9100000;
+    constexpr uint32 NOS_OBJETS_MAX = 9109999;
+
+    // Re-signer : 2 materiaux de monde rares et 1 composant d'artisan (le premier du metier : rangs 1-2) [H, au PO].
+    // La variante « 1 trophee de la Lame de trophee » attend T2-3 (talent b) : non codee.
+    constexpr uint32 RESIGNER_RARES = 2;
+    constexpr std::array<std::pair<uint32, uint32>, 3> RESIGNER_COMPOSANT = {{ { 164, 9101231 }, { 165, 9101234 }, { 197, 9101237 } }};
+
+    // Dosages (talents.json, D-PO-34 § 2), en points de pourcentage.
+    constexpr uint32 PCT_MAIN_ECONOME = 5;          // par rang : materiaux classiques, recettes de son metier
+    constexpr uint32 PCT_ETABLI = 5;                // par rang : chance d'un composant de plus
+    constexpr uint32 PCT_EPARGNE = 15;              // or des paliers des pieces de son metier
+    constexpr uint32 PCT_SAVOIR = 5;                // par rang : materiaux de monde des paliers des pieces de sa voie
+    constexpr uint32 PCT_SERIE = 10;                // chance qu'une piece fabriquee coute 1 composant de moins
+    constexpr uint32 PCT_COUP_DE_MAITRE = 10;       // chance d'une piece « de maitre »
+    constexpr uint32 BONUS_DE_MAITRE_POUR_CENT = 5; // caracteristiques d'une piece de maitre
+    constexpr uint32 PCT_ECONOMIE = 5;              // par rang : or des paliers et materiaux classiques
+    constexpr uint32 PCT_MAITRISE = 5;              // par rang : chance d'un composant d'artisan en double
+    constexpr uint32 MAIN_CONSTANTE_POUR_CENT = 125;// effet des signatures posees par un artisan qui la connait
+    // Bastion d'orage : allies proteges (les plus blesses, en pourcentage de PV) et portee.
+    constexpr uint32 BASTION_ALLIES = 2;
+    constexpr float BASTION_PORTEE = 10.0f;
 }
 
 #endif
