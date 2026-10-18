@@ -1319,13 +1319,16 @@ namespace
     std::unordered_map<uint32, SignatureDef> Signatures;      // par enchantement
 
     // Lot T (18/10, talents.py --jeu t3, EFFETS_LOT_T) : effets des signatures des 7 autres metiers.
-    //  passif, passif_principal : aura passive tant que la piece est portee (AppliquerPassifs) ;
+    //  passif, passif_principal : aura passive tant que la piece est portee (AppliquerPassifs) ; passif_hors_combat (Cape du
+    //  voyageur) : idem hors combat seulement ; baton_serein (Baton serein) : mana par 5 s (passif) et chance de critique
+    //  des soins (ArtisanatSorts::OnSpellCritChance) ;
     //  proc_aura (Echo), proc_aura_critique (Instinct), fil_orage, fil_accalmie, proc_degats (Conducteur),
     //  proc_degats_distance (Mecanisme) : DeclencherProcs ; soin_sous_seuil (Pierre de garde) : DeclencherSignatures.
     bool EstEffetLotT(std::string const& e)
     {
         return e == "passif" || e == "passif_principal" || e == "proc_aura" || e == "proc_aura_critique" || e == "proc_degats"
-            || e == "proc_degats_distance" || e == "fil_orage" || e == "fil_accalmie" || e == "soin_sous_seuil";
+            || e == "proc_degats_distance" || e == "fil_orage" || e == "fil_accalmie" || e == "soin_sous_seuil"
+            || e == "passif_hors_combat" || e == "baton_serein";
     }
 
     // Pieces que couvre une ligne de signature : classe et masque de sous-classes ; pour une arme (classe 2), le bit 31 du
@@ -1459,7 +1462,7 @@ namespace
                     // diviserait par zero (le sort d'effet de fil_orage, lui, recoit ses montants du C++).
                     SpellInfo const* infoEffet = s.sortEffet ? sSpellMgr->GetSpellInfo(s.sortEffet) : nullptr;
                     bool const proportions = s.effet == "passif" || s.effet == "passif_principal" || s.effet == "proc_aura"
-                        || s.effet == "proc_aura_critique";
+                        || s.effet == "proc_aura_critique" || s.effet == "passif_hors_combat";
                     if (proportions && infoEffet && !infoEffet->Effects[EFFECT_0].BasePoints)
                     {
                         ++signaturesRejetees;
@@ -2115,13 +2118,22 @@ namespace
             for (std::size_t i = 0; i < a->actives.size(); ++i)
             {
                 SignatureDef const* s = a->actives[i];
-                if ((s->effet != "passif" && s->effet != "passif_principal") || !s->sortEffet)
+                bool const horsCombat = s->effet == "passif_hors_combat", serein = s->effet == "baton_serein";
+                if ((s->effet != "passif" && s->effet != "passif_principal" && !horsCombat && !serein) || !s->sortEffet)
+                    continue;
+                if (horsCombat && joueur->IsInCombat())   // Cape du voyageur : reposee a la sortie du combat
                     continue;
                 SpellInfo const* info = sSpellMgr->GetSpellInfo(s->sortEffet);
                 int32 const v = int32(ValeurSignature(s, false, a->constantes[i], joueur->GetLevel()));
                 if (!info || v <= 0)
                     continue;
                 std::array<int32, 3> m = MontantsProportionnels(info, v);
+                if (serein)   // valeur = % de critique des soins ; le mana par 5 s en vaut la moitie, en % du mana maximal
+                {
+                    m = { int32(uint64(joueur->GetMaxPower(POWER_MANA)) * uint32(v) / 200), 0, 0 };
+                    if (m[0] <= 0)
+                        continue;
+                }
                 if (s->effet == "passif_principal")   // effets 0 Force, 1 Agilite, 2 Intelligence : un seul compte
                 {
                     uint8 const k = IndicePrincipale(joueur);
@@ -3009,7 +3021,26 @@ namespace
     class ArtisanatSorts final : public AllSpellScript
     {
     public:
-        ArtisanatSorts() : AllSpellScript("CoaArtisanatSorts", { ALLSPELLHOOK_ON_HIT_RESULT }) { }
+        ArtisanatSorts() : AllSpellScript("CoaArtisanatSorts", { ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_ON_CRIT_CHANCE }) { }
+
+        // Lot T, Baton serein : + valeur % de chance de critique des soins du porteur (soins directs et sur la duree).
+        void OnSpellCritChance(Spell* sort, Unit* /*cible*/, float& chance) override
+        {
+            if (Signatures.empty() || !sort)
+                return;
+            Player* joueur = sort->GetCaster() ? sort->GetCaster()->ToPlayer() : nullptr;
+            SpellInfo const* info = sort->GetSpellInfo();
+            if (!joueur || !info || !(info->HasEffect(SPELL_EFFECT_HEAL) || info->HasAura(SPELL_AURA_PERIODIC_HEAL)))
+                return;
+            SignaturesActives* a = Actives(joueur);
+            for (std::size_t i = 0; i < a->actives.size(); ++i)
+                if (a->actives[i]->effet == "baton_serein")
+                {
+                    if (!NeutraliseEnArene1c1(joueur))
+                        chance += float(ValeurSignature(a->actives[i], false, a->constantes[i], joueur->GetLevel()));
+                    return;   // une seule fois (pas de cumul d'une signature avec elle-meme)
+                }
+        }
 
         void OnSpellHitResult(Spell* sort, Unit* cible, uint8 rate, uint32 degats, uint32 soins, bool critique) override
         {
@@ -3852,7 +3883,25 @@ namespace
             PLAYERHOOK_ON_LEVEL_CHANGED, PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT, PLAYERHOOK_ON_LOOT_ITEM, PLAYERHOOK_ON_BEFORE_SEND_LOOT,
             PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_EQUIP, PLAYERHOOK_ON_UNEQUIP_ITEM, PLAYERHOOK_ON_AFTER_SET_VISIBLE_ITEM_SLOT,
             PLAYERHOOK_ON_DELETE_FROM_DB, PLAYERHOOK_CAN_CAST_ITEM_COMBAT_SPELL, PLAYERHOOK_ON_APPLY_ITEM_MODS_BEFORE,
-            PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_UPDATE }) { }
+            PLAYERHOOK_ON_MAP_CHANGED, PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_PLAYER_ENTER_COMBAT, PLAYERHOOK_ON_PLAYER_LEAVE_COMBAT }) { }
+
+        // Lot T, Cape du voyageur : sa vitesse hors combat se retire a l'entree en combat et revient a la sortie. Rien a faire
+        // (ni recalcul) pour qui ne la porte pas.
+        void OnPlayerEnterCombat(Player* joueur, Unit* /*ennemi*/) override { PassifsHorsCombat(joueur); }
+        void OnPlayerLeaveCombat(Player* joueur) override { PassifsHorsCombat(joueur); }
+
+        static void PassifsHorsCombat(Player* joueur)
+        {
+            if (Signatures.empty() || !joueur)
+                return;
+            SignaturesActives* a = Actives(joueur);
+            for (SignatureDef const* s : a->actives)
+                if (s->effet == "passif_hors_combat")
+                {
+                    AppliquerPassifs(joueur, a);
+                    return;
+                }
+        }
 
         // Lot T, Flair : une recherche toutes les FLAIR_PERIODE_MS, humains seulement (aucune requete pour un bot).
         void OnPlayerUpdate(Player* joueur, uint32 diff) override
