@@ -3816,7 +3816,10 @@ namespace
                 {
                     if (!bot)
                         RecolterClassique(detenteur, metier, butin);
-                    RessourceDeRecolte(detenteur, metier, butin, bot);
+                    // Revue du 19/10 : une creature seulement (l'extraction de gaz, sort 30427, remplit ce magasin sans
+                    // source et tomberait en « depecage »).
+                    if (c)
+                        RessourceDeRecolte(detenteur, metier, butin, bot);
                 }
                 return;
             }
