@@ -1383,6 +1383,12 @@ namespace
     }};
     // Table coa_artisanat_outil_offert presente dans la base personnages (lue au demarrage) ; absente : rien n'est donne.
     bool TableOutilOffert = false;
+    // Banc `.artisanat essai` en cours dans ce fil : il apprend des metiers au testeur (learnSpell), qui ne doit ni recevoir
+    // d'outils (sa place en sac est comptee sans eux) ni consommer sa trace « deja servi » (revue du 19/10).
+    thread_local bool OutilOffertSuspendu = false;
+    // Outils de recolte CoA : leur Name1 est le nom francais voulu ; leur item_template_locale frFR porte encore les noms
+    // vanilla (5916 « Cle d'appareil gnome », revue du 19/10). Les autres prennent le nom de la langue du client.
+    constexpr std::array<uint32, 6> OUTILS_COA = { 5384, 5916, 5937, 16308, 23581, 23674 };
 
     bool TableExiste(DatabaseWorkerPool<WorldDatabaseConnection>& base, std::string_view nom)
     {
@@ -4547,6 +4553,11 @@ namespace
                 return true;
             }
             Player* joueur = handler->GetPlayer();
+            struct Suspendre   // outil offert : rien pendant le banc (OutilOffertSuspendu)
+            {
+                Suspendre() { OutilOffertSuspendu = true; }
+                ~Suspendre() { OutilOffertSuspendu = false; }
+            } suspendre;
             if (!joueur || joueur->IsInCombat() || !joueur->IsAlive())
             {
                 handler->SendSysMessage("Hors combat et en vie seulement.");
@@ -6220,7 +6231,7 @@ namespace
 
         void OnPlayerSetSkill(Player* joueur, uint32 metier, uint32 avant, uint32 /*max*/, uint32 /*palier*/, uint32 apres) override
         {
-            if (avant != 0 || apres == 0 || !TableOutilOffert || !joueur || !joueur->IsInWorld())
+            if (avant != 0 || apres == 0 || !TableOutilOffert || OutilOffertSuspendu || !joueur || !joueur->IsInWorld())
                 return;
             WorldSession* session = joueur->GetSession();
             if (!session || session->IsBot() || session->PlayerLoading())
@@ -6233,7 +6244,10 @@ namespace
                 return;
             uint32 const guid = joueur->GetGUID().GetCounter();
             if (CharacterDatabase.Query("SELECT 1 FROM coa_artisanat_outil_offert WHERE guid = {} AND metier = {}", guid, metier))
+            {
+                LOG_INFO("module", "coa artisanat: outil offert joueur={} metier={} : deja servi, rien donne", guid, metier);
                 return;
+            }
 
             std::vector<ItemTemplate const*> donner;
             for (uint32 const id : def->objets)
@@ -6257,7 +6271,12 @@ namespace
             for (std::size_t i = 0; i < donner.size(); ++i)
             {
                 ItemTemplate const* p = donner[i];
-                noms += (i == 0 ? "" : (i + 1 == donner.size() ? " et " : ", ")) + p->Name1;
+                std::string nom = p->Name1;
+                if (std::find(OUTILS_COA.begin(), OUTILS_COA.end(), p->ItemId) == OUTILS_COA.end())
+                    if (ItemLocale const* il = sObjectMgr->GetItemLocale(p->ItemId))
+                        if (std::string_view const loc = ObjectMgr::GetLocaleString(il->Name, session->GetSessionDbLocaleIndex()); !loc.empty())
+                            nom = std::string(loc);
+                noms += (i == 0 ? "" : (i + 1 == donner.size() ? " et " : ", ")) + nom;
                 ItemPosCountVec dest;
                 Item* objet = joueur->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, p->ItemId, 1) == EQUIP_ERR_OK
                     ? joueur->StoreNewItem(dest, p->ItemId, true) : nullptr;
@@ -6277,7 +6296,8 @@ namespace
                         objet->SaveToDB(trans);
                         draft.AddItem(objet);
                     }
-                draft.SendMailTo(trans, MailReceiver(joueur), MailSender(joueur));
+                // Expediteur : le Book of Artisans (creature 57500), pas le joueur lui-meme (revue du 19/10)
+                draft.SendMailTo(trans, MailReceiver(joueur), MailSender(MAIL_CREATURE, 57500));
                 CharacterDatabase.CommitTransaction(trans);
             }
             ChatHandler(session).PSendSysMessage("{}{}", texte, courrier.empty() ? "" : " Vos sacs sont pleins : regardez votre courrier.");
