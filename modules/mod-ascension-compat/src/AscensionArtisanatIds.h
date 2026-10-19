@@ -65,6 +65,38 @@ namespace CoaArtisanatIds
     constexpr uint32 RESSOURCE_VERTE = 9100101;                 // Fragment de foudre, qualite 2
     constexpr uint32 RESSOURCE_RARE = 9100106;                  // Coeur d'orage, qualite 3
     constexpr uint32 RESSOURCE_EPIQUE = 9100107;                // Oeil de la tempete, qualite 4
+    // Ressources d'evenement de la Nuit des morts (famille Glas) [M item_template, acore_world et acore_world_ptr, 19/10].
+    constexpr uint32 RESSOURCE_GLAS_VERTE = 9100111;            // Os maudit, qualite 2
+    constexpr uint32 RESSOURCE_GLAS_RARE = 9100116;             // Essence sepulcrale, qualite 3
+
+    // ---- Gisements d'evenement et recolte (19/10, docs/CONCEPTION-artisanat-gisements-evenement.md) -----------------
+    // Chance globale : toute recolte d'un noeud classique (minage, herboristerie) ou tout depecage peut donner une
+    // ressource d'evenement verte ou rare (jamais l'epique). Minage -> Orage, depecage -> Glas, herboristerie -> l'une ou
+    // l'autre au hasard. Taux : CoaArtisanat.Recolte.Evenement.* (0 par defaut : rien). Talent de l'arbre de recolte
+    // (code du gabarit « sourcier-b », nom « Pressentiment », 3 rangs) : la verte passe a Talent.Rang1/2/3 % (25 % au
+    // rang 3), la rare dans la meme proportion que la base.
+    constexpr char const* TALENT_PRESSENTIMENT = "sourcier-b";
+    // Depecage des betes et dragons d'evenement et des rares du Directeur : creature_template.skinloot = l'une de ces
+    // deux entrees de skinning_loot_template (pose SQL du kit). La ligne unique de chaque entree porte le cuir gabarit ;
+    // ce module le remplace par le cuir ordinaire du niveau de la creature (son niveau est impose a l'invocation) et
+    // ajoute, pour un humain, la peau a theme (CoaArtisanat.Depecage.Theme.Chance.*).
+    constexpr uint32 DEPECAGE_ORAGE = 9101300;                  // skinning_loot_template : theme Orage
+    constexpr uint32 DEPECAGE_GLAS = 9101301;                   // skinning_loot_template : theme Glas
+    constexpr uint32 CUIR_GABARIT = 2318;                       // Light Leather, la ligne de ces deux entrees
+    constexpr uint32 PEAU_TEMPETE = 9101204;                    // Peau de tempete (Orage) [M item_template]
+    constexpr uint32 FOURRURE_SPECTRALE = 9101205;              // Fourrure spectrale (Glas) [M item_template]
+    // Cuir ordinaire par niveau de la creature (dernier niveau de la tranche, cuir) : butins de depecage de 3.3.5.
+    struct CuirParNiveau { uint8 jusqua; uint32 cuir; };
+    constexpr std::array<CuirParNiveau, 7> CUIRS_PAR_NIVEAU =
+    {{
+        { 15, 2318 },    // Light Leather
+        { 25, 2319 },    // Medium Leather
+        { 35, 4234 },    // Heavy Leather
+        { 45, 4304 },    // Thick Leather
+        { 62, 8170 },    // Rugged Leather
+        { 70, 21887 },   // Knothide Leather
+        { 255, 33568 },  // Borean Leather
+    }};
     // Type d'arene du 1 contre 1 contre un gladiateur : CoaArene1v1::TYPE_ARENE (mod-playerbots,
     // src/Ai/Coa/CoaArene1v1.h [L]), recopie ici pour ne pas lier ce module a mod-playerbots.
     constexpr uint8 TYPE_ARENE_1C1 = 1;

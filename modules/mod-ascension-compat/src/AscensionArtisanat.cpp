@@ -1050,6 +1050,13 @@ namespace
         std::array<std::pair<uint8, uint8>, CAT_NOMBRE> nombreVert{}; // min, max
         float tauxBots = 0.0f;                                        // en pour cent des chances ; 0 : bots exclus
         bool actif = false;
+        // Recolte (19/10, gisements d'evenement) : chance globale d'une ressource d'evenement par recolte classique ou
+        // depecage, en pour cent ; bots compris au taux de base (decision du commanditaire, 19/10).
+        float recolteVert = 0.0f;                                     // base, sans talent
+        float recolteRare = 0.0f;                                     // base, sans talent
+        std::array<float, 3> recolteTalent{};                         // verte aux rangs 1, 2, 3 de Pressentiment
+        // Depecage des creatures d'evenement (skinloot DEPECAGE_ORAGE / DEPECAGE_GLAS) : peau a theme, pour un humain.
+        std::array<float, 3> peauTheme{};                             // ordinaire, elite, rare (rangs 2 et 4)
     };
     ReglesMonde Monde;
 
@@ -1103,6 +1110,21 @@ namespace
             r.nombreVert[c] = { uint8(mini), uint8(maxi) };
         }
         r.tauxBots = std::clamp(sConfigMgr->GetOption<float>("CoaArtisanat.Monde.TauxBots", 0.0f, false), 0.0f, 100.0f);
+        // Recolte et depecage (19/10) : 0 par defaut, rien ne tombe sans configuration.
+        r.recolteVert = std::clamp(sConfigMgr->GetOption<float>("CoaArtisanat.Recolte.Evenement.Chance.Vert", 0.0f, false), 0.0f, 100.0f);
+        r.recolteRare = std::clamp(sConfigMgr->GetOption<float>("CoaArtisanat.Recolte.Evenement.Chance.Rare", 0.0f, false), 0.0f, 100.0f);
+        for (std::size_t k = 0; k < 3; ++k)
+            r.recolteTalent[k] = std::clamp(sConfigMgr->GetOption<float>(Acore::StringFormat("CoaArtisanat.Recolte.Evenement.Talent.Rang{}",
+                k + 1), 0.0f, false), 0.0f, 100.0f);
+        static constexpr std::array<char const*, 3> CATEGORIES_PEAU = { "Ordinaire", "Elite", "Rare" };
+        for (std::size_t k = 0; k < 3; ++k)
+            r.peauTheme[k] = std::clamp(sConfigMgr->GetOption<float>(Acore::StringFormat("CoaArtisanat.Depecage.Theme.Chance.{}",
+                CATEGORIES_PEAU[k]), 0.0f, false), 0.0f, 100.0f);
+        for (uint32 objet : { CoaArtisanatIds::RESSOURCE_VERTE, CoaArtisanatIds::RESSOURCE_RARE, CoaArtisanatIds::RESSOURCE_GLAS_VERTE,
+            CoaArtisanatIds::RESSOURCE_GLAS_RARE, CoaArtisanatIds::PEAU_TEMPETE, CoaArtisanatIds::FOURRURE_SPECTRALE })
+            if (!sObjectMgr->GetItemTemplate(objet) && (r.recolteVert > 0.0f || r.recolteRare > 0.0f || r.peauTheme[0] > 0.0f
+                || r.peauTheme[1] > 0.0f || r.peauTheme[2] > 0.0f))
+                LOG_ERROR("module", "coa recolte: objet {} absent de item_template : il ne tombera pas", objet);
         for (std::size_t q = 0; q < 3; ++q)
         {
             if (r.objets[q] && !sObjectMgr->GetItemTemplate(r.objets[q]))
@@ -1116,6 +1138,9 @@ namespace
         Monde = r;
         LOG_INFO("module", "coa artisanat: materiaux de monde {} (objets {}/{}/{}, bots {} %)", r.actif ? "actifs" : "coupes",
             r.objets[0], r.objets[1], r.objets[2], r.tauxBots);
+        LOG_INFO("module", "coa recolte: ressources d'evenement en recolte verte {} % rare {} % (Pressentiment {}/{}/{} %), peau a theme {}/{}/{} %",
+            r.recolteVert, r.recolteRare, r.recolteTalent[0], r.recolteTalent[1], r.recolteTalent[2], r.peauTheme[0], r.peauTheme[1],
+            r.peauTheme[2]);
     }
 
     std::atomic<uint32> ChutesMonde{ 0 };      // objets de monde poses dans un butin depuis le demarrage
@@ -3623,6 +3648,106 @@ namespace
         }
     }
 
+    // ---- Gisements d'evenement et recolte (19/10, docs/CONCEPTION-artisanat-gisements-evenement.md) ----------------
+    std::atomic<uint32> RecoltesEvenement{ 0 };      // recoltes examinees (chance globale active)
+    std::atomic<uint32> RessourcesRecolte{ 0 };      // ressources d'evenement posees par la chance globale
+    std::atomic<uint32> RessourcesRecolteBots{ 0 };  // ... dont au butin d'un bot
+    std::atomic<uint32> PeauxTheme{ 0 };             // peaux a theme posees au depecage d'une creature d'evenement
+    std::atomic<uint32> CuirsRemplaces{ 0 };         // cuirs gabarits remplaces par le cuir du niveau
+
+    // Chance globale (decision du commanditaire, 19/10) : une recolte classique (noeud de minage ou d'herboristerie, hors
+    // nos noeuds d'evenement, qui en donnent deja) ou un depecage peut donner UNE ressource d'evenement : la rare d'abord,
+    // sinon la verte ; jamais l'epique. Minage -> Orage (Fragment de foudre, Coeur d'orage), depecage -> Glas (Os maudit,
+    // Essence sepulcrale), herboristerie -> l'une ou l'autre au hasard. Bots compris, au taux de base (ils n'ont pas
+    // d'arbre) : leur hotel des ventes les met en vente (AiPlayerbot.Coa.HotelDesVentes.Ressources). Pressentiment (talent
+    // de l'arbre de recolte du metier, 3 rangs) : la verte passe au taux de son rang, la rare dans la meme proportion.
+    // Fil de la carte du recolteur ; Monde est une copie lue comme le butin de monde.
+    void RessourceDeRecolte(Player* joueur, uint32 metier, Loot* butin, bool bot)
+    {
+        using namespace CoaArtisanatIds;
+        ReglesMonde const& r = Monde;
+        if (r.recolteVert <= 0.0f && r.recolteRare <= 0.0f)
+            return;
+        if (metier != 186 && metier != 182 && metier != 393)
+            return;
+        ++RecoltesEvenement;
+        bool const orage = metier == 186 || (metier == 182 && urand(0, 1) == 0);
+        float vert = r.recolteVert, rare = r.recolteRare;
+        uint8 rang = 0;
+        if (!bot)
+            if (EtatTalents* e = EtatRecolte(joueur, metier))
+                rang = std::min<uint8>(RangTalent(*e, metier, TALENT_PRESSENTIMENT), 3);
+        if (rang && r.recolteTalent[rang - 1] > vert)
+        {
+            float const t = r.recolteTalent[rang - 1];
+            rare = vert > 0.0f ? std::min(100.0f, rare * t / vert) : rare;
+            vert = t;
+        }
+        uint32 objet = 0;
+        if (roll_chance_f(rare))
+            objet = orage ? RESSOURCE_RARE : RESSOURCE_GLAS_RARE;
+        else if (roll_chance_f(vert))
+            objet = orage ? RESSOURCE_VERTE : RESSOURCE_GLAS_VERTE;
+        if (!objet || !sObjectMgr->GetItemTemplate(objet))
+            return;
+        std::size_t const avant = butin->items.size();
+        AjouterAuButin(butin, objet, 1);
+        if (butin->items.size() == avant)   // MAX_NR_LOOT_ITEMS atteint : rien n'est pose
+            return;
+        ++RessourcesRecolte;
+        if (bot)
+            ++RessourcesRecolteBots;
+        LOG_INFO("module", "coa recolte: ressource d'evenement joueur={} bot={} metier={} objet={} pressentiment={} chance_verte={:.2f} chance_rare={:.2f}",
+            joueur->GetGUID().GetCounter(), bot ? 1 : 0, metier, objet, rang, vert, rare);
+    }
+
+    uint32 CuirDuNiveau(uint8 niveau)
+    {
+        for (auto const& c : CoaArtisanatIds::CUIRS_PAR_NIVEAU)
+            if (niveau <= c.jusqua)
+                return c.cuir;
+        return CoaArtisanatIds::CUIR_GABARIT;
+    }
+
+    // Depecage d'une creature d'evenement (skinloot DEPECAGE_ORAGE ou DEPECAGE_GLAS, pose SQL du kit). Pour tous (bots
+    // compris) : le cuir gabarit de la ligne unique devient le cuir ordinaire du niveau de la creature (niveau impose a
+    // l'invocation : une table de butin fixe ne peut pas le suivre). Pour un humain seulement : la peau a theme, Peau de
+    // tempete (Orage) ou Fourrure spectrale (Glas), selon le rang de la creature. Faux : pas une creature d'evenement.
+    bool PeauxDEvenement(Player* joueur, Creature* c, Loot* butin, bool bot)
+    {
+        using namespace CoaArtisanatIds;
+        CreatureTemplate const* t = c ? c->GetCreatureTemplate() : nullptr;
+        if (!t || (t->SkinLootId != DEPECAGE_ORAGE && t->SkinLootId != DEPECAGE_GLAS))
+            return false;
+        uint32 const cuir = CuirDuNiveau(c->GetLevel());
+        if (cuir != CUIR_GABARIT && sObjectMgr->GetItemTemplate(cuir))
+            for (LootItem& li : butin->items)
+                if (li.itemid == CUIR_GABARIT && !li.is_looted)
+                {
+                    li.itemid = cuir;   // cuir sans propriete aleatoire : randomPropertyId et randomSuffix restent 0
+                    ++CuirsRemplaces;
+                }
+        if (bot)
+            return true;
+        ReglesMonde const& r = Monde;
+        bool const rare = t->rank == CREATURE_ELITE_RARE || t->rank == CREATURE_ELITE_RAREELITE;
+        float const chance = r.peauTheme[rare ? 2 : (t->rank == CREATURE_ELITE_NORMAL ? 0 : 1)];
+        uint32 const peau = t->SkinLootId == DEPECAGE_ORAGE ? PEAU_TEMPETE : FOURRURE_SPECTRALE;
+        if (chance > 0.0f && roll_chance_f(chance) && sObjectMgr->GetItemTemplate(peau))
+        {
+            uint32 const nombre = rare ? urand(1, 2) : 1;
+            std::size_t const avant = butin->items.size();
+            AjouterAuButin(butin, peau, nombre);
+            if (butin->items.size() > avant)
+            {
+                ++PeauxTheme;
+                LOG_INFO("module", "coa recolte: peau a theme joueur={} creature={} niveau={} objet={}x{}", joueur->GetGUID().GetCounter(),
+                    t->Entry, uint32(c->GetLevel()), peau, nombre);
+            }
+        }
+        return true;
+    }
+
     // Metier de recolte d'un noeud classique (coffre a verrou de competence minage ou herboristerie), 0 sinon.
     uint32 MetierDuNoeudClassique(GameObject const* go)
     {
@@ -3667,23 +3792,32 @@ namespace
         ArtisanatButinRecolte() : MiscScript("CoaArtisanatButinRecolte", { MISCHOOK_ON_AFTER_LOOT_TEMPLATE_PROCESS }) { }
 
         // Apres le tirage du modele (Loot::FillLoot), avant les droits de groupe : comme les materiaux de monde.
+        // Talents de recolte : humains seulement (EtatRecolte). Chance globale de ressource d'evenement (19/10) : bots
+        // compris, au taux de base. Cuir du niveau des creatures d'evenement : tous ; peau a theme : humains.
         void OnAfterLootTemplateProcess(Loot* butin, LootTemplate const* /*modele*/, LootStore const& magasin, Player* detenteur,
             bool /*personnel*/, bool /*sansErreur*/, uint16 mode) override
         {
-            if (!butin || !detenteur || !mode || Talents.empty() || !detenteur->IsInWorld() || !detenteur->GetSession()
-                || detenteur->GetSession()->IsBot())
+            if (!butin || !detenteur || !mode || !detenteur->IsInWorld() || !detenteur->GetSession())
                 return;
+            bool const bot = detenteur->GetSession()->IsBot();
             if (&magasin == &LootTemplates_Skinning)
             {
                 // LootTemplates_Skinning sert aussi aux creatures qui se recoltent au minage ou a l'herboristerie
                 // (CreatureTemplate::GetRequiredLootSkill) : ce sont alors les talents de CE metier qui s'appliquent ;
                 // l'ingenierie (recuperation) n'a pas d'arbre de recolte.
                 uint32 metier = 393;
+                Creature* c = nullptr;
                 if (butin->sourceWorldObjectGUID.IsCreature())
-                    if (Creature* c = detenteur->GetMap()->GetCreature(butin->sourceWorldObjectGUID))
+                    if ((c = detenteur->GetMap()->GetCreature(butin->sourceWorldObjectGUID)))
                         metier = uint32(c->GetCreatureTemplate()->GetRequiredLootSkill());
+                if (metier == 393)
+                    PeauxDEvenement(detenteur, c, butin, bot);
                 if (metier == 393 || metier == 186 || metier == 182)
-                    RecolterClassique(detenteur, metier, butin);
+                {
+                    if (!bot)
+                        RecolterClassique(detenteur, metier, butin);
+                    RessourceDeRecolte(detenteur, metier, butin, bot);
+                }
                 return;
             }
             if (&magasin != &LootTemplates_Gameobject || !butin->sourceWorldObjectGUID.IsGameObject())
@@ -3692,9 +3826,16 @@ namespace
             if (!go)
                 return;
             if (auto it = NoeudsRecolte.find(go->GetEntry()); it != NoeudsRecolte.end())
-                RecolterNoeud(detenteur, it->second, butin);
+            {
+                if (!bot)
+                    RecolterNoeud(detenteur, it->second, butin);
+            }
             else if (uint32 const metier = MetierDuNoeudClassique(go))
-                RecolterClassique(detenteur, metier, butin);
+            {
+                if (!bot)
+                    RecolterClassique(detenteur, metier, butin);
+                RessourceDeRecolte(detenteur, metier, butin, bot);
+            }
         }
     };
 
@@ -4759,6 +4900,8 @@ namespace
                 RecoltesBotsNoeuds.load(), RecoltesJoueursNoeuds.load());
             handler->PSendSysMessage("banc etat: materiaux de monde {} : {} butins de creature examines, {} ecartes (gris ou sans XP), {} ecartes (bot), {} objets poses",
                 Monde.actif ? "actifs" : "coupes", ButinsMonde.load(), EcartesGris.load(), EcartesBots.load(), ChutesMonde.load());
+            handler->PSendSysMessage("banc etat: recolte : {} recoltes examinees, {} ressources d'evenement posees (dont bots {}), {} peaux a theme, {} cuirs du niveau",
+                RecoltesEvenement.load(), RessourcesRecolte.load(), RessourcesRecolteBots.load(), PeauxTheme.load(), CuirsRemplaces.load());
             return true;
         }
 

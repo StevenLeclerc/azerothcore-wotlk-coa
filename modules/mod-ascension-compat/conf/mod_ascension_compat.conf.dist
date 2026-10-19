@@ -328,3 +328,30 @@ CoaArtisanat.Monde.Vert.Boss.Min = 1
 #    proposition : 4
 CoaArtisanat.Monde.Vert.Boss.Max = 1
 CoaArtisanat.Monde.TauxBots = 0
+
+#    CoaArtisanat.Recolte.Evenement.Chance.Vert / .Rare
+#        Description: Gisements d'evenement (19/10/2026, docs/CONCEPTION-artisanat-gisements-evenement.md). Chance en
+#                     pour cent qu'une recolte classique (noeud de minage ou d'herboristerie hors noeuds d'evenement) ou un
+#                     depecage donne UNE ressource d'evenement : la rare d'abord, sinon la verte ; jamais l'epique.
+#                     Minage -> Orage (9100101, 9100106), depecage -> Glas (9100111, 9100116), herboristerie -> l'une ou
+#                     l'autre au hasard. Bots compris, au taux de base (decision du commanditaire, 19/10).
+#        Default:     0 (proposition : 1 et 0.1)
+#
+#    CoaArtisanat.Recolte.Evenement.Talent.Rang1 / .Rang2 / .Rang3
+#        Description: Verte, en pour cent, pour qui connait Pressentiment (code sourcier-b) a ce rang dans l'arbre de
+#                     recolte du metier ; la rare suit dans la meme proportion (Rare x Talent / Vert). Sans effet sous la base.
+#        Default:     0 (proposition : 5, 12, 25)
+#
+#    CoaArtisanat.Depecage.Theme.Chance.Ordinaire / .Elite / .Rare
+#        Description: Peau a theme (Peau de tempete 9101204, Fourrure spectrale 9101205) au depecage d'une creature
+#                     d'evenement (skinloot 9101300 / 9101301), pour un humain ; rare : 1 ou 2.
+#        Default:     0 (proposition : 35, 60, 100)
+
+CoaArtisanat.Recolte.Evenement.Chance.Vert = 0
+CoaArtisanat.Recolte.Evenement.Chance.Rare = 0
+CoaArtisanat.Recolte.Evenement.Talent.Rang1 = 0
+CoaArtisanat.Recolte.Evenement.Talent.Rang2 = 0
+CoaArtisanat.Recolte.Evenement.Talent.Rang3 = 0
+CoaArtisanat.Depecage.Theme.Chance.Ordinaire = 0
+CoaArtisanat.Depecage.Theme.Chance.Elite = 0
+CoaArtisanat.Depecage.Theme.Chance.Rare = 0
