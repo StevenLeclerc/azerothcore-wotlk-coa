@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 #include "AscensionSpellSafe.h"
+#include "Log.h"
 #include "Player.h"
 #include "Random.h"
 #include "ScriptMgr.h"
@@ -9,6 +10,7 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include <algorithm>
+#include <limits>
 
 namespace
 {
@@ -30,6 +32,7 @@ enum ReaperEventSpells : uint32
     SPELL_DOMINION_ARMOR = 804000,
     SPELL_WEAKENED_SOULS = 92146,
     SPELL_WEAKENED_SOUL = 803433,
+    SPELL_BLOOD_HARVEST = 504565,  // e0 HEAL, Harvester's lifesteal heal (AscensionReaperTalents.cpp)
 
     SPELL_SOUL_HARVESTER = 804311,
     SPELL_SOUL_HARVESTER_REGEN = 804312,
@@ -57,6 +60,14 @@ enum ReaperEventSpells : uint32
 // `spell_dbc` row because that table needs a complete 234-column row and is read at startup
 // only, while the module already owns this cast.
 constexpr int32 WEAKENED_SOUL_DURATION = 15 * IN_MILLISECONDS;
+
+// K7 (19/10/2026, accord du commanditaire, coa-project docs/DIAG-equilibrage-classes-20261017.md
+// § 3) : Weakened Souls 92146, passif de la spe Soul (55), rend 5 % des degats infliges, sur le
+// modele de Harvester 500283 (15 %, aura_ascension_harvester). DECISION, pas lecture : aucun champ
+// du DBC ne porte ce 5 %, d'ou la constante. Le soin passe par Blood Harvest 504565, comme Harvester.
+constexpr uint32 WEAKENED_SOULS_LIFESTEAL_PCT = 5;
+constexpr uint32 SPELLFAMILY_REAPER = 36;
+constexpr uint32 SOULREND_FAMILY_FLAGS_1 = 8192;  // SpellFamilyFlags[1] des 9 Soulrend (Spell.dbc, lu le 19/10)
 
 // Every talent whose tooltip reads "generating a Reaped Soul ..." reacts here, on the
 // resource aura itself. Two producers exist and neither is a proc: the declarative one
@@ -187,10 +198,17 @@ class aura_ascension_reaper_soul_events : public AuraScript
                             player->CastSpell(player, SPELL_PAINBRINGER_EXTEND, true);
                         else if (SpellInfo const* trigger = sSpellMgr->GetSpellInfo(SPELL_PAINBRINGER_TRIGGER))
                         {
-                            player->CastSpell(player, SPELL_MASOCHISTIC_RAGE, true);
+                            // K9 (19/10/2026, accord du commanditaire, docs/DIAG-equilibrage-classes-20261017.md
+                            // § 3) : le proc ne pose plus que l'AURA de 570097 (effet 1, +20 % de degats).
+                            // CastSpell lancait le sort entier, dont l'effet 0 (SCHOOL_DAMAGE 420 sur
+                            // TARGET_UNIT_CASTER) : des degats sur soi a chaque proc, mesures au banc ia3
+                            // (docs/SYNTHESE-banc-soins-ia3-20261019.md § 3). Unit::AddAura ne garde que les
+                            // effets d'aura (Aura::BuildEffectMaskForOwner), donc jamais l'effet 0. Le sort
+                            // actif Masochistic Rage 803030, qui declenche lui aussi 570097, n'est pas touche.
+                            Aura* rage = player->AddAura(SPELL_MASOCHISTIC_RAGE, player);
                             // The maximum stays 570097's own 15 s, so the +3 s extensions keep
                             // room to grow under it on the client's timer.
-                            if (Aura* rage = player->GetAura(SPELL_MASOCHISTIC_RAGE, player->GetGUID()))
+                            if (rage)
                                 rage->SetDuration(std::clamp(trigger->Effects[EFFECT_0].CalcValue(player), 1,
                                     std::max(1, rage->GetMaxDuration())));
                         }
@@ -351,9 +369,11 @@ public:
     void OnPlayerCreatureKill(Player* killer, Creature* killed) override { Killed(killer, killed); }
 };
 
-// Weakened Souls: "Your Soulrend now also applies Weakened Soul". The proc window is a
-// spell_proc row (family 36, Soulrend's family bit, melee spell damage, hit phase); the
-// row disables effect 1, a private Ascension aura 354 whose core handler is nullptr.
+// Weakened Souls: "Your Soulrend now also applies Weakened Soul". The proc window was a
+// spell_proc row (family 36, Soulrend's family bit, melee spell damage, hit phase); since K7
+// (19/10/2026) the row opens on all damage done (Harvester's mask) and IsSoulrendStrike()
+// below keeps the old window for the debuff. The row disables effect 1, a private Ascension
+// aura 354 whose core handler is nullptr.
 //
 // WIRED ON 2026-09-21 (2026_09_21_07_ascension_reaper_weakened_souls.sql). It had been
 // withheld since 2026-09-20 because 803433 was unfit to ship on two counts. One is now
@@ -379,6 +399,11 @@ class aura_ascension_weakened_souls : public AuraScript
 
     bool Validate(SpellInfo const*) override
     {
+        // Marqueur de binaire (une ligne au demarrage, ObjectMgr::ValidateSpellScripts) : la
+        // preuve, par `strings worldserver | grep 'K7+K9'`, que ce binaire porte K7 et K9. La
+        // ligne spell_proc de K7 ne se pose QU'APRES (exploitation/reglages-classes-20261019).
+        LOG_INFO("server.loading", ">> Ascension Reaper K7+K9 : Weakened Souls vol de vie {} %, Painbringer sans degats sur soi",
+            WEAKENED_SOULS_LIFESTEAL_PCT);
         return ValidateSpellInfo({SPELL_WEAKENED_SOUL});
     }
 
@@ -388,13 +413,29 @@ class aura_ascension_weakened_souls : public AuraScript
     // recorded at AscensionCompat.cpp:2533), the core then computes SpellTypeMask =
     // PROC_SPELL_TYPE_NO_DMG_HEAL (Unit.cpp:7130-7133) and the SpellTypeMask = 1 of the
     // spell_proc row for 92146 rejects it. Weakened Souls cannot be observed on a dummy.
+    // K7 : la ligne spell_proc de 92146 s'ouvre a tous les degats infliges (meme masque que
+    // Harvester 92145, exploitation/reglages-classes-20261019/K7-*.sql). Le debuff, lui, reste
+    // reserve a ce que l'ancienne ligne laissait passer : un sort de degats de classe MELEE
+    // (PROC_FLAG_DONE_SPELL_MELEE_DMG_CLASS, l'ancien ProcFlags 16) de la famille 36 portant le
+    // bit de Soulrend (l'ancien SpellFamilyMask1 8192). Avec l'ancienne ligne, ce test est
+    // toujours vrai et le vol de vie ne joue que sur Soulrend : ce binaire tolere les deux lignes.
+    static bool IsSoulrendStrike(ProcEventInfo& event)
+    {
+        SpellInfo const* spell = event.GetSpellInfo();
+        return (event.GetTypeMask() & PROC_FLAG_DONE_SPELL_MELEE_DMG_CLASS) && spell &&
+            spell->SpellFamilyName == SPELLFAMILY_REAPER &&
+            (spell->SpellFamilyFlags[1] & SOULREND_FAMILY_FLAGS_1);
+    }
+
+    // victim->IsAlive() n'est plus exige ici mais dans la branche du debuff : le coup qui tue
+    // rend sa part de vie, comme Harvester (aura_ascension_harvester::CheckProc ne l'exige pas).
     bool CheckProc(ProcEventInfo& event)
     {
         Unit* owner = GetTarget();
         Unit* victim = event.GetActionTarget();
         return owner && owner->IsPlayer() && owner->getClass() == CLASS_REAPER && owner->IsAlive() &&
             owner->IsInWorld() && event.GetActor() == owner && victim && victim != owner &&
-            victim->IsAlive() && !owner->IsFriendlyTo(victim) && event.GetDamageInfo();
+            !owner->IsFriendlyTo(victim) && event.GetDamageInfo();
     }
 
     void Weaken(AuraEffect const*, ProcEventInfo& event)
@@ -403,6 +444,23 @@ class aura_ascension_weakened_souls : public AuraScript
         Unit* owner = GetTarget();
         Unit* victim = event.GetActionTarget();
         if (!owner || !victim)
+            return;
+
+        // K7 : vol de vie, sur tout coup qui inflige des degats (un coup entierement absorbe
+        // ne rend rien). Garde-fou d'execution plutot que Validate : un 504565 absent du DBC
+        // ne doit pas eteindre le debuff avec le script entier.
+        if (DamageInfo* damageInfo = event.GetDamageInfo())
+            if (uint32 dealt = damageInfo->GetDamage())
+                if (sSpellMgr->GetSpellInfo(SPELL_BLOOD_HARVEST))
+                {
+                    uint64 amount = uint64(dealt) * WEAKENED_SOULS_LIFESTEAL_PCT / 100;
+                    if (amount)
+                        owner->CastCustomSpell(SPELL_BLOOD_HARVEST, SPELLVALUE_BASE_POINT0,
+                            int32(std::min<uint64>(amount, std::numeric_limits<int32>::max())), owner,
+                            TRIGGERED_FULL_MASK);
+                }
+
+        if (!IsSoulrendStrike(event) || !victim->IsAlive() || !owner->IsAlive())
             return;
         // 803433 holds the percentage (effect 0, BasePoints 9 -> 10%). The caster is the
         // Reaper, which is what "damage taken from you" needs.
