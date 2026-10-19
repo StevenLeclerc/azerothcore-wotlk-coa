@@ -242,6 +242,15 @@ CoaArtisanat.ResignerParMessage = 1
 
 CoaArtisanat.ComposantReserve = 1
 
+#    CoaArtisanat.OutilOffert
+#        Description: Un humain qui apprend un metier (competence 0 -> 1) recoit l'outil de ce metier s'il n'en a aucun
+#                     (sacs, banque, equipement) ; sacs pleins : par courrier. Une fois par metier et par personnage
+#                     (table coa_artisanat_outil_offert de la base personnages ; absente : rien n'est donne). Bots exclus.
+#                     Lu a chaque apprentissage : `.reload config` suffit. 0 : plus rien n'est donne.
+#        Default:     1
+
+CoaArtisanat.OutilOffert = 1
+
 #    CoaArtisanat.Monde.Objet.Vert / .Rare / .Epique
 #        Description: Materiaux de monde (D-PO-19) ajoutes au butin des creatures qui ont une table de butin et
 #                     rapportent de l'experience au detenteur du butin (ni grises pour lui, ni NO_XP).

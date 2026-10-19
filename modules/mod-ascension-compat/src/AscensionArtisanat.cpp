@@ -1359,9 +1359,57 @@ namespace
     uint32 AuraCoeurDeForge = 0;
     bool TablesPersonnages = false;
 
+    // Outil offert a l'apprentissage d'un metier (19/10/2026) : metier (SkillLine) -> nom affiche, outils donnes. Ids lus en
+    // base (acore_world_ptr.item_template, 19/10) : outils classiques exiges par les recettes de dresseur de rang <= 75
+    // (Spell.dbc champ 222, TotemCategory ; Totem 20815) et outils de recolte CoA (D-PO-06, vendus 1 po chez 72 fournisseurs).
+    // Herboristerie : aucun outil. Une valeur 0 = pas de second outil.
+    struct OutilOffertDef
+    {
+        uint16 metier;
+        char const* nom;
+        std::array<uint32, 2> objets;
+    };
+    constexpr std::array<OutilOffertDef, 10> OUTILS_OFFERTS = {{
+        { 186, "Minage",          { 2901, 0 } },       // Mining Pick (TotemCategory 165)
+        { 393, "Dépeçage",        { 7005, 0 } },       // Skinning Knife (166)
+        { 164, "Forge",           { 5956, 5384 } },    // Blacksmith Hammer (162, 37 recettes <= 75) ; Pic d'extraction runique
+        { 202, "Ingénierie",      { 5956, 0 } },       // Blacksmith Hammer (18 recettes <= 75) ; la cle 6219 exige Ingenierie 50
+        { 333, "Enchantement",    { 6218, 23674 } },   // Runed Copper Rod (6, 10 recettes <= 75) ; Pince a ames
+        { 755, "Joaillerie",      { 20815, 23581 } },  // Jeweler's Kit (Totem, 16 recettes <= 75) ; Ciseau a geodes
+        { 773, "Calligraphie",    { 39505, 0 } },      // Virtuoso Inking Set (121, 219 recettes <= 75)
+        { 165, "Travail du cuir", { 5937, 0 } },       // Couteau a depouilles
+        { 197, "Couture",         { 5916, 0 } },       // Ciseaux de linceul
+        { 171, "Alchimie",        { 16308, 0 } },      // Fiole de prelevement
+    }};
+    // Table coa_artisanat_outil_offert presente dans la base personnages (lue au demarrage) ; absente : rien n'est donne.
+    bool TableOutilOffert = false;
+
     bool TableExiste(DatabaseWorkerPool<WorldDatabaseConnection>& base, std::string_view nom)
     {
         return bool(base.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}'", nom));
+    }
+
+    // Outil offert : table de trace (base personnages) et gabarits des outils, lus une fois au demarrage.
+    void ChargerOutilsOfferts()
+    {
+        TableOutilOffert = bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+            "AND TABLE_NAME = 'coa_artisanat_outil_offert'"));
+        uint32 outils = 0, absents = 0;
+        for (OutilOffertDef const& d : OUTILS_OFFERTS)
+            for (uint32 const id : d.objets)
+                if (id)
+                {
+                    if (sObjectMgr->GetItemTemplate(id))
+                        ++outils;
+                    else
+                    {
+                        ++absents;
+                        LOG_ERROR("module", "coa artisanat: outil offert : objet {} ({}) absent d'item_template, ignore", id, d.nom);
+                    }
+                }
+        LOG_INFO("module", "coa artisanat: outil offert : {} metiers, {} outils, {} absents ; table {} ; option {}",
+            OUTILS_OFFERTS.size(), outils, absents, TableOutilOffert ? "presente" : "ABSENTE (rien ne sera donne)",
+            sConfigMgr->GetOption<bool>("CoaArtisanat.OutilOffert", true) ? 1 : 0);
     }
 
     void ChargerTalents()
@@ -3972,6 +4020,7 @@ namespace
             ChargerReglesMonde();
             ChargerTalents();
             ChargerNoeudsRecolte();   // lot T : apres les gabarits d'objets du monde et Lock.dbc
+            ChargerOutilsOfferts();   // apres les gabarits d'objets
             CoaArtisanatTempsDeRecolte = &TempsDeRecolte;
             VerifierMoisson();   // apres le chargement des sorts (spell_dbc compris)
         }
@@ -6157,6 +6206,90 @@ namespace
             return true;
         }
     };
+
+    // Outil offert a l'apprentissage d'un metier (19/10/2026). Un humain apprend un metier : sa competence passe de 0 a une
+    // valeur non nulle (Player::SetSkill, branche d'ajout : le crochet recoit currVal = 0). Le serveur lui donne chaque outil
+    // de OUTILS_OFFERTS qu'il n'a ni dans ses sacs, ni en banque, ni porte (ni, pour un outil a TotemCategory, un outil
+    // equivalent sur lui) ; sacs pleins : par courrier. Une seule fois par metier et par personnage : la trace est ecrite
+    // (DirectExecute, synchrone) AVANT le don, meme si rien n'est donne (outil deja possede) ; desapprendre puis reapprendre
+    // ne redonne rien. Bots, chargement du personnage et creation (hors du monde) exclus. Option CoaArtisanat.OutilOffert.
+    class ArtisanatOutilOffert final : public PlayerScript
+    {
+    public:
+        ArtisanatOutilOffert() : PlayerScript("CoaArtisanatOutilOffert", { PLAYERHOOK_ON_SET_SKILL, PLAYERHOOK_ON_DELETE_FROM_DB }) { }
+
+        void OnPlayerSetSkill(Player* joueur, uint32 metier, uint32 avant, uint32 /*max*/, uint32 /*palier*/, uint32 apres) override
+        {
+            if (avant != 0 || apres == 0 || !TableOutilOffert || !joueur || !joueur->IsInWorld())
+                return;
+            WorldSession* session = joueur->GetSession();
+            if (!session || session->IsBot() || session->PlayerLoading())
+                return;
+            OutilOffertDef const* def = nullptr;
+            for (OutilOffertDef const& d : OUTILS_OFFERTS)
+                if (d.metier == metier)
+                    def = &d;
+            if (!def || !sConfigMgr->GetOption<bool>("CoaArtisanat.OutilOffert", true))
+                return;
+            uint32 const guid = joueur->GetGUID().GetCounter();
+            if (CharacterDatabase.Query("SELECT 1 FROM coa_artisanat_outil_offert WHERE guid = {} AND metier = {}", guid, metier))
+                return;
+
+            std::vector<ItemTemplate const*> donner;
+            for (uint32 const id : def->objets)
+                if (ItemTemplate const* proto = id ? sObjectMgr->GetItemTemplate(id) : nullptr)
+                    if (!joueur->HasItemCount(id, 1, true) && !(proto->TotemCategory && joueur->HasItemTotemCategory(proto->TotemCategory)))
+                        donner.push_back(proto);
+            std::string ids;
+            for (ItemTemplate const* p : donner)
+                ids += (ids.empty() ? "" : ",") + std::to_string(p->ItemId);
+            // Trace d'abord : si le don echouait a moitie, on ne redonne jamais (un outil se rachete 1 po ou se fabrique).
+            CharacterDatabase.DirectExecute("INSERT IGNORE INTO coa_artisanat_outil_offert (guid, metier, objets) VALUES ({}, {}, '{}')",
+                guid, metier, ids);
+            if (donner.empty())
+            {
+                LOG_INFO("module", "coa artisanat: outil offert joueur={} metier={} : deja equipe, rien donne (trace posee)", guid, metier);
+                return;
+            }
+
+            std::string noms;
+            std::vector<ItemTemplate const*> courrier;
+            for (std::size_t i = 0; i < donner.size(); ++i)
+            {
+                ItemTemplate const* p = donner[i];
+                noms += (i == 0 ? "" : (i + 1 == donner.size() ? " et " : ", ")) + p->Name1;
+                ItemPosCountVec dest;
+                Item* objet = joueur->CanStoreNewItem(NULL_BAG, NULL_SLOT, dest, p->ItemId, 1) == EQUIP_ERR_OK
+                    ? joueur->StoreNewItem(dest, p->ItemId, true) : nullptr;
+                if (objet)
+                    joueur->SendNewItem(objet, 1, true, false);
+                else
+                    courrier.push_back(p);
+            }
+            std::string const texte = Acore::StringFormat("Vous recevez {} pour débuter en {}.", noms, def->nom);
+            if (!courrier.empty())
+            {
+                CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+                MailDraft draft("Atelier", texte + " Vos sacs étaient pleins : le voici par courrier.");
+                for (ItemTemplate const* p : courrier)
+                    if (Item* objet = Item::CreateItem(p->ItemId, 1, joueur))
+                    {
+                        objet->SaveToDB(trans);
+                        draft.AddItem(objet);
+                    }
+                draft.SendMailTo(trans, MailReceiver(joueur), MailSender(joueur));
+                CharacterDatabase.CommitTransaction(trans);
+            }
+            ChatHandler(session).PSendSysMessage("{}{}", texte, courrier.empty() ? "" : " Vos sacs sont pleins : regardez votre courrier.");
+            LOG_INFO("module", "coa artisanat: outil offert joueur={} metier={} objets={} courrier={}", guid, metier, ids, courrier.size());
+        }
+
+        void OnPlayerDeleteFromDB(CharacterDatabaseTransaction trans, uint32 guid) override
+        {
+            if (TableOutilOffert)
+                trans->Append("DELETE FROM coa_artisanat_outil_offert WHERE guid = {}", guid);
+        }
+    };
 }
 
 void AddAscensionArtisanatScripts()
@@ -6170,4 +6303,5 @@ void AddAscensionArtisanatScripts()
     new ArtisanatArene();
     new ArtisanatSorts();
     new ArtisanatCommandes();
+    new ArtisanatOutilOffert();
 }
