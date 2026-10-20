@@ -982,8 +982,17 @@ namespace
         { 755, { 25229, 25230, 28894, 28895, 28897, 51311 } }, // Joaillerie
     }};
     static_assert(RANGS_APPRIS <= std::tuple_size_v<decltype(RangsMetier::rangs)>, "RANGS_APPRIS depasse les rangs connus");
-    // Les outils de recolte des 12 noeuds de la salle (item_template.RequiredSkill, rang 1), plus la griffe du coffre.
-    constexpr std::array<uint32, 7> OUTILS_RECOLTE = { 5384, 5916, 5937, 16308, 23581, 23674, 5059 };
+    // Les outils des 12 noeuds de la salle, plus la griffe du coffre. D-PO-60 (20/10) : 8 noeuds se recoltent au Minage, a
+    // l'Herboristerie ou au Depecage (outils natifs : Mining Pick 2901, Skinning Knife 7005) ; Cocons et Linceuls gardent
+    // les Ciseaux de linceul 5916, Echos et Ames la Pince a ames 23674.
+    constexpr std::array<uint32, 5> OUTILS_RECOLTE = { 5916, 23674, 2901, 7005, 5059 };
+    // D-PO-60 : les 3 metiers de recolte du banc (rangs lus dans Spell.dbc : effet 118 SKILL sur 186 / 182 / 393).
+    constexpr std::array<RangsMetier, 3> METIERS_RECOLTE_ESSAI =
+    {{
+        { 186, { 2575, 2576, 3564, 10248, 29354, 50310 } },    // Minage
+        { 182, { 2366, 2368, 3570, 11993, 28695, 50300 } },    // Herboristerie
+        { 393, { 8613, 8617, 8618, 10768, 32678, 50305 } },    // Depecage
+    }};
 
     // Apprend les RANGS_APPRIS premiers rangs du metier et met la competence a `valeur`/COMPETENCE_MAX. Un rang dont le
     // sort n'enseigne pas cette competence (SpellLearnSkill) est saute et journalise. Un rang 6 deja connu (banc d'avant
@@ -1394,18 +1403,20 @@ namespace
         char const* nom;
         std::array<uint32, 2> objets;
     };
-    constexpr std::array<OutilOffertDef, 10> OUTILS_OFFERTS = {{
+    constexpr std::array<OutilOffertDef, 8> OUTILS_OFFERTS = {{
         { 186, "Minage",          { 2901, 0 } },       // Mining Pick (TotemCategory 165)
         { 393, "Dépeçage",        { 7005, 0 } },       // Skinning Knife (166)
-        { 164, "Forge",           { 5956, 5384 } },    // Blacksmith Hammer (162, 37 recettes <= 75) ; Pic d'extraction runique
+        { 164, "Forge",           { 5956, 0 } },       // Blacksmith Hammer (162, 37 recettes <= 75) ; plus le Pic (D-PO-60)
         { 202, "Ingénierie",      { 5956, 0 } },       // Blacksmith Hammer (18 recettes <= 75) ; la cle 6219 exige Ingenierie 50
         { 333, "Enchantement",    { 6218, 23674 } },   // Runed Copper Rod (6, 10 recettes <= 75) ; Pince a ames
-        { 755, "Joaillerie",      { 20815, 23581 } },  // Jeweler's Kit (Totem, 16 recettes <= 75) ; Ciseau a geodes
+        { 755, "Joaillerie",      { 20815, 0 } },      // Jeweler's Kit (Totem, 16 recettes <= 75) ; plus le Ciseau (D-PO-60)
         { 773, "Calligraphie",    { 39505, 0 } },      // Virtuoso Inking Set (121, 219 recettes <= 75)
-        { 165, "Travail du cuir", { 5937, 0 } },       // Couteau a depouilles
         { 197, "Couture",         { 5916, 0 } },       // Ciseaux de linceul
-        { 171, "Alchimie",        { 16308, 0 } },      // Fiole de prelevement
     }};
+    // D-PO-60 (20/10) : les plantes, les filons et cristaux, les depouilles se recoltent au metier de recolte, sans l'outil
+    // de fabrication. Le Pic (Forge), le Ciseau a geodes (Joaillerie), le Couteau a depouilles (Travail du cuir) et la
+    // Fiole (Alchimie) n'ouvrent plus rien : ils ne sont plus offerts. L'Alchimie et le Travail du cuir n'ont plus d'outil
+    // offert (cette table ne leur en donnait pas d'autre) ; l'Herboristerie n'en a jamais eu.
     // Table coa_artisanat_outil_offert presente dans la base personnages (lue au demarrage) ; absente : rien n'est donne.
     bool TableOutilOffert = false;
     // Banc `.artisanat essai` en cours dans ce fil : il apprend des metiers au testeur (learnSpell), qui ne doit ni recevoir
@@ -3350,11 +3361,15 @@ namespace
     std::atomic<uint32> GardiensRenvoyes{ 0 };
     std::atomic<uint32> PiegesReduits{ 0 };
 
-    // Metier de recolte d'un noeud, d'apres le metier de creation de son outil (generer.py, FAMILLE_RECOLTE).
+    // Metier de recolte d'un noeud, d'apres la competence de ses conditions de butin (generer.py) : metier de creation de
+    // son outil (FAMILLE_RECOLTE), ou, depuis D-PO-60 (20/10), le metier de recolte lui-meme pour les 8 noeuds de nature
+    // (filons et cristaux au Minage, plantes a l'Herboristerie, depouilles au Depecage).
     uint32 MetierRecolteDeCreation(uint32 creation)
     {
         switch (creation)
         {
+            case 186: case 182: case 393: return creation;   // D-PO-60 : noeud de nature
+
             case 164: case 755: return 186;   // Forge, Joaillerie -> Minage
             case 171: case 333: return 182;   // Alchimie, Enchantement -> Herboristerie
             case 165: case 197: return 393;   // Travail du cuir, Couture -> Depecage
@@ -3440,6 +3455,27 @@ namespace
             EntreesNoeuds.push_back(n.entree);
             ++it;
         }
+        // D-PO-60 : variantes de tranche (meme noeud, verrou au rang de la zone) = gabarits de la plage qui partagent le
+        // butin d'un noeud (chest.lootId) ; meme fiche sous leur propre entree (talents, Flair, pieges, Pas de loup).
+        uint32 variantes = 0;
+        for (auto const& [entree, t] : *sObjectMgr->GetGameObjectTemplates())
+        {
+            if (entree < NOEUD_RECOLTE_MIN || entree > NOEUD_RECOLTE_MAX || t.type != GAMEOBJECT_TYPE_CHEST
+                || NoeudsRecolte.count(entree))
+                continue;
+            auto base = NoeudsRecolte.find(t.chest.lootId);
+            if (base == NoeudsRecolte.end() || base->second.entree != t.chest.lootId)
+                continue;
+            NoeudRecolte copie = base->second;   // copie AVANT l'insertion (rehachage)
+            copie.entree = entree;
+            NoeudsRecolte[entree] = copie;
+            if (LockEntry const* verrou = sLockStore.LookupEntry(t.GetLockId()))
+                for (uint8 k = 0; k < MAX_LOCK_CASE; ++k)
+                    if (verrou->Type[k] == LOCK_KEY_SPELL && verrou->Index[k])
+                        SortsOuverture[verrou->Index[k]] = entree;
+            EntreesNoeuds.push_back(entree);
+            ++variantes;
+        }
         if (QueryResult r = WorldDatabase.Query("SELECT DISTINCT action_type, action_param1 FROM smart_scripts WHERE source_type = 1 "
             "AND entryorguid BETWEEN {} AND {} AND event_type = 70 AND action_type IN (11, 12)", NOEUD_RECOLTE_MIN, NOEUD_RECOLTE_MAX))
             do
@@ -3455,8 +3491,9 @@ namespace
         uint32 parMetier[3] = { 0, 0, 0 };
         for (auto const& [e, n] : NoeudsRecolte)
             ++parMetier[n.metier == 186 ? 0 : (n.metier == 182 ? 1 : 2)];
-        LOG_INFO("module", "coa recolte: noeuds {} (minage {}, herboristerie {}, depecage {}), {} ecartes, sorts d'ouverture {}, "
-            "gardien {}, piege {}, purs {}", uint32(NoeudsRecolte.size()), parMetier[0], parMetier[1], parMetier[2], rejetes,
+        LOG_INFO("module", "coa recolte: noeuds {} (minage {}, herboristerie {}, depecage {}), {} ecartes, dont variantes {}, "
+            "sorts d'ouverture {}, gardien {}, piege {}, purs {}", uint32(NoeudsRecolte.size()), parMetier[0], parMetier[1],
+            parMetier[2], rejetes, variantes,
             uint32(SortsOuverture.size()), GardienRecolte, PiegeRecolte,
             uint32(std::count_if(NoeudsRecolte.begin(), NoeudsRecolte.end(), [](auto const& x) { return x.second.pur
                 && sObjectMgr->GetItemTemplate(x.second.pur); })));
@@ -3766,6 +3803,44 @@ namespace
         return 0;
     }
 
+    // D-PO-60 (20/10) : une depouille (noeud de nature au Depecage) s'ouvre par le sort « Depecer » de son verrou
+    // (LOCK_KEY_SPELL) ; le rang de Depecage exige est porte par le champ Skill de ce cas (Lock.dbc / lock_dbc 5112-5119,
+    // generer.py ; ignore par Spell::CanOpenLock pour un cas de sort). Rend vrai et le rang si `go` est une depouille
+    // (sort 0 : n'importe quel cas de sort du verrou ; sinon le cas de CE sort).
+    bool RangDepecage(GameObject const* go, uint32 sort, uint32& rang)
+    {
+        GameObjectTemplate const* t = go ? go->GetGOInfo() : nullptr;
+        if (!t)
+            return false;
+        auto it = NoeudsRecolte.find(go->GetEntry());
+        if (it == NoeudsRecolte.end() || it->second.competence != SKILL_SKINNING)
+            return false;
+        LockEntry const* verrou = sLockStore.LookupEntry(t->GetLockId());
+        for (uint8 k = 0; verrou && k < MAX_LOCK_CASE; ++k)
+            if (verrou->Type[k] == LOCK_KEY_SPELL && verrou->Index[k] && (!sort || verrou->Index[k] == sort))
+            {
+                rang = std::max<uint32>(1, verrou->Skill[k]);
+                return true;
+            }
+        return false;
+    }
+
+    // D-PO-60 : un depecage de depouille fait monter le Depecage comme un depecage ordinaire (SpellEffects.cpp, EffectSkinning :
+    // UpdateGatherSkill), une fois par joueur et par objet (liste de montee de l'objet, comme EffectOpenLock).
+    std::atomic<uint32> MonteesDepecage{ 0 };
+    void MonterDepecage(Player* joueur, GameObject* go)
+    {
+        uint32 rang = 0;
+        if (!RangDepecage(go, 0, rang) || go->IsInSkillupList(joueur->GetGUID()))
+            return;
+        uint32 const pur = joueur->GetPureSkillValue(SKILL_SKINNING);
+        if (pur && joueur->UpdateGatherSkill(SKILL_SKINNING, pur, rang))
+        {
+            go->AddToSkillupList(joueur->GetGUID());
+            ++MonteesDepecage;
+        }
+    }
+
     // Arene 1c1 contre un gladiateur : NeutraliseEnArene1c1 n'est lu qu'au recalcul des signatures, marque a l'entree
     // sur la carte (OnPlayerMapChanged), donc AVANT Battleground::AddPlayer ; un recalcul fait avant l'arrivee de
     // l'adversaire gardait Garde-lame et les passifs tout le match. A l'ouverture des portes (ArenaScript::OnArenaStart,
@@ -3831,7 +3906,10 @@ namespace
             if (auto it = NoeudsRecolte.find(go->GetEntry()); it != NoeudsRecolte.end())
             {
                 if (!bot)
+                {
+                    MonterDepecage(detenteur, go);   // D-PO-60 : depouilles seulement
                     RecolterNoeud(detenteur, it->second, butin);
+                }
             }
             else if (uint32 const metier = MetierDuNoeudClassique(go))
             {
@@ -3877,6 +3955,28 @@ namespace
                 }
                 break;   // un seul gardien par ouverture
             }
+        }
+    };
+
+    // D-PO-60 (20/10) : « Depecer » une depouille exige le Depecage au rang de sa tranche (Skill du cas de sort du verrou).
+    // Le coeur autorise le sort sans qu'il soit appris (GameObject::GetSpellForLock) ; ce controle remplace l'outil de
+    // fabrication. Refus : SPELL_FAILED_LOW_CASTLEVEL, celui d'un verrou de competence trop haut (Spell::CanOpenLock).
+    class ArtisanatDepecage final : public AllSpellScript
+    {
+    public:
+        ArtisanatDepecage() : AllSpellScript("CoaArtisanatDepecage", { ALLSPELLHOOK_ON_SPELL_CHECK_CAST }) { }
+
+        void OnSpellCheckCast(Spell* sort, bool /*strict*/, SpellCastResult& res) override
+        {
+            if (res != SPELL_CAST_OK || !sort || SortsOuverture.empty() || !sort->GetSpellInfo()
+                || !SortsOuverture.count(sort->GetSpellInfo()->Id))
+                return;
+            Player* joueur = sort->GetCaster() ? sort->GetCaster()->ToPlayer() : nullptr;
+            uint32 rang = 0;
+            if (!joueur || !RangDepecage(sort->m_targets.GetGOTarget(), sort->GetSpellInfo()->Id, rang))
+                return;
+            if (joueur->GetSkillValue(SKILL_SKINNING) < rang)
+                res = SPELL_FAILED_LOW_CASTLEVEL;
         }
     };
 
@@ -4797,6 +4897,8 @@ namespace
                     uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(COMPETENCE_MAX), 1, COMPETENCE_MAX));
                     niveau(NIVEAU_EVEIL);
                     for (RangsMetier const& m : METIERS)
+                        Metier(joueur, m, valeur);
+                    for (RangsMetier const& m : METIERS_RECOLTE_ESSAI)   // D-PO-60
                         Metier(joueur, m, valeur);
                     recettes(true);
                     for (uint32 outil : OUTILS_RECOLTE)
@@ -6465,6 +6567,7 @@ void AddAscensionArtisanatScripts()
     new ArtisanatButinMonde();
     new ArtisanatButinRecolte();
     new ArtisanatNoeuds();
+    new ArtisanatDepecage();
     new ArtisanatUnit();
     new ArtisanatArene();
     new ArtisanatSorts();
