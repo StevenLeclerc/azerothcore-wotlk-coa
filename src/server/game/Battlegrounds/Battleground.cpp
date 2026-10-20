@@ -880,10 +880,17 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
         if (player->HasSpiritOfRedemptionAura())
             player->RemoveAurasByType(SPELL_AURA_MOD_SHAPESHIFT);
 
+        // CoA (20/10/2026, P-293) : en arene, le mort reste au sol jusqu'a sa sortie, comme sur le jeu d'origine.
+        // Ressuscite ici, dans le tick du coup fatal, il ne parvient jamais mort au client (la vie remonte avant
+        // l'envoi des mises a jour de fin de tick) : le joueur « reste en l'air » au lieu de tomber. La sortie
+        // (RemovePlayerAtLeave) le ressuscite.
         if (!player->IsAlive())
         {
-            player->ResurrectPlayer(1.0f);
-            player->SpawnCorpseBones();
+            if (!isArena())
+            {
+                player->ResurrectPlayer(1.0f);
+                player->SpawnCorpseBones();
+            }
         }
         else
         {
@@ -948,10 +955,16 @@ void Battleground::EndBattleground(PvPTeamId winnerTeamId)
 
         sScriptMgr->OnBattlegroundEndReward(this, player, GetTeamId(winnerTeamId));
 
-        player->ResetAllPowers();
+        // CoA (P-293) : un mort laisse en arene ne recoit pas sa vie pleine. ResetAllPowers -> SetHealth(max) mettrait
+        // un cadavre (DeathState::Corpse, mort plus tot en 2c2 et plus) debout sans drapeau de fantome (P-041).
+        if (!isArena() || player->IsAlive())
+            player->ResetAllPowers();
         player->CombatStopWithPets(true);
 
-        BlockMovement(player);
+        // CoA (20/10/2026, P-293) : en arene, le vivant garde son deplacement apres la victoire, comme sur le jeu
+        // d'origine ; le bloquer fige la scene au coup fatal. Champ de bataille : inchange.
+        if (!isArena())
+            BlockMovement(player);
 
         player->SendDirectMessage(&pvpLogData);
 
