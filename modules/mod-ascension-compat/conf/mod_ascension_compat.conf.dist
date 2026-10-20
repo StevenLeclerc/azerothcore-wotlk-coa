@@ -207,6 +207,24 @@ AscensionCompat.HighRiskSettleDelayMs = 2000
 
 AscensionCompat.DeadPlayerHealthGuard = 1
 
+#
+#    AscensionCompat.FlyingMountsOnlyInFlyingAreas
+#        Description: Montures volantes hors des zones de vol (20/10/2026, R-20261020-1622,
+#                     coa-project/docs/DIAG-bot-envol-kattailu-20261020.md). 212 montures portent, apres
+#                     chargement, l'aura de vol (207) sans l'attribut qui les reserve a l'Outreterre et au
+#                     Norfendre (216 dans le Spell.dbc brut ; 91616-91619 sont deja desarmees au chargement
+#                     par OnLoadSpellCustomAttr) : on volait avec en Azeroth et dans la vallee d'Alterac, et les bots
+#                     d'un maitre qui les montait volaient avec lui. A 1, hors zone ou le vol est permis
+#                     (regle du coeur pour ONLY_FLYING_AREAS : Outreterre, Norfendre avec Vol par temps
+#                     froid, hors NO_FLY), la monture s'utilise AU SOL ; arrivee montee dans une zone sans
+#                     vol (portail, teleportation), elle est retiree. Exige les lignes spell_script_names
+#                     de data/sql/db-world/2026_10_20_01_ascension_montures_vol_zones.sql : sans elles,
+#                     l'option ne fait rien. Relue a chaque lancer et changement d'aire (`reload config`).
+#        Default:     1 - (au sol hors des zones de vol)
+#                     0 - (comportement d'avant : ces montures volent partout hors NO_FLY)
+
+AscensionCompat.FlyingMountsOnlyInFlyingAreas = 1
+
 ###################################################################################################
 # ARTISANAT (refonte, lot 1) - AscensionArtisanat.cpp
 #

@@ -63,6 +63,7 @@
 #include "ConfigValueCache.h"
 #include "DatabaseEnv.h"
 #include "DBCStores.h"
+#include "Config.h"
 #include "GameTime.h"
 #include "GossipDef.h"
 #include "GlobalScript.h"
@@ -81,6 +82,7 @@
 #include "ScriptMgr.h"
 #include "ScriptedGossip.h"
 #include "Spell.h"
+#include "SpellAuraEffects.h"
 #include "SpellAuras.h"
 #include "SpellMgr.h"
 #include "SpellScript.h"
@@ -6871,6 +6873,159 @@ class spell_ascension_local_mount : public SpellScript
     }
 };
 
+// CoA (20/10/2026, R-20261020-1622, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md § 2.6 et § 4.1) --
+// MONTURES VOLANTES HORS DES ZONES DE VOL. 212 montures (Armored Skyscreamer 900040, Golden Armored Storm Gryphon
+// 1320257...) portent, apres chargement, SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED (207) sans
+// SPELL_ATTR4_ONLY_FLYING_AREAS (216 dans le Spell.dbc brut, dont 91616-91619 deja desarmes par
+// OnLoadSpellCustomAttr plus haut) :
+// SpellInfo::CheckLocation ne les retient donc nulle part, Spell::CheckCast ne les refuse qu'en NO_FLY_ZONE, et
+// l'aura 207 pose SetCanFly(true) (AuraEffect::HandleAuraModIncreaseFlightSpeed) -- on volait en Azeroth et dans la
+// vallee d'Alterac, et tout bot dont le maitre montait l'une d'elles volait avec lui. Decision du commanditaire : la
+// monture reste utilisable, AU SOL, hors des zones ou le vol est permis. Les ids sont lies par spell_script_names
+// (data/sql/db-world/2026_10_20_01_ascension_montures_vol_zones.sql) ; sans ces lignes, rien ne change.
+//   - a l'application de l'effet d'aura de vol (207, et 201 FLY que porte aussi 31700), hors zone volable : l'action
+//     par defaut n'est pas jouee (AuraScript, PreventDefaultAction), donc SetCanFly(true) n'est jamais appele. L'effet
+//     RESTE inscrit dans l'aura et sur l'application : le masque concorde avec UnitAura::FillTargetMap et
+//     Aura::UpdateTargetMap ne retire ni ne reapplique rien toutes les 500 ms. (Un PreventHitDefaultEffect cote
+//     SpellScript laissait l'effet hors de l'application : demontage a 0,5 s, puis reapplication COMPLETE a 1 s, vol
+//     compris.) Le meme garde couvre le renvoi SEND_FOR_CLIENT de Player::SendInitialPacketsAfterAddToMap (connexion,
+//     teleportation lointaine). La monture et sa vitesse au sol restent ; 31700 n'a aucun effet 32 dans le DBC : il
+//     n'a jamais eu de bonus au sol, et va donc au pas hors zone volable (monture d'apparat, connue d'aucun personnage
+//     au 20/10) ;
+//   - au changement d'aire (arrivee d'un portail ou d'une teleportation sans descendre de monture, que le coeur
+//     autorise) : une de CES montures, alors que le joueur PEUT voler (CanFly, MOVEMENTFLAG_CAN_FLY), hors zone volable
+//     est retiree, comme le coeur retire une monture ONLY_FLYING_AREAS (Player::UpdateAreaDependentAuras). Le joueur
+//     remonte, au sol. Une monture montee au sol (vol empeche, effet 207 inscrit mais inerte) n'est pas retiree.
+// « Zone volable » = la regle du coeur pour ONLY_FLYING_AREAS (SpellInfo::CheckLocation) : aire (a defaut zone)
+// AREA_FLAG_OUTLAND, Player::canFlyInZone (Vol par temps froid au Norfendre) ; au lancer seulement (strict, comme
+// CheckCast), ni NO_FLY_ZONE ni champ de bataille exterieur qui interdit le vol.
+// Option AscensionCompat.FlyingMountsOnlyInFlyingAreas (defaut 1), relue a chaque application et changement d'aire.
+static constexpr char const* AscensionGroundOnlyFlyingMountScript = "spell_ascension_flying_mount_ground_only";
+
+static bool AscensionGroundOnlyFlyingMountsEnabled()
+{
+    return ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) &&
+        sConfigMgr->GetOption<bool>("AscensionCompat.FlyingMountsOnlyInFlyingAreas", true);
+}
+
+static bool AscensionIsFlightAuraEffect(SpellEffectInfo const& effect)
+{
+    return effect.Effect == SPELL_EFFECT_APPLY_AURA &&
+        (effect.ApplyAuraName == SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED || effect.ApplyAuraName == SPELL_AURA_FLY);
+}
+
+static bool AscensionFlyingAllowedAt(Player* player, uint32 zoneId, uint32 areaId, SpellInfo const* spell, bool strict)
+{
+    AreaTableEntry const* area = sAreaTableStore.LookupEntry(areaId);
+    if (!area)
+        area = sAreaTableStore.LookupEntry(zoneId);
+    if (!area || !area->IsFlyable())
+        return false;
+
+    if (strict)
+    {
+        if (area->flags & AREA_FLAG_NO_FLY_ZONE)
+            return false;
+        Battlefield* battlefield = sBattlefieldMgr->GetBattlefieldToZoneId(zoneId);
+        if (battlefield && !battlefield->CanFlyIn())
+            return false;
+    }
+
+    return player->canFlyInZone(player->GetMapId(), zoneId, spell);
+}
+
+class spell_ascension_flying_mount_ground_only : public AuraScript
+{
+    PrepareAuraScript(spell_ascension_flying_mount_ground_only);
+
+    // A spell the core already restricts (ONLY_FLYING_AREAS), or that is not a mount carrying a flight aura, has
+    // nothing for this script to do: a wrong spell_script_names row is reported at startup rather than acted on.
+    bool Validate(SpellInfo const* spellInfo) override
+    {
+        if (spellInfo->HasAttribute(SPELL_ATTR4_ONLY_FLYING_AREAS) || !spellInfo->HasAura(SPELL_AURA_MOUNTED))
+            return false;
+
+        for (SpellEffectInfo const& effect : spellInfo->Effects)
+            if (AscensionIsFlightAuraEffect(effect))
+                return true;
+
+        return false;
+    }
+
+    // Read once per aura: an aura created with the option off keeps its flight until it ends.
+    bool Load() override
+    {
+        return GetUnitOwner() && GetUnitOwner()->IsPlayer() && AscensionGroundOnlyFlyingMountsEnabled();
+    }
+
+    // REAL (cast, login reload) and SEND_FOR_CLIENT (Player::SendInitialPacketsAfterAddToMap) are the only modes in
+    // which HandleAuraModIncreaseFlightSpeed and HandleAuraFly call SetCanFly(true). CHANGE_AMOUNT still runs and only
+    // updates the flight speed, which does nothing on the ground. Removal is left to the core: it clears CanFly only
+    // when no other flight aura remains.
+    void PreventFlightOutsideFlyingAreas(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+    {
+        Player* player = GetUnitOwner() ? GetUnitOwner()->ToPlayer() : nullptr;
+        if (!player)
+            return;
+
+        if (!AscensionFlyingAllowedAt(player, player->GetZoneId(), player->GetAreaId(), GetSpellInfo(), true))
+            PreventDefaultAction();
+    }
+
+    void Register() override
+    {
+        OnEffectApply += AuraEffectApplyFn(spell_ascension_flying_mount_ground_only::PreventFlightOutsideFlyingAreas,
+            EFFECT_ALL, SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED, AURA_EFFECT_HANDLE_SEND_FOR_CLIENT_MASK);
+        OnEffectApply += AuraEffectApplyFn(spell_ascension_flying_mount_ground_only::PreventFlightOutsideFlyingAreas,
+            EFFECT_ALL, SPELL_AURA_FLY, AURA_EFFECT_HANDLE_SEND_FOR_CLIENT_MASK);
+    }
+};
+
+class AscensionGroundOnlyFlyingMountAreaScript : public PlayerScript
+{
+public:
+    AscensionGroundOnlyFlyingMountAreaScript()
+        : PlayerScript("AscensionGroundOnlyFlyingMountAreaScript", {PLAYERHOOK_ON_UPDATE_AREA}) { }
+
+    // Called by Player::UpdateArea before m_areaUpdateId moves; the zone is already the new one (UpdateZone sets it
+    // first, and an area-only change keeps it).
+    void OnPlayerUpdateArea(Player* player, uint32 /*oldArea*/, uint32 newArea) override
+    {
+        // Cheap test first: this hook runs on every area change of every player and bot. A bound mount mounted where
+        // flight is not allowed keeps its 207 effect registered but inert (the AuraScript above prevented SetCanFly):
+        // only a player who can actually fly is concerned, otherwise every ground-held mount would be pulled here.
+        if (!player || !player->HasIncreaseMountedFlightSpeedAura() || !player->CanFly() ||
+            !AscensionGroundOnlyFlyingMountsEnabled())
+            return;
+
+        std::vector<uint32> toRemove;
+        for (AuraEffect const* effect : player->GetAuraEffectsByType(SPELL_AURA_MOD_INCREASE_MOUNTED_FLIGHT_SPEED))
+        {
+            SpellInfo const* spell = effect->GetSpellInfo();
+            // Only the mounts bound to the script above: without its spell_script_names row a mount keeps its old
+            // behaviour everywhere, and is never pulled from under a player in mid-air on an area border.
+            if (!IsBound(spell->Id) ||
+                AscensionFlyingAllowedAt(player, player->GetZoneId(), newArea, spell, false))
+                continue;
+            toRemove.push_back(spell->Id);
+        }
+
+        // Removed outside the loop: removing an aura edits the list being walked.
+        for (uint32 spellId : toRemove)
+            player->RemoveAurasDueToSpell(spellId);
+    }
+
+private:
+    static bool IsBound(uint32 spellId)
+    {
+        SpellScriptsBounds bounds = sObjectMgr->GetSpellScriptsBounds(spellId);
+        for (auto itr = bounds.first; itr != bounds.second; ++itr)
+            if (sObjectMgr->GetScriptName(itr->second) == AscensionGroundOnlyFlyingMountScript)
+                return true;
+        return false;
+    }
+};
+
 // Wildcard Mount (91944) is a plain SPELL_EFFECT_DUMMY spell with no built-in behavior of its own;
 // summon a random mount the player already owns, then let spell_ascension_local_mount above resolve
 // the correct speed/flying variant for it.
@@ -7229,6 +7384,8 @@ void AddAscensionCompatScripts() {
   RegisterSpellScript(spell_ascension_personal_bank);
   RegisterSpellScript(spell_ascension_experience_potion);
   RegisterSpellScript(spell_ascension_local_mount);
+  RegisterSpellScript(spell_ascension_flying_mount_ground_only);
+  new AscensionGroundOnlyFlyingMountAreaScript();
   RegisterSpellScript(spell_ascension_jailers_bargain);
   RegisterSpellScript(spell_ascension_wildcard_mount);
   RegisterSpellScript(spell_ascension_legacy_quest_reward);
