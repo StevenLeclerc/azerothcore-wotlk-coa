@@ -3791,6 +3791,10 @@ namespace
         GameObjectTemplate const* t = go ? go->GetGOInfo() : nullptr;
         if (!t || t->type != GAMEOBJECT_TYPE_CHEST)
             return 0;
+        // D-PO-60 (revue du 20/10) : nos noeuds portent desormais des verrous de Minage et d'Herboristerie ; un noeud de la
+        // plage ecarte de NoeudsRecolte (donnees incoherentes) ne doit jamais passer pour un noeud classique (D-PO-59)
+        if (go->GetEntry() >= CoaArtisanatIds::NOEUD_RECOLTE_MIN && go->GetEntry() <= CoaArtisanatIds::NOEUD_RECOLTE_MAX)
+            return 0;
         LockEntry const* verrou = sLockStore.LookupEntry(t->GetLockId());
         for (uint8 k = 0; verrou && k < MAX_LOCK_CASE; ++k)
             if (verrou->Type[k] == LOCK_KEY_SKILL)
@@ -4890,9 +4894,10 @@ namespace
                     break;
                 case 4:
                 {
-                    // Les 6 metiers de recolte a la meme competence (COMPETENCE_MAX par defaut, ou celle donnee pour
+                    // Les 6 metiers de creation a la meme competence (COMPETENCE_MAX par defaut, ou celle donnee pour
                     // tester les seuils de butin des noeuds : 1, 150, 300 ; le palier haut est a 300 depuis P-259, car au
-                    // niveau 60 une condition de competence au-dessus de 300 est rejetee au chargement), et les 6 outils :
+                    // niveau 60 une condition de competence au-dessus de 300 est rejetee au chargement), les 3 metiers de recolte
+                    // et les outils (D-PO-60 : OUTILS_RECOLTE) :
                     // les 12 noeuds de la salle s'ouvrent.
                     uint16 const valeur = uint16(std::clamp<uint32>(competence.value_or(COMPETENCE_MAX), 1, COMPETENCE_MAX));
                     niveau(NIVEAU_EVEIL);
