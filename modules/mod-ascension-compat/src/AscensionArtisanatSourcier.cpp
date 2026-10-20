@@ -838,6 +838,29 @@ namespace
 
     // ---- Le sort « Reveiller le Filon-mere » ------------------------------------------------------------------------
 
+    // D-PO-60 (20/10) : la Veine foudroyee a des variantes de tranche (verrou de Minage au rang de la zone) : gabarits de la
+    // plage des noeuds qui partagent son butin (chest.lootId = GO_VEINE_FOUDROYEE). Lues une fois (gabarits charges au
+    // demarrage, avant tout sort ; initialisation statique sure entre fils).
+    std::vector<uint32> const& EntreesVeine()
+    {
+        static std::vector<uint32> const entrees = []
+        {
+            std::vector<uint32> e{ GO_VEINE_FOUDROYEE };
+            for (auto const& [entree, t] : *sObjectMgr->GetGameObjectTemplates())
+                if (entree != GO_VEINE_FOUDROYEE && entree >= NOEUD_RECOLTE_MIN && entree <= NOEUD_RECOLTE_MAX
+                    && t.type == GAMEOBJECT_TYPE_CHEST && t.chest.lootId == GO_VEINE_FOUDROYEE)
+                    e.push_back(entree);
+            return e;
+        }();
+        return entrees;
+    }
+
+    bool EstVeineFoudroyee(uint32 entree)
+    {
+        std::vector<uint32> const& e = EntreesVeine();
+        return std::find(e.begin(), e.end(), entree) != e.end();
+    }
+
     // Vide si le lancement est permis ; sinon le message montre au joueur. `veine` : la Veine foudroyee visee.
     std::string RefusLancement(Player* j, Spell const* sort, GameObject*& veine, std::string& code)
     {
@@ -869,11 +892,22 @@ namespace
         }
         if (GameObject* cible = sort ? sort->m_targets.GetGOTarget() : nullptr)
         {
-            if (cible->GetEntry() == GO_VEINE_FOUDROYEE && cible->IsWithinDistInMap(j, PORTEE_VEINE))
+            if (EstVeineFoudroyee(cible->GetEntry()) && cible->IsWithinDistInMap(j, PORTEE_VEINE))
                 veine = cible;
         }
         if (!veine && VEINE_PAR_RECHERCHE)
-            veine = j->FindNearestGameObject(GO_VEINE_FOUDROYEE, PORTEE_VEINE, true);
+        {
+            // D-PO-60 : la Veine et ses variantes de tranche ; la plus proche des Veines apparues
+            std::list<GameObject*> veines;
+            j->GetGameObjectListWithEntryInGrid(veines, EntreesVeine(), PORTEE_VEINE);
+            float meilleure = PORTEE_VEINE + 1.0f;
+            for (GameObject* v : veines)
+                if (v->isSpawned() && j->GetDistance(v) < meilleure)
+                {
+                    meilleure = j->GetDistance(v);
+                    veine = v;
+                }
+        }
         if (!veine || !veine->isSpawned() || veine->getLootState() != GO_READY)
             return refus("veine", "Il faut se tenir près d'une Veine foudroyée.");
         if (EvenementProche(j->GetMapId(), j->GetInstanceId(), veine->GetPositionX(), veine->GetPositionY()))
