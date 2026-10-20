@@ -275,7 +275,18 @@ class xoroth_casts : public AllSpellScript
         if (Named(info, 806965))
             factor *= 1 + .2f * fire;
         if (info->Id == 804702 || info->Id == 804704)
-            factor *= 1 + Count(player, 804787) * Amount(804787, 1) / 100.0f;
+        {
+            // Path of Hellfire 804787 e1: +25 % per stack (5 stacks from level 40, so x2.25) on Dreadrider's
+            // Stomp and Hellfire Trample. Measured 20/10/2026 in 1v1 arena at level 44: one Trample took 81 %
+            // of a player's health, the mounted opening 57 % and 90 % of a gladiator's. Against a target
+            // controlled by a player (player, pet, totem), each stack is worth PathOfHellfirePvpPct instead,
+            // the same IsControlledByPlayer split as Decimation 524913 below. Creatures keep the DBC value.
+            constexpr float PathOfHellfirePvpPct = 10.0f;
+            float perStack = float(Amount(804787, 1));
+            if (target->IsControlledByPlayer())
+                perStack = std::min(perStack, PathOfHellfirePvpPct);
+            factor *= 1 + Count(player, 804787) * perStack / 100.0f;
+        }
         if (spell->GetScriptValue(524913) || spell->GetScriptValue(802618))
             result.crit = true;
         if (spell->GetScriptValue(524913))
