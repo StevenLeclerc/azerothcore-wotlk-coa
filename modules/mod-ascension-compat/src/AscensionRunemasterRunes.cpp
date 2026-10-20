@@ -14,6 +14,7 @@
 // EffectSpellClassMask 122-130 (effect-major: effect e uses 122+3e .. 124+3e).
 //
 #include "DBCStores.h"
+#include "Log.h"
 #include "Player.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
@@ -189,6 +190,18 @@ public:
     }
 };
 
+// K2 (20/10/2026, accord du commanditaire ; coa-project docs/DIAG-equilibrage-classes-20261017.md § 3, K2) : Granite
+// Resolve 520229, le seul defensif utile du Runemaster (sort de classe : 61 Engravement, 62 Glyphic, 63 Riftblade), rend
+// aussi 15 % de la vie maximale a chaque lancer. Spell.dbc du serveur lu le 20/10 : un seul enregistrement de ce nom (aucun
+// rang, rien ne le declenche ni ne le cite), effet 0 APPLY_AURA 87 MOD_DAMAGE_PERCENT_TAKEN (-30 %, physique), effets 1 et 2
+// VIDES, DmgClass 1. Le soin est pose ici sur l'effet 2 (« effet 3 » de l'infobulle) : SPELL_EFFECT_HEAL_PCT, base 15,
+// sur le lanceur. BonusMultiplier 0 et aucune ligne spell_bonus_data : Unit::SpellHealingBonusDone n'ajoute aucune
+// puissance de soin (coefficient nul), seuls les % de soins faits et recus s'appliquent ; le soin peut etre critique
+// (Spell.cpp, target->crit). DECISION, pas lecture : aucun champ du DBC ne porte ce 15 %. Le client ne connait pas cet
+// effet : le soin passe (calcule et envoye par le serveur), l'infobulle reste celle du Spell.dbc client.
+constexpr uint32 SPELL_GRANITE_RESOLVE = 520229;
+constexpr int32 GRANITE_RESOLVE_HEAL_PCT = 15;
+
 class runemaster_runes_metadata : public GlobalScript
 {
 public:
@@ -219,6 +232,8 @@ public:
             if (SpellDurationEntry const* duration = sSpellDurationStore.LookupEntry(DURATION_THREE_SECONDS))
                 info->DurationEntry = duration;
         }
+        if (info->Id == SPELL_GRANITE_RESOLVE)
+            ApplyGraniteResolveHeal(info);
         if (info->Id == SPELL_RUNIC_OMEN_STACK || info->Id == SPELL_RUNIC_OMEN_EMPOWER ||
             info->Id == SPELL_RUNIC_BREAKOUT_WINDOW || info->Id == SPELL_RUNIC_BREAKOUT_LATE)
         {
@@ -226,6 +241,46 @@ public:
             info->AttributesCu &= ~SPELL_ATTR0_CU_FORCE_AURA_SAVING;
             info->AttributesCu |= SPELL_ATTR0_CU_AURA_CANNOT_BE_SAVED;
         }
+    }
+
+private:
+    // K2 : seulement l'enregistrement lu le 20/10. Un DBC change (effet 0 autre, effet 1 ou 2 occupe) est laisse tel quel,
+    // avec une ligne d'erreur au demarrage : jamais un effet ecrase en silence. La ligne d'information est la preuve, par
+    // `strings worldserver | grep 'Runemaster K2'`, que le binaire porte K2.
+    static void ApplyGraniteResolveHeal(SpellInfo* info)
+    {
+        SpellEffectInfo const& reduction = info->Effects[EFFECT_0];
+        SpellEffectInfo& soin = info->Effects[EFFECT_2];
+        if (reduction.Effect != SPELL_EFFECT_APPLY_AURA || reduction.ApplyAuraName != SPELL_AURA_MOD_DAMAGE_PERCENT_TAKEN ||
+            info->Effects[EFFECT_1].Effect != 0 || soin.Effect != 0)
+        {
+            LOG_ERROR("server.loading", ">> Ascension Runemaster K2 : Granite Resolve {} ne correspond plus au Spell.dbc lu le "
+                "20/10 (effets {} {} {}), soin NON pose", SPELL_GRANITE_RESOLVE, reduction.Effect,
+                info->Effects[EFFECT_1].Effect, soin.Effect);
+            return;
+        }
+        soin.Effect = SPELL_EFFECT_HEAL_PCT;
+        soin.ApplyAuraName = SPELL_AURA_NONE;
+        soin.Amplitude = 0;
+        soin.BasePoints = GRANITE_RESOLVE_HEAL_PCT - 1;  // convention du DBC : valeur = BasePoints + 1 (DieSides 1)
+        soin.DieSides = 1;
+        soin.RealPointsPerLevel = 0.0f;
+        soin.PointsPerComboPoint = 0.0f;
+        soin.ValueMultiplier = 1.0f;
+        soin.DamageMultiplier = 1.0f;
+        soin.BonusMultiplier = 0.0f;
+        soin.MiscValue = 0;
+        soin.MiscValueB = 0;
+        soin.Mechanic = MECHANIC_NONE;
+        soin.TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+        soin.TargetB = SpellImplicitTargetInfo(0);
+        soin.RadiusEntry = nullptr;
+        soin.ChainTarget = 0;
+        soin.ItemType = 0;
+        soin.TriggerSpell = 0;
+        soin.SpellClassMask = flag96();
+        LOG_INFO("server.loading", ">> Ascension Runemaster K2 : Granite Resolve {} rend {} % de la vie maximale",
+            SPELL_GRANITE_RESOLVE, GRANITE_RESOLVE_HEAL_PCT);
     }
 };
 } // namespace
