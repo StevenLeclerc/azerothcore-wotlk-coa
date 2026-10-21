@@ -234,7 +234,7 @@ namespace CoaArtisanatIds
     constexpr uint32 NOS_OBJETS_MAX = 9109999;
 
     // Re-signer : 2 materiaux de monde rares et 1 composant d'artisan (le premier du metier : rangs 1-2) [H, au PO].
-    // La variante « 1 trophee de la Lame de trophee » attend T2-3 (talent b) : non codee.
+    // La variante « 1 trophee de la Lame de trophee » : option TROPHEE, RESIGNER_TROPHEES (lot T2 DEPECAGE, plus bas).
     constexpr uint32 RESIGNER_RARES = 2;
     constexpr std::array<std::pair<uint32, uint32>, 3> RESIGNER_COMPOSANT = {{ { 164, 9101231 }, { 165, 9101234 }, { 197, 9101237 } }};
 
@@ -400,6 +400,66 @@ namespace CoaArtisanatIds
     // Ressources d'evenement de la Nuit des morts (famille Glas), epique [M item_template du PTR, 21/10] : recompense de
     // participant de la Floraison (les tombes sont du Glas ; le Jardin paie l'Orage, comme le Filon-mere).
     constexpr uint32 RESSOURCE_GLAS_EPIQUE = 9100117;           // Ame captive, qualite 4
+
+    // ---- Lot T2 du Sourcier au 60 (21/10/2026), lot DEPECAGE : Traque legendaire, Appel du Linceul, Lame de trophee ----
+    //
+    // Conception : docs/CONCEPTION-artisanat-T2-sourcier-60.md § 2.3 et § 2 bis (coa-project, branche t2-sourcier). Pose :
+    // outils/artisanat-sourcier-t2-depecage.py (DBC et monde, SQL de pose et de retour). Memes regles que les lots MINAGE et
+    // HERBORISTERIE : registre commun du Sourcier (un lancement par jour, tous evenements confondus), garanti hebdomadaire a
+    // COMPTES_HUMAINS_GARANTI comptes sinon CHANCE_COEUR_POUR_CENT, recompenses de participant (Glas), echecs du Filon-mere.
+    //
+    // TRAQUE LEGENDAIRE, voie module seule (AscensionArtisanatSourcierDepecage.cpp) : le sort pose la Piste (objet pivot,
+    // decor) ; INDICES_TRAQUE indices successifs, visibles du seul groupe du specialiste (GameObjectAI::CanBeSeen), chacun a
+    // INDICE_ECART_MIN-MAX m du precedent ; examiner le dernier fait paraitre une Bete de legende (un des 6 gabarits, tire au
+    // sort), visible du seul groupe (CreatureAI::CanBeSeen), elite 60, PV par la table du Colosse ; sa mort = victoire.
+    constexpr uint32 SORT_SUIVRE_PISTE = 9113904;               // sort LANCE (sur soi, hors combat), zones ZONES_TRAQUE
+    constexpr uint32 SORT_MARQUEUR_TRAQUE = 9113439;            // talents.py « talent:depecage:sourcier:traque-legendaire:1 »
+    constexpr uint32 GO_PISTE_LEGENDE = 9101096;                // pivot (type 5, decor)
+    constexpr char const* SCRIPT_PISTE_LEGENDE = "go_coa_piste_legende";
+    constexpr uint32 GO_INDICE_TRAQUE = 9101091;                // coffre sans verrou ni butin : examine par clic
+    constexpr char const* SCRIPT_INDICE_TRAQUE = "go_coa_indice_traque";
+    constexpr std::array<uint32, 6> PNJ_BETES_LEGENDE = { 9105030, 9105031, 9105032, 9105033, 9105034, 9105035 };
+    constexpr char const* SCRIPT_BETE_LEGENDE = "npc_coa_bete_legende";
+    constexpr uint32 OBJET_PEAU_LEGENDE = 9101282;              // materiau legendaire (qualite 5, non lie, pile 1)
+    constexpr uint32 DUREE_TRAQUE_S = 15 * 60;
+    constexpr uint32 INDICES_TRAQUE = 3;
+    constexpr float INDICE_ECART_MIN = 60.0f;                   // [H]
+    constexpr float INDICE_ECART_MAX = 120.0f;                  // [H]
+    constexpr float INDICE_PORTEE = 30.0f;                      // m : le joueur qui examine un indice, du pivot de session
+    // Zones 48-60 [H, liste au PO] (AreaTable.dbc, ids de zone) : Un'Goro, Silithus, Berceau-de-l'Hiver, Maleterres de
+    // l'Ouest et de l'Est, Gangrebois, Azshara, Terres foudroyees, Steppes ardentes.
+    constexpr std::array<uint32, 9> ZONES_TRAQUE = { 490, 1377, 618, 28, 139, 361, 16, 4, 46 };
+
+    // APPEL DU LINCEUL, voie module + Directeur (AscensionArtisanatSourcierDirecteur.cpp, meme session que la Faille
+    // tellurique) : de HEURE_LINCEUL_DEBUT a HEURE_LINCEUL_FIN (Paris), pres d'un cimetiere (RAYON_CIMETIERE). Le Directeur
+    // (exploitation/directeur/appel_linceul.py, moteur de la Nuit des morts) envoie 2 vagues de morts du Linceul puis le Roi
+    // spectral ; sa mort = victoire.
+    constexpr uint32 SORT_DEPLOYER_LINCEUL = 9113905;           // sort LANCE (sur soi, hors combat)
+    constexpr uint32 SORT_MARQUEUR_LINCEUL = 9113438;           // talents.py « talent:depecage:sourcier:appel-linceul:1 »
+    constexpr uint32 GO_LINCEUL_ANCIEN = 9101094;               // pivot (type 5, decor)
+    constexpr char const* SCRIPT_LINCEUL_ANCIEN = "go_coa_linceul_ancien";
+    constexpr std::array<uint32, 3> PNJ_MENACE_LINCEUL = { 9105040, 9105041, 9105042 };   // copies de 9100301-9100303
+    constexpr uint32 PNJ_ROI_SPECTRAL = 9105043;                // chef (copie de 9100304) : sa mort = victoire
+    constexpr uint32 OBJET_SUAIRE_ROIS = 9101283;               // materiau legendaire (qualite 5, non lie, pile 1)
+    // 8 min de combat + 20 s de presage + 30 s de marge ; le service s'eteint a 510 s (appel_linceul.py DUREE_MAX_S).
+    constexpr uint32 DUREE_LINCEUL_S = 8 * 60 + 20 + 30;
+    constexpr uint32 HEURE_LINCEUL_DEBUT = 21;                  // Paris, compris
+    constexpr uint32 HEURE_LINCEUL_FIN = 6;                     // Paris, exclu
+
+    // LAME DE TROPHEE (case sourcier-c du Depecage, AscensionArtisanatSourcierDepecage.cpp) : un humain qui connait le
+    // marqueur et depece une creature rare (rangs 2, 4) ou elite (1, 3) recoit 1 trophee au butin. Garde [H] : jamais sur
+    // une creature grise pour lui, jamais sur un elite d'instance (un rare d'instance, rang 4, compte), TROPHEES_PAR_JOUR
+    // au plus (table acore_characters.coa_artisanat_trophee, migration 2026_10_21_01 : PAS une colonne du registre du
+    // Sourcier, dont EcrireRegistre fait un REPLACE qui remettrait toute colonne non nommee a son defaut).
+    constexpr uint32 SORT_MARQUEUR_LAME_TROPHEE = 9113425;      // talents.py « talent:depecage:sourcier-c:1 »
+    constexpr uint32 TROPHEE_CROC = 9101284;                    // betes
+    constexpr uint32 TROPHEE_ECAILLE = 9101285;                 // draconiens
+    constexpr uint32 TROPHEE_CORNE = 9101286;                   // tout autre type depecable
+    constexpr std::array<uint32, 3> TROPHEES = { TROPHEE_CROC, TROPHEE_ECAILLE, TROPHEE_CORNE };
+    constexpr uint32 TROPHEES_PAR_JOUR = 5;
+    // Re-signer avec l'option TROPHEE : 1 trophee (n'importe lequel des trois) et le composant, au lieu de RESIGNER_RARES
+    // Fragments de resonance. L'artisan n'a pas a connaitre la Lame (le trophee s'achete).
+    constexpr uint32 RESIGNER_TROPHEES = 1;
 }
 
 #endif

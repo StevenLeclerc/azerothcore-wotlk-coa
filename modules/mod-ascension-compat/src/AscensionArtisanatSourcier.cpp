@@ -204,7 +204,7 @@ namespace CoaSourcier
             fin = time_t(r.relanceTs);
         uint32 const ms = uint32(std::max<int64>(1, int64(fin - maintenant))) * IN_MILLISECONDS;
         for (uint32 const sort : { SORT_REVEILLER_FILON, SORT_OUVRIR_FAILLE_TELLURIQUE, SORT_PLANTER_GRAINE_TEMPETE,
-                                   SORT_FAIRE_ECLORE_TOMBES })
+                                   SORT_FAIRE_ECLORE_TOMBES, SORT_SUIVRE_PISTE, SORT_DEPLOYER_LINCEUL })
         {
             if (!sort || !joueur->HasSpell(sort))
                 continue;

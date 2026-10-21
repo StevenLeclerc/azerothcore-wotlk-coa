@@ -4202,7 +4202,10 @@ namespace
     // de l'artisan qui re-signe. Reponses : RESIGNER_OK:<enchant>:<rang> ou RESIGNER_ERR:<cause>[:...].
     // Une piece portee par un autre (liee) ne peut pas lui etre confiee : le service passe par une piece non liee, ou par
     // l'artisan lui-meme (limite connue, l'emplacement « ne sera pas echange » de la fenetre d'echange n'est pas branche).
-    std::string Resigner(Player* joueur, Item* piece, uint32& enchantPose, uint8& rangPose, bool avecPur)
+    // Lot T2 DEPECAGE du Sourcier (21/10) : `avecTrophee` (option TROPHEE) paie 1 trophee de la Lame de trophee
+    // (CoaArtisanatIds::TROPHEES, n'importe lequel des trois) au lieu des RESIGNER_RARES Fragments de resonance ; le reste
+    // du cout (composant d'artisan) et toutes les regles sont inchanges. L'artisan n'a pas a connaitre la Lame.
+    std::string Resigner(Player* joueur, Item* piece, uint32& enchantPose, uint8& rangPose, bool avecPur, bool avecTrophee)
     {
         using namespace CoaArtisanatIds;
         if (Talents.empty() || !TablesPersonnages)
@@ -4269,7 +4272,16 @@ namespace
         if (!composant)
             return "METIER";
         std::string manques;
-        if (uint32 const n = joueur->GetItemCount(MONDE_RARE, false); n < RESIGNER_RARES)
+        uint32 trophee = 0;   // entree du trophee paye (option TROPHEE), 0 sinon
+        if (avecTrophee)
+        {
+            for (uint32 t : TROPHEES)
+                if (!trophee && joueur->GetItemCount(t, false) >= RESIGNER_TROPHEES)
+                    trophee = t;
+            if (!trophee)   // « trophee » : n'importe lequel des trois (l'addon le dit en clair, CoA_Atelier_Logique.lua)
+                manques += Acore::StringFormat("trophee={}", RESIGNER_TROPHEES);
+        }
+        else if (uint32 const n = joueur->GetItemCount(MONDE_RARE, false); n < RESIGNER_RARES)
             manques += Acore::StringFormat("{}={}", MONDE_RARE, RESIGNER_RARES - n);
         if (!joueur->GetItemCount(composant, false))
             manques += Acore::StringFormat("{}{}=1", manques.empty() ? "" : ",", composant);
@@ -4288,7 +4300,10 @@ namespace
             Actives(joueur);   // Garde-lame et passifs a la nouvelle valeur tout de suite, comme OnPlayerEquip
         }
         piece->SetState(ITEM_CHANGED, joueur);
-        joueur->DestroyItemCount(MONDE_RARE, RESIGNER_RARES, true);
+        if (trophee)
+            joueur->DestroyItemCount(trophee, RESIGNER_TROPHEES, true);
+        else
+            joueur->DestroyItemCount(MONDE_RARE, RESIGNER_RARES, true);
         joueur->DestroyItemCount(composant, 1, true);
         uint32 recolteur = 0, purEntree = 0;
         if (pur)
@@ -4304,19 +4319,31 @@ namespace
         rangPose = neuve->rang;
         LOG_INFO("module", "coa artisanat: re-signer joueur={} piece={} ({}) forme={} rang {} -> {} enchant {} -> {} main_constante={} cout={}x{} {}x1 pur={} recolteur={}",
             joueur->GetGUID().GetCounter(), piece->GetGUID().GetCounter(), piece->GetEntry(), actuelle.forme, uint32(actuelle.rang),
-            uint32(neuve->rang), actuelle.enchant, neuve->enchant, constante, MONDE_RARE, RESIGNER_RARES, composant, purEntree, recolteur);
+            uint32(neuve->rang), actuelle.enchant, neuve->enchant, constante, trophee ? trophee : MONDE_RARE,
+            trophee ? RESIGNER_TROPHEES : RESIGNER_RARES, composant, purEntree, recolteur);
         return {};
     }
 
-    // « RESIGNER:<sac>:<case>:<entree>[:PUR] ». Sans « PUR », aucun materiau pur n'est consomme (le joueur le garde pour
-    // la vente ou une autre piece) : Re-signer monte au rang de ses talents, comme avant le lot T. Avec « PUR » (Maj+clic
-    // dans l'Atelier, conception T v2 § 4 « Utiliser un materiau pur »), un pur de son metier donne le rang 4.
+    // « RESIGNER:<sac>:<case>:<entree>[:PUR][:TROPHEE] ». Sans « PUR », aucun materiau pur n'est consomme (le joueur le
+    // garde pour la vente ou une autre piece) : Re-signer monte au rang de ses talents, comme avant le lot T. Avec « PUR »
+    // (Maj+clic dans l'Atelier, conception T v2 § 4 « Utiliser un materiau pur »), un pur de son metier donne le rang 4.
+    // Lot T2 DEPECAGE (21/10) : avec « TROPHEE », 1 trophee de la Lame de trophee remplace les 2 Fragments de resonance.
+    // Les deux options se lisent en fin de message, dans n'importe quel ordre, une fois chacune.
     void TraiterResigner(Player* joueur, std::string_view corps)
     {
-        bool avecPur = false;
-        if (std::size_t const fin = corps.rfind(':'); fin != std::string_view::npos && corps.substr(fin + 1) == "PUR")
+        bool avecPur = false, avecTrophee = false;
+        for (int k = 0; k < 2; ++k)
         {
-            avecPur = true;
+            std::size_t const fin = corps.rfind(':');
+            if (fin == std::string_view::npos)
+                break;
+            std::string_view const option = corps.substr(fin + 1);
+            if (option == "PUR" && !avecPur)
+                avecPur = true;
+            else if (option == "TROPHEE" && !avecTrophee)
+                avecTrophee = true;
+            else
+                break;
             corps = corps.substr(0, fin);
         }
         std::array<std::string_view, 3> champs;
@@ -4337,7 +4364,7 @@ namespace
             return Repondre(joueur, "RESIGNER_ERR:PIECE");
         uint32 enchant = 0;
         uint8 rang = 0;
-        std::string const cause = Resigner(joueur, piece, enchant, rang, avecPur);
+        std::string const cause = Resigner(joueur, piece, enchant, rang, avecPur, avecTrophee);
         if (!cause.empty())
             return Repondre(joueur, "RESIGNER_ERR:" + cause);
         Repondre(joueur, Acore::StringFormat("RESIGNER_OK:{}:{}", enchant, uint32(rang)));

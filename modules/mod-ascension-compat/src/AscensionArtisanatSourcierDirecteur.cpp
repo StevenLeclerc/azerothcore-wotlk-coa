@@ -24,6 +24,9 @@
 //      Recompenses : materiau legendaire au seul specialiste (garanti hebdomadaire a COMPTES_HUMAINS_GARANTI comptes,
 //      sinon CHANCE_COEUR_POUR_CENT : registre et regle du Filon-mere), recompenses de participant (2 par jour, le meme
 //      registre), et pour la Faille tellurique 3 Geodes de foudre que tout le groupe peut miner.
+//      Lot DEPECAGE (21/10) : l'Appel du Linceul (sort 9113905, pivot 9101094, morts 9105040-9105042, Roi spectral 9105043,
+//      Suaire des rois 9101283) : garde de plus, de nuit (HEURE_LINCEUL_DEBUT-FIN, Paris) et a RAYON_CIMETIERE d'un point
+//      d'ame ; recompenses de participant du Glas ; le Suaire part au courrier si le specialiste a quitte la carte.
 //   6. Echec : echeance, groupe entier mort, specialiste tue par un monstre et absent ABSENCE_MAX_S, deconnexion, chef
 //      disparu vivant : regles du Filon-mere (relance a 4 h une fois par jour ; immediate une fois par jour si un humain
 //      adverse a tue le specialiste). Le module ne retire AUCUNE creature du Directeur (un seul proprietaire, P-134) :
@@ -39,10 +42,14 @@
 #include "Chat.h"
 #include "Creature.h"
 #include "DBCStores.h"
+#include "DatabaseEnv.h"
+#include "GameGraveyard.h"
 #include "GameObject.h"
 #include "GameObjectAI.h"
 #include "Group.h"
+#include "Item.h"
 #include "Log.h"
+#include "Mail.h"
 #include "Map.h"
 #include "ObjectAccessor.h"
 #include "ObjectMgr.h"
@@ -68,8 +75,9 @@ namespace
 {
     // ---- La table des mini-evenements de voie Directeur ---------------------------------------------------------------
     //
-    // Lot MINAGE : la Faille tellurique. Lots suivants : Jardin d'orage (sans chef : objectif tenu par le module, a part),
-    // Appel du Linceul (garde d'heure 21:00-06:00 Paris et cimetiere : a ajouter a la garde).
+    // Lot MINAGE : la Faille tellurique. Lot HERBORISTERIE : le Jardin d'orage (sans chef) est a part
+    // (AscensionArtisanatSourcierHerboristerie.cpp). Lot DEPECAGE (21/10) : l'Appel du Linceul, garde d'heure
+    // (HEURE_LINCEUL_DEBUT-FIN, Paris) et cimetiere a RAYON_CIMETIERE (`nuitCimetiere`), recompenses du Glas.
     struct DefDirecteur
     {
         char const* code;                       // texte de la demande (mod-playerbots) et journal
@@ -81,22 +89,37 @@ namespace
         uint32 chef;                            // gabarit du chef : sa mort = victoire
         uint32 dureeS;                          // echeance de la session (presage et marge compris)
         uint32 materiau;                        // materiau legendaire du specialiste
+        uint32 verte, rare, epique;             // recompense de participant (lot DEPECAGE : Orage pour la Faille, Glas)
+        bool nuitCimetiere;                     // lot DEPECAGE : de nuit (Paris) et pres d'un cimetiere seulement
         char const* expediteur;                 // courrier quand les sacs sont pleins
         char const* messageRendu;               // refus du Directeur : lancement rendu
         char const* messageSucces;              // au specialiste, avec le materiau
+        char const* messageSansMateriau;        // au specialiste, succes sans materiau (hors garanti, tirage perdu)
         char const* messageEchec;
         char const* messageRelance;             // echec cause par un humain adverse : relance immediate
     };
 
-    constexpr std::array<DefDirecteur, 1> EVENEMENTS =
+    constexpr std::array<DefDirecteur, 2> EVENEMENTS =
     {{
         { "faille_tellurique", SORT_OUVRIR_FAILLE_TELLURIQUE, SORT_MARQUEUR_FAILLE_TELLURIQUE, GO_FAILLE_TELLURIQUE,
           SCRIPT_FAILLE_TELLURIQUE, PNJ_MENACE_TELLURIQUE, PNJ_GARDIEN_TELLURIQUE, DUREE_TELLURIQUE_S, OBJET_COEUR_DE_FOUDRE,
+          RESSOURCE_VERTE, RESSOURCE_RARE, RESSOURCE_EPIQUE, false,
           "La Faille tellurique",
           "Les forces de la terre ne répondent pas : réessayez plus tard.",
           "La faille se referme et vous livre un Cœur de foudre.",
+          "La faille se referme.",
           "La faille tellurique se referme dans un grondement.",
           "La faille se referme : vous pourrez la rouvrir tout de suite." },
+        // Lot DEPECAGE (21/10) : l'Appel du Linceul (conception § 2.3).
+        { "appel_linceul", SORT_DEPLOYER_LINCEUL, SORT_MARQUEUR_LINCEUL, GO_LINCEUL_ANCIEN, SCRIPT_LINCEUL_ANCIEN,
+          PNJ_MENACE_LINCEUL, PNJ_ROI_SPECTRAL, DUREE_LINCEUL_S, OBJET_SUAIRE_ROIS,
+          RESSOURCE_GLAS_VERTE, RESSOURCE_GLAS_RARE, RESSOURCE_GLAS_EPIQUE, true,
+          "L'Appel du Linceul",
+          "Les morts n'entendent pas l'appel : réessayez plus tard.",
+          "Le Roi spectral retourne à la poussière et vous laisse le Suaire des rois.",
+          "Le Roi spectral retourne à la poussière.",
+          "Le Linceul ancien se déchire.",
+          "Le Linceul ancien se déchire : vous pourrez le déployer de nouveau tout de suite." },
     }};
 
     std::array<bool, EVENEMENTS.size()> Prets{};   // donnees presentes, lu au demarrage (fil monde, avant tout sort)
@@ -127,6 +150,49 @@ namespace
     {
         for (DefDirecteur const& d : EVENEMENTS)
             if (d.chef && d.chef == entree)
+                return true;
+        return false;
+    }
+
+    // Lot DEPECAGE : courrier en BASE (MailReceiver par GUID bas) d'un materiau legendaire autre que le Coeur de foudre
+    // (qui a sa propre file, PosterCoeurs) au specialiste absent de la carte du pivot a la victoire. Vu a la connexion.
+    bool PosterMateriau(ObjectGuid destinataire, uint32 entree, char const* expediteur)
+    {
+        if (!entree || !sObjectMgr->GetItemTemplate(entree))
+            return false;
+        Item* objet = Item::CreateItem(entree, 1, nullptr);
+        if (!objet)
+            return false;
+        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+        MailDraft courrier(expediteur, "Votre récolte légendaire.");
+        objet->SetGuidValue(ITEM_FIELD_CREATOR, destinataire);
+        objet->SaveToDB(trans);
+        courrier.AddItem(objet);
+        courrier.SendMailTo(trans, MailReceiver(destinataire.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
+        CharacterDatabase.CommitTransaction(trans);
+        return true;
+    }
+
+    // Lot DEPECAGE : l'heure de Paris (0-23) de `utc` (DecalageParisS : regle europeenne, independante du fuseau du serveur).
+    uint32 HeureDeParis(time_t utc)
+    {
+        int64 const local = int64(utc) + DecalageParisS(utc);
+        return uint32(((local % 86400) + 86400) % 86400 / 3600);
+    }
+
+    bool DeNuit(time_t utc)
+    {
+        uint32 const h = HeureDeParis(utc);
+        return HEURE_LINCEUL_DEBUT > HEURE_LINCEUL_FIN ? (h >= HEURE_LINCEUL_DEBUT || h < HEURE_LINCEUL_FIN)
+                                                       : (h >= HEURE_LINCEUL_DEBUT && h < HEURE_LINCEUL_FIN);
+    }
+
+    // Un point d'ame (game_graveyard, toutes factions) de la carte du joueur a RAYON_CIMETIERE au plus (meme garde que la
+    // Floraison des tombes ; table chargee au demarrage, lue seulement).
+    bool PresDUnCimetiere(Player const* j)
+    {
+        for (auto const& [id, c] : sGraveyard->GetGraveyardData())
+            if (c.Map == j->GetMapId() && j->GetExactDist2d(c.x, c.y) <= RAYON_CIMETIERE)
                 return true;
         return false;
     }
@@ -399,12 +465,18 @@ namespace
                     remis = PosterCoeurs(_specialiste, 1);
                     voie = "courrier";
                 }
+                else   // lot DEPECAGE : Suaire des rois, specialiste hors de la carte
+                {
+                    remis = PosterMateriau(_specialiste, materiau, _def->expediteur);
+                    voie = "courrier";
+                }
             }
             LOG_INFO("module", "coa sourcier: remise evenement={} pivot={} specialiste={} materiau={} garanti={} obtenu={} remis={} voie={} semaine={} comptes={}",
                 Code(), _pivot.GetCounter(), _specialiste.GetCounter(), materiau, d.garanti ? 1 : 0, d.obtenu ? 1 : 0, remis ? 1 : 0, voie,
                 int32(semaine), uint32(comptes.size()));
             if (s)
-                ChatHandler(s->GetSession()).SendNotification(d.obtenu && _def ? _def->messageSucces : "La faille se referme.");
+                ChatHandler(s->GetSession()).SendNotification(!_def ? "Le mini-événement prend fin." : d.obtenu ? _def->messageSucces
+                    : _def->messageSansMateriau);
 
             // Recompenses de participant (registre commun : RECOMPENSES_PAR_JOUR par jour, tous mini-evenements confondus).
             for (Player* p : humains)
@@ -430,11 +502,11 @@ namespace
                 uint32 const rare = urand(1, 100) <= CHANCE_RARE_POUR_CENT ? 1 : 0;
                 uint32 const epique = urand(1, 1000) <= CHANCE_EPIQUE_POUR_MILLE ? 1 : 0;
                 char const* exp = _def ? _def->expediteur : "Le Sourcier";
-                Donner(p, RESSOURCE_VERTE, RESSOURCES_VERTES, ObjectGuid::Empty, exp);
+                Donner(p, _def ? _def->verte : RESSOURCE_VERTE, RESSOURCES_VERTES, ObjectGuid::Empty, exp);
                 if (rare)
-                    Donner(p, RESSOURCE_RARE, 1, ObjectGuid::Empty, exp);
+                    Donner(p, _def ? _def->rare : RESSOURCE_RARE, 1, ObjectGuid::Empty, exp);
                 if (epique)
-                    Donner(p, RESSOURCE_EPIQUE, 1, ObjectGuid::Empty, exp);
+                    Donner(p, _def ? _def->epique : RESSOURCE_EPIQUE, 1, ObjectGuid::Empty, exp);
                 LOG_INFO("module", "coa sourcier: recompense evenement={} pivot={} joueur={} vertes={} rare={} epique={} du_jour={}/{}", Code(),
                     _pivot.GetCounter(), p->GetGUID().GetCounter(), RESSOURCES_VERTES, rare, epique, rp.recompN, RECOMPENSES_PAR_JOUR);
             }
@@ -585,8 +657,13 @@ namespace
         uint32 const drapeaux = (zone ? zone->flags : 0) | (aire ? aire->flags : 0);
         if ((drapeaux & (AREA_FLAG_CAPITAL | AREA_FLAG_SANCTUARY)) || j->IsInSanctuary())
             return refus("sanctuaire", "Impossible dans une capitale ou un sanctuaire.");
-        Registre const r = LireRegistre(j->GetGUID().GetCounter());
         time_t const maintenant = Maintenant();
+        if (d->nuitCimetiere && !DeNuit(maintenant))
+            return refus("heure", Acore::StringFormat("Le Linceul ne se déploie que la nuit, de {}:00 à {:02}:00 (heure de Paris).",
+                HEURE_LINCEUL_DEBUT, HEURE_LINCEUL_FIN));
+        if (d->nuitCimetiere && !PresDUnCimetiere(j))
+            return refus("cimetiere", "Le Linceul ne se déploie que près d'un cimetière.");
+        Registre const r = LireRegistre(j->GetGUID().GetCounter());
         if (!LancementAccorde(r, maintenant))
         {
             time_t fin = ProchaineRemise(maintenant);
