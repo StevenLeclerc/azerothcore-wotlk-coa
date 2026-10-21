@@ -64,10 +64,12 @@
 #include "WorldSession.h"
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <ctime>
 #include <map>
 #include <mutex>
 #include <set>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -226,25 +228,45 @@ namespace CoaSourcier
         uint32 carte = 0;
         uint32 instance = 0;
         float x = 0.0f, y = 0.0f;
+        bool voieDirecteur = false;
     };
     std::mutex VerrouActifs;
     std::vector<EvenementActif> Actifs;
     std::atomic<uint32> NombreActifs{ 0 };    // lu sans verrou par les crochets frequents (soins) pour sortir tot
     bool GabaritsPresents = false;            // Filon (avec son script) et Colosse en base, lu au demarrage
 
-    bool EvenementProche(uint32 carte, uint32 instance, float x, float y)
+    bool EvenementProche(uint32 carte, uint32 instance, float x, float y, float rayon)
     {
         std::lock_guard<std::mutex> verrou(VerrouActifs);
         for (EvenementActif const& e : Actifs)
-            if (e.carte == carte && e.instance == instance && (e.x - x) * (e.x - x) + (e.y - y) * (e.y - y) <= RAYON_EXCLUSIF * RAYON_EXCLUSIF)
+            if (e.carte == carte && e.instance == instance && (e.x - x) * (e.x - x) + (e.y - y) * (e.y - y) <= rayon * rayon)
                 return true;
         return false;
     }
 
-    void InscrireActif(WorldObject* filon)
+    bool PivotLePlusProche(ObjectGuid pivot, uint32 carte, uint32 instance, float x, float y)
     {
         std::lock_guard<std::mutex> verrou(VerrouActifs);
-        Actifs.push_back({ filon->GetGUID(), filon->GetMapId(), filon->GetInstanceId(), filon->GetPositionX(), filon->GetPositionY() });
+        float moi = -1.0f, meilleur = -1.0f;
+        for (EvenementActif const& e : Actifs)
+        {
+            if (e.carte != carte || e.instance != instance)
+                continue;
+            float const d = (e.x - x) * (e.x - x) + (e.y - y) * (e.y - y);
+            if (e.filon == pivot)
+                moi = d;
+            else if (e.voieDirecteur && (meilleur < 0.0f || d < meilleur))
+                meilleur = d;
+        }
+        // Pivot non inscrit (retire entre-temps) : il n'adopte plus ; seul de sa carte : il adopte.
+        return moi >= 0.0f && (meilleur < 0.0f || moi <= meilleur);
+    }
+
+    void InscrireActif(WorldObject* filon, bool voieDirecteur)
+    {
+        std::lock_guard<std::mutex> verrou(VerrouActifs);
+        Actifs.push_back({ filon->GetGUID(), filon->GetMapId(), filon->GetInstanceId(), filon->GetPositionX(), filon->GetPositionY(),
+            voieDirecteur });
         NombreActifs = uint32(Actifs.size());
     }
 
@@ -324,32 +346,45 @@ namespace CoaSourcier
         return !restant;
     }
 
-    // ---- Coeurs de foudre a remettre a un specialiste connecte sur une autre carte (constat 14) -------------------------
+    // ---- Materiaux legendaires a remettre a un specialiste connecte sur une autre carte (constat 14) ------------------
     //
     // Le courrier par GUID seul (MailReceiver(lowGuid)) n'entre qu'en base : un joueur deja en ligne ne le voit qu'a sa
     // reconnexion (Mail.cpp:255-260, courriers charges a la connexion). On note donc la remise par GUID, sous verrou (le
-    // Filon et le joueur sont sur deux fils de carte), et le joueur la prend sur SON fil : ViderRemises.
+    // pivot et le joueur sont sur deux fils de carte), et le joueur la prend sur SON fil : ViderRemises.
+    // Integration T2 (21/10, revues MINAGE 10, HERBORISTERIE 6, DEPECAGE 4) : la file porte TOUT materiau legendaire
+    // (Coeur de foudre, Fleur-tempete, Fleur d'eternite, Peau de legende, Suaire des rois), avec son expediteur.
+    struct RemiseEnFile
+    {
+        uint32 entree = 0;
+        uint32 n = 0;
+        std::string expediteur;
+    };
     std::mutex VerrouRemises;
-    std::map<ObjectGuid, uint32> RemisesCoeur;   // specialiste -> Coeurs en attente
+    std::map<ObjectGuid, std::vector<RemiseEnFile>> Remises;   // specialiste -> materiaux en attente
     std::atomic<uint32> NombreRemises{ 0 };      // lu sans verrou a chaque mise a jour de joueur pour sortir tot
 
+    char const* const EXPEDITEUR_FILON = "Le Filon-mère";
+
     // Courrier en BASE seulement (MailReceiver par GUID) : vu a la prochaine connexion. N'ecrit sur aucun objet en memoire :
-    // appelable de tout fil. Rend vrai si tous les Coeurs sont partis.
-    bool PosterCoeurs(ObjectGuid specialiste, uint32 n)
+    // appelable de tout fil. Rend vrai si tous les objets sont partis.
+    bool PosterMateriauLegendaire(ObjectGuid specialiste, uint32 entree, uint32 n, char const* expediteur)
     {
-        if (!OBJET_COEUR_DE_FOUDRE || !n)
+        if (!entree || !n || !sObjectMgr->GetItemTemplate(entree))
             return false;
+        bool const coeurDuFilon = entree == OBJET_COEUR_DE_FOUDRE && std::string_view(expediteur) == EXPEDITEUR_FILON;
+        std::string const objet = coeurDuFilon ? std::string("Le Filon-mère vous livre un Cœur de foudre.")
+            : Acore::StringFormat("{} vous livre votre récolte légendaire.", expediteur);
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        MailDraft courrier("Le Filon-mère", "Le Filon-mère vous livre un Cœur de foudre.");
+        MailDraft courrier(expediteur, objet);
         uint32 poses = 0;
         for (; poses < n; ++poses)
         {
-            Item* coeur = Item::CreateItem(OBJET_COEUR_DE_FOUDRE, 1, nullptr);
-            if (!coeur)
+            Item* it = Item::CreateItem(entree, 1, nullptr);
+            if (!it)
                 break;
-            coeur->SetGuidValue(ITEM_FIELD_CREATOR, specialiste);
-            coeur->SaveToDB(trans);
-            courrier.AddItem(coeur);
+            it->SetGuidValue(ITEM_FIELD_CREATOR, specialiste);
+            it->SaveToDB(trans);
+            courrier.AddItem(it);
         }
         if (!poses)
             return false;
@@ -358,37 +393,151 @@ namespace CoaSourcier
         return poses == n;
     }
 
-    void MettreEnFile(ObjectGuid specialiste)
+    bool PosterCoeurs(ObjectGuid specialiste, uint32 n)
     {
-        std::lock_guard<std::mutex> verrou(VerrouRemises);
-        ++RemisesCoeur[specialiste];
-        NombreRemises = uint32(RemisesCoeur.size());
+        return OBJET_COEUR_DE_FOUDRE && PosterMateriauLegendaire(specialiste, OBJET_COEUR_DE_FOUDRE, n, EXPEDITEUR_FILON);
     }
 
-    // Fil du joueur (mise a jour, connexion, avant deconnexion) : remet les Coeurs en attente et le previent.
+    void MettreEnFileObjet(ObjectGuid specialiste, uint32 entree, uint32 n, char const* expediteur)
+    {
+        if (!entree || !n)
+            return;
+        std::lock_guard<std::mutex> verrou(VerrouRemises);
+        std::vector<RemiseEnFile>& file = Remises[specialiste];
+        for (RemiseEnFile& r : file)
+            if (r.entree == entree && r.expediteur == expediteur)
+            {
+                r.n += n;
+                return;
+            }
+        file.push_back({ entree, n, expediteur });
+        NombreRemises = uint32(Remises.size());
+    }
+
+    void MettreEnFile(ObjectGuid specialiste)
+    {
+        MettreEnFileObjet(specialiste, OBJET_COEUR_DE_FOUDRE, 1, EXPEDITEUR_FILON);
+    }
+
+    char const* RemettreMateriau(Player* surCarte, ObjectGuid specialiste, uint32 entree, char const* expediteur, bool& remis)
+    {
+        remis = false;
+        if (!entree)
+            return "aucune";
+        if (surCarte)
+        {
+            remis = Donner(surCarte, entree, 1, surCarte->GetGUID(), expediteur);
+            return "sacs";
+        }
+        // FindConnectedPlayer ne sert qu'a le savoir en ligne : rien n'est lu ni ecrit sur lui ici (P-137).
+        if (ObjectAccessor::FindConnectedPlayer(specialiste))
+        {
+            MettreEnFileObjet(specialiste, entree, 1, expediteur);
+            remis = true;
+            return "file";
+        }
+        remis = PosterMateriauLegendaire(specialiste, entree, 1, expediteur);
+        return "courrier";
+    }
+
+    // Fil du joueur (mise a jour, connexion, avant deconnexion) : remet les materiaux en attente et le previent.
     void ViderRemises(Player* j, char const* moment)
     {
         if (!NombreRemises.load(std::memory_order_relaxed) || !j)
             return;
-        uint32 n = 0;
+        std::vector<RemiseEnFile> file;
         {
             std::lock_guard<std::mutex> verrou(VerrouRemises);
-            auto it = RemisesCoeur.find(j->GetGUID());
-            if (it == RemisesCoeur.end())
+            auto it = Remises.find(j->GetGUID());
+            if (it == Remises.end())
                 return;
-            n = it->second;
-            RemisesCoeur.erase(it);
-            NombreRemises = uint32(RemisesCoeur.size());
+            file = std::move(it->second);
+            Remises.erase(it);
+            NombreRemises = uint32(Remises.size());
         }
         // A la deconnexion, la sauvegarde qui suit peut ne pas avoir lieu (LogoutPlayer(save = false)) : courrier en base,
         // independant de cette sauvegarde. Sinon, dans les sacs (ou courrier en memoire s'ils sont pleins, Donner).
         bool const deconnexion = std::string_view(moment) == "deconnexion";
-        bool const remis = deconnexion ? PosterCoeurs(j->GetGUID(), n)
-            : (OBJET_COEUR_DE_FOUDRE && Donner(j, OBJET_COEUR_DE_FOUDRE, n, j->GetGUID()));
-        LOG_INFO("module", "coa sourcier: remise differee joueur={} coeurs={} moment={} voie={} remis={}", j->GetGUID().GetCounter(), n,
-            moment, deconnexion ? "courrier" : "sacs", remis ? 1 : 0);
-        if (remis && !deconnexion && j->GetSession())
-            ChatHandler(j->GetSession()).SendNotification("Le Filon-mère vous livre un Cœur de foudre.");
+        for (RemiseEnFile const& r : file)
+        {
+            bool const remis = deconnexion ? PosterMateriauLegendaire(j->GetGUID(), r.entree, r.n, r.expediteur.c_str())
+                : Donner(j, r.entree, r.n, j->GetGUID(), r.expediteur.c_str());
+            LOG_INFO("module", "coa sourcier: remise differee joueur={} objet={} n={} expediteur=\"{}\" moment={} voie={} remis={}",
+                j->GetGUID().GetCounter(), r.entree, r.n, r.expediteur, moment, deconnexion ? "courrier" : "sacs", remis ? 1 : 0);
+            if (remis && !deconnexion && j->GetSession())
+                ChatHandler(j->GetSession()).SendNotification(r.entree == OBJET_COEUR_DE_FOUDRE && r.expediteur == EXPEDITEUR_FILON
+                    ? std::string("Le Filon-mère vous livre un Cœur de foudre.")
+                    : Acore::StringFormat("{} vous livre votre récolte légendaire.", r.expediteur));
+        }
+    }
+
+    // ---- Sessions persistees (integration T2, 21/10 : revues MINAGE 5, HERBORISTERIE 9, DEPECAGE 8) --------------------
+
+    bool TableSessions = false;
+
+    void OuvrirSession(ObjectGuid pivot, ObjectGuid specialiste, char const* evenement, Registre const& avant)
+    {
+        if (!TableSessions)
+            return;
+        // DirectExecute : la ligne existe avant que le Directeur ne lise la demande (meme instant que le registre).
+        CharacterDatabase.DirectExecute("INSERT INTO coa_artisanat_sourcier_session (pivot, guid, evenement, debut, etat, jour_avant, "
+            "relance_avant) VALUES ({}, {}, '{}', {}, 'en_cours', {}, {})", pivot.GetRawValue(), specialiste.GetCounter(), evenement,
+            uint32(Maintenant()), int32(avant.jourLance), avant.relanceTs);
+    }
+
+    void FermerSession(ObjectGuid pivot, char const* etat)
+    {
+        if (!TableSessions || !pivot)
+            return;
+        std::string e(etat ? etat : "fin");
+        e.erase(std::remove_if(e.begin(), e.end(), [](char c) { return !(std::isalnum(uint8(c)) || c == '_'); }), e.end());
+        if (e.size() > 24)
+            e.resize(24);
+        CharacterDatabase.DirectExecute("UPDATE coa_artisanat_sourcier_session SET etat = '{}', fin = {} WHERE pivot = {} AND etat = 'en_cours'",
+            e.empty() ? "fin" : e, uint32(Maintenant()), pivot.GetRawValue());
+    }
+
+    // Fil monde, au demarrage, avant tout sort : aucune session ne peut etre vivante. Le lancement de chaque session tuee
+    // est rendu si le registre porte encore son jour (un participant a pu ecrire depuis : on ne touche qu'aux deux champs).
+    void RendreSessionsInterrompues()
+    {
+        if (!TableSessions)
+            return;
+        uint32 rendues = 0, vues = 0;
+        if (QueryResult q = CharacterDatabase.Query("SELECT id, guid, evenement, debut, jour_avant, relance_avant FROM "
+            "coa_artisanat_sourcier_session WHERE etat = 'en_cours'"))
+        {
+            do
+            {
+                Field* f = q->Fetch();
+                uint32 const id = f[0].Get<uint32>();
+                uint32 const guid = f[1].Get<uint32>();
+                std::string const evenement = f[2].Get<std::string>();
+                uint32 const debut = f[3].Get<uint32>();
+                ++vues;
+                bool rendue = false;
+                if (TableRegistre)
+                {
+                    Registre r = LireRegistre(guid);
+                    if (r.jourLance == JourDeJeu(time_t(debut)))
+                    {
+                        r.jourLance = f[4].Get<int32>();
+                        r.relanceTs = f[5].Get<uint32>();
+                        EcrireRegistre(guid, r);
+                        rendue = true;
+                        ++rendues;
+                    }
+                }
+                CharacterDatabase.DirectExecute("UPDATE coa_artisanat_sourcier_session SET etat = 'interrompu', fin = {} WHERE id = {}",
+                    uint32(Maintenant()), id);
+                LOG_INFO("module", "coa sourcier: session interrompue par un redemarrage evenement={} specialiste={} debut={} lancement_rendu={}",
+                    evenement, guid, HeureParis(time_t(debut)), rendue ? 1 : 0);
+            } while (q->NextRow());
+        }
+        // Menage : 30 jours d'historique.
+        CharacterDatabase.DirectExecute("DELETE FROM coa_artisanat_sourcier_session WHERE etat <> 'en_cours' AND debut < {}",
+            uint32(Maintenant() - 30 * 86400));
+        LOG_INFO("module", "coa sourcier: sessions table presente ; interrompues {} ; lancements rendus {}", vues, rendues);
     }
 
     // Le Coeur garanti, puis la chance : decision pure (le banc la rejoue sans rien ecrire). DecisionCoeur : socle.
@@ -801,6 +950,7 @@ namespace
                 colosseRetire = true;
             }
             RetirerActif(_filon);
+            FermerSession(_filon, raison);
             LOG_INFO("module", "coa sourcier: nettoyage filon={} raison={} colosse_retire={}", _filon.GetCounter(), raison, colosseRetire ? 1 : 0);
             me->SetRespawnTime(0);
             me->Delete();
@@ -958,6 +1108,7 @@ namespace
                 return;   // deja refuse par CheckCast ; un lancement force (MJ, declenche) qui ne passe pas ne fait rien
             time_t const maintenant = Maintenant();
             Registre r = LireRegistre(j->GetGUID().GetCounter());
+            Registre const avant = r;
             Position const pos = veine->GetPosition();
             GameObject* filon = j->GetMap()->SummonGameObject(GO_FILON_MERE, pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ(),
                 pos.GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, DUREE_MAX_S + GRACE_FIN_S + 300);
@@ -980,6 +1131,7 @@ namespace
             EcrireRegistre(j->GetGUID().GetCounter(), r);
             veine->DespawnOrUnsummon(0ms, Seconds(DUREE_MAX_S + GRACE_FIN_S));
             ai->Demarrer(j, veine);
+            OuvrirSession(filon->GetGUID(), j->GetGUID(), "filon_mere", avant);
             AfficherRecharge(j, r);
         }
     };
@@ -1103,6 +1255,13 @@ namespace
             if (TableRegistre && !ColonneRelanceJcj)
                 LOG_ERROR("module", "coa sourcier: colonne relance_jcj_jour ABSENTE (migration 2026_10_16_01 non appliquee) : aucune relance "
                     "immediate apres une mort en JcJ, echec ordinaire");
+            TableSessions = bool(CharacterDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() "
+                "AND TABLE_NAME = 'coa_artisanat_sourcier_session'"));
+            if (TableSessions)
+                RendreSessionsInterrompues();
+            else
+                LOG_INFO("module", "coa sourcier: sessions table coa_artisanat_sourcier_session ABSENTE (migration 2026_10_21_02 non appliquee) : "
+                    "un redemarrage pendant un mini-evenement coute sa journee au specialiste, et le Directeur ne voit pas la fin d'une session");
             GameObjectTemplate const* go = GO_FILON_MERE ? sObjectMgr->GetGameObjectTemplate(GO_FILON_MERE) : nullptr;
             bool const scriptOk = go && go->ScriptId == sObjectMgr->GetScriptId(SCRIPT_FILON_MERE);
             GabaritsPresents = scriptOk && PNJ_COLOSSE_ORAGE && sObjectMgr->GetCreatureTemplate(PNJ_COLOSSE_ORAGE);

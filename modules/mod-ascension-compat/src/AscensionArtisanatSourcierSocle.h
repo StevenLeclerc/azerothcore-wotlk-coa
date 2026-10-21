@@ -21,6 +21,7 @@
 #ifndef COA_ASCENSION_ARTISANAT_SOURCIER_SOCLE_H
 #define COA_ASCENSION_ARTISANAT_SOURCIER_SOCLE_H
 
+#include "AscensionArtisanatIds.h"
 #include "DataMap.h"
 #include "Define.h"
 #include "ObjectGuid.h"
@@ -64,9 +65,16 @@ namespace CoaSourcier
 
     // ---- Exclusivite (toutes cartes, sous verrou) ----
     extern std::atomic<uint32> NombreActifs;
-    bool EvenementProche(uint32 carte, uint32 instance, float x, float y);
+    // Integration T2 (21/10) : `rayon` (RAYON_EXCLUSIF par defaut ; RAYON_EXCLUSIF_DIRECTEUR pour un lancement de voie
+    // Directeur, plus large que deux rayons d'adoption : deux pivots ne s'adoptent jamais leurs creatures).
+    bool EvenementProche(uint32 carte, uint32 instance, float x, float y, float rayon = CoaArtisanatIds::RAYON_EXCLUSIF);
+    // Vrai si `pivot` est, parmi les evenements actifs DE VOIE DIRECTEUR de la carte, le plus proche de (x, y) (ou le
+    // seul) : une creature du Directeur n'est adoptee que par le pivot le plus proche d'elle.
+    bool PivotLePlusProche(ObjectGuid pivot, uint32 carte, uint32 instance, float x, float y);
     // T2 HERBORISTERIE (21/10) : WorldObject, le pivot du Jardin d'orage est une creature (la Graine-tempete).
-    void InscrireActif(WorldObject* pivot);
+    // Integration T2 : `voieDirecteur` (Faille tellurique, Appel du Linceul) : seuls ces pivots se disputent les creatures
+    // du Directeur (PivotLePlusProche ne compare qu'eux).
+    void InscrireActif(WorldObject* pivot, bool voieDirecteur = false);
     void RetirerActif(ObjectGuid pivot);
 
     // ---- Marque d'unite -> objet pivot (CustomData, fil de la carte) ----
@@ -87,6 +95,26 @@ namespace CoaSourcier
     // ---- Coeur de foudre d'un specialiste hors de la carte ----
     bool PosterCoeurs(ObjectGuid specialiste, uint32 n);
     void MettreEnFile(ObjectGuid specialiste);
+
+    // ---- Integration T2 (21/10) : tout materiau legendaire d'un specialiste hors de la carte du pivot ----
+    // Courrier en BASE seulement (MailReceiver par GUID) : vu a la prochaine connexion. Appelable de tout fil.
+    bool PosterMateriauLegendaire(ObjectGuid specialiste, uint32 entree, uint32 n, char const* expediteur);
+    // File (sous verrou) videe sur le fil du joueur (ViderRemises : sacs, ou courrier a la deconnexion).
+    void MettreEnFileObjet(ObjectGuid specialiste, uint32 entree, uint32 n, char const* expediteur);
+    // La remise du materiau legendaire, quelle que soit la place du specialiste : `surCarte` (non nul : sur la carte du
+    // pivot) -> sacs ; connecte ailleurs -> file ; hors ligne -> courrier. -> la voie (« sacs », « file », « courrier »).
+    char const* RemettreMateriau(Player* surCarte, ObjectGuid specialiste, uint32 entree, char const* expediteur, bool& remis);
+
+    // ---- Integration T2 (21/10) : sessions persistees (acore_characters.coa_artisanat_sourcier_session) ----
+    // Une ligne par session ouverte (etat « en_cours ») ; fermee avec sa raison (succes, rendu, echec...). Au demarrage du
+    // monde, toute ligne encore « en_cours » est une session tuee par un redemarrage : son lancement est RENDU (champs de
+    // lancement du registre remis a leur valeur d'avant) et elle passe « interrompu ». Le Directeur (exploitation/directeur/
+    // sourcier_fin.py) lit cette table pour arreter ses vagues quand la session du module est finie. Table absente :
+    // rien n'est ecrit (comportement d'avant).
+    extern bool TableSessions;
+    void OuvrirSession(ObjectGuid pivot, ObjectGuid specialiste, char const* evenement, Registre const& avant);
+    void FermerSession(ObjectGuid pivot, char const* etat);
+    void RendreSessionsInterrompues();
 
     // ---- Le materiau legendaire : garanti hebdomadaire a COMPTES_HUMAINS_GARANTI comptes, sinon la chance ----
     struct DecisionCoeur

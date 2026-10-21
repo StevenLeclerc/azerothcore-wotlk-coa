@@ -31,6 +31,12 @@
 //      disparu vivant : regles du Filon-mere (relance a 4 h une fois par jour ; immediate une fois par jour si un humain
 //      adverse a tue le specialiste). Le module ne retire AUCUNE creature du Directeur (un seul proprietaire, P-134) :
 //      elles s'eteignent a l'echeance du service.
+// Integration T2 (21/10, corrections des revues) : adoption autour du pivot OU du specialiste, par le pivot actif le plus
+// proche seulement, exclusivite de RAYON_EXCLUSIF_DIRECTEUR entre lancements de voie Directeur ; echeance comptee aussi
+// depuis la premiere menace ; chef jamais sorti a l'echeance = lancement RENDU (panne du service, pas faute du joueur) ;
+// bots refuses ; garde de nuit du Linceul toleree 10 s au lancement (incantation de 3 s) ; materiau remis par la file
+// commune (RemettreMateriau) ; session persistee (OuvrirSession / FermerSession) : un redemarrage rend le lancement, et le
+// Directeur arrete ses vagues des que la session est finie (sourcier_fin.py).
 // Journal : « coa sourcier: ... evenement=<code> pivot=<guid> ... » (lancement, menace, adoption chef, rendu, succes, echec,
 // remise, recompense, geodes, nettoyage).
 //
@@ -154,25 +160,6 @@ namespace
         return false;
     }
 
-    // Lot DEPECAGE : courrier en BASE (MailReceiver par GUID bas) d'un materiau legendaire autre que le Coeur de foudre
-    // (qui a sa propre file, PosterCoeurs) au specialiste absent de la carte du pivot a la victoire. Vu a la connexion.
-    bool PosterMateriau(ObjectGuid destinataire, uint32 entree, char const* expediteur)
-    {
-        if (!entree || !sObjectMgr->GetItemTemplate(entree))
-            return false;
-        Item* objet = Item::CreateItem(entree, 1, nullptr);
-        if (!objet)
-            return false;
-        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        MailDraft courrier(expediteur, "Votre récolte légendaire.");
-        objet->SetGuidValue(ITEM_FIELD_CREATOR, destinataire);
-        objet->SaveToDB(trans);
-        courrier.AddItem(objet);
-        courrier.SendMailTo(trans, MailReceiver(destinataire.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-        CharacterDatabase.CommitTransaction(trans);
-        return true;
-    }
-
     // Lot DEPECAGE : l'heure de Paris (0-23) de `utc` (DecalageParisS : regle europeenne, independante du fuseau du serveur).
     uint32 HeureDeParis(time_t utc)
     {
@@ -224,7 +211,8 @@ namespace
             _avantRelance = avant.relanceTs;
             _phase = Phase::Appel;
             Marquer(specialiste, _pivot);
-            InscrireActif(me);
+            InscrireActif(me, true);
+            OuvrirSession(_pivot, _specialiste, Code(), avant);
             LOG_INFO("module", "coa sourcier: lancement evenement={} specialiste={} pivot={} carte={} x={:.1f} y={:.1f} attente_max_s={} duree_s={}",
                 Code(), _specialiste.GetCounter(), _pivot.GetCounter(), me->GetMapId(), me->GetPositionX(), me->GetPositionY(),
                 ATTENTE_DEBUT_S, _def ? _def->dureeS : 0);
@@ -287,24 +275,10 @@ namespace
     private:
         char const* Code() const { return _def ? _def->code : "inconnu"; }
 
-        static uint32 HumainsDuGroupe(Player* specialiste, float rayon)
-        {
-            uint32 n = 0;
-            if (Group* g = specialiste->GetGroup())
-            {
-                for (GroupReference* ref = g->GetFirstMember(); ref; ref = ref->next())
-                    if (Player* m = ref->GetSource())
-                        if (EstHumain(m) && m->IsInWorld() && m->GetMap() == specialiste->GetMap() && m->IsAlive()
-                            && m->IsWithinDist(specialiste, rayon))
-                            ++n;
-            }
-            else if (EstHumain(specialiste))
-                n = 1;
-            return n;
-        }
-
-        // Toutes les ADOPTION_PERIODE_MS : les creatures des gabarits reserves de l'evenement a RAYON_ADOPTION du pivot.
-        // Seule la carte du pivot est lue (P-137). Une creature deja marquee pour un AUTRE pivot est laissee.
+        // Toutes les ADOPTION_PERIODE_MS : les creatures des gabarits reserves de l'evenement a RAYON_ADOPTION du pivot OU
+        // du specialiste (sur la carte du pivot : le Directeur pose son chef pres du joueur et sa faille le suit). Seule la
+        // carte du pivot est lue (P-137). Une creature deja marquee pour un AUTRE pivot est laissee ; une creature libre
+        // n'est prise que si ce pivot est l'evenement actif le plus proche d'elle (deux sessions voisines ne se volent rien).
         void Adopter()
         {
             if (!_def)
@@ -317,8 +291,18 @@ namespace
                 entrees.push_back(_def->chef);
             std::list<Creature*> trouvees;
             me->GetCreatureListWithEntryInGrid(trouvees, entrees, RAYON_ADOPTION);
+            if (Player* s = ObjectAccessor::GetPlayer(*me, _specialiste))
+                if (s->IsInWorld() && s->GetMap() == me->GetMap() && !s->IsWithinDist(me, RAYON_ADOPTION))
+                {
+                    std::list<Creature*> pres;
+                    s->GetCreatureListWithEntryInGrid(pres, entrees, RAYON_ADOPTION);
+                    trouvees.splice(trouvees.end(), pres);
+                }
+            std::set<ObjectGuid> vues;
             for (Creature* c : trouvees)
             {
+                if (!vues.insert(c->GetGUID()).second)
+                    continue;
                 ObjectGuid const p = PivotDe(c);
                 if (p == _pivot)
                     continue;
@@ -326,26 +310,52 @@ namespace
                 // autre pivot, jamais.
                 if (p || (!c->IsAlive() && c->GetEntry() != _def->chef))
                     continue;
+                if (!PivotLePlusProche(_pivot, c->GetMapId(), c->GetInstanceId(), c->GetPositionX(), c->GetPositionY()))
+                    continue;
                 Marquer(c, _pivot);
                 ++_adoptees;
                 if (c->GetEntry() == _def->chef && !_chef)
                 {
                     _chef = c->GetGUID();
-                    LOG_INFO("module", "coa sourcier: chef evenement={} pivot={} chef={} entree={} pv={} vivant={}", Code(),
-                        _pivot.GetCounter(), _chef.GetCounter(), c->GetEntry(), c->GetMaxHealth(), c->IsAlive() ? 1 : 0);
+                    LOG_INFO("module", "coa sourcier: chef evenement={} pivot={} chef={} entree={} pv={} vivant={} distance_pivot={:.0f}", Code(),
+                        _pivot.GetCounter(), _chef.GetCounter(), c->GetEntry(), c->GetMaxHealth(), c->IsAlive() ? 1 : 0, c->GetExactDist2d(me));
                     _seuilParticipation = std::max<uint32>(1, uint32(uint64(c->GetMaxHealth()) * PART_PARTICIPATION_POUR_MILLE / 1000));
                 }
                 if (_phase == Phase::Appel)
                 {
                     _phase = Phase::Combat;
-                    LOG_INFO("module", "coa sourcier: menace evenement={} pivot={} premiere={} apres_s={}", Code(), _pivot.GetCounter(),
-                        c->GetEntry(), uint32(Maintenant() - _debut));
+                    _premiere = Maintenant();
+                    LOG_INFO("module", "coa sourcier: menace evenement={} pivot={} premiere={} apres_s={} echeance_s={}", Code(), _pivot.GetCounter(),
+                        c->GetEntry(), uint32(_premiere - _debut), uint32(Echeance() - _debut));
                 }
             }
             if (_phase == Phase::Combat && _chef)
                 if (Creature* c = ObjectAccessor::GetCreature(*me, _chef))
                     if (!c->IsAlive())
                         Reussir();
+        }
+
+        // La plus tardive de (sort + dureeS) et (premiere menace + dureeS - marge) : voir ECHEANCE_APRES_MENACE_MARGE_S.
+        time_t Echeance() const
+        {
+            uint32 const duree = _def ? _def->dureeS : 0;
+            time_t e = _debut + time_t(duree);
+            if (_premiere && duree > ECHEANCE_APRES_MENACE_MARGE_S)
+                e = std::max(e, _premiere + time_t(duree - ECHEANCE_APRES_MENACE_MARGE_S));
+            return e;
+        }
+
+        // Pres de l'action : a RAYON_PARTICIPATION du pivot, ou du chef adopte (le combat a pu s'eloigner du pivot).
+        bool Proche(WorldObject const* o) const
+        {
+            if (!o || o->GetMap() != me->GetMap())
+                return false;
+            if (o->IsWithinDist(me, RAYON_PARTICIPATION))
+                return true;
+            if (_chef)
+                if (Creature const* c = ObjectAccessor::GetCreature(*me, _chef))
+                    return o->IsWithinDist(c, RAYON_PARTICIPATION);
+            return false;
         }
 
         // Une fois par seconde.
@@ -363,7 +373,7 @@ namespace
             }
             if (!s && !ObjectAccessor::FindConnectedPlayer(_specialiste))
                 return Echouer("deconnexion", false);
-            bool const present = s && s->IsAlive() && s->IsWithinDist(me, RAYON_PARTICIPATION);
+            bool const present = s && s->IsAlive() && Proche(s);
             if (s && s->GetGroup())
                 _groupe = s->GetGroup()->GetGUID();
             if (present)
@@ -375,8 +385,15 @@ namespace
                 return Echouer("specialiste", false);
             if (!present && !GroupeEnVie())
                 return Echouer("groupe", _mortParJoueur);
-            if (maintenant - _debut >= time_t(_def ? _def->dureeS : 0))
-                return Echouer("temps", false);
+            if (maintenant >= Echeance())
+            {
+                // Le chef n'est jamais sorti (EvenementGardien a 0, plafond d'invoques, enfant du Directeur mort, aucun
+                // humain a 60 yd au recompte) : panne du service, pas faute du joueur -> lancement RENDU (revue MINAGE 3).
+                if (!_chef)
+                    return Rendre("chef_absent");
+                // Specialiste tue par un humain adverse et pas encore revenu : la relance immediate du Filon-mere.
+                return Echouer("temps", _specialisteMortA && _mortParJoueur);
+            }
             if (_chef)
             {
                 Creature* c = ObjectAccessor::GetCreature(*me, _chef);
@@ -396,7 +413,7 @@ namespace
                         continue;
                     if (m->GetGUID() == _specialiste)
                         return true;
-                    if (_groupe && m->GetGroup() && m->GetGroup()->GetGUID() == _groupe && m->IsWithinDist(me, RAYON_PARTICIPATION))
+                    if (_groupe && m->GetGroup() && m->GetGroup()->GetGUID() == _groupe && Proche(m))
                         return true;
                 }
             return false;
@@ -421,7 +438,7 @@ namespace
                 if (Group* g = s->GetGroup())
                     for (GroupReference* ref = g->GetFirstMember(); ref; ref = ref->next())
                         if (Player* m = ref->GetSource())
-                            if (EstHumain(m) && m->IsInWorld() && m->GetMap() == me->GetMap() && m->IsWithinDist(me, RAYON_PARTICIPATION))
+                            if (EstHumain(m) && m->IsInWorld() && Proche(m))
                                 participants.insert(m->GetGUID());
             }
             for (auto const& [g, montant] : _credits)
@@ -448,29 +465,7 @@ namespace
             bool remis = false;
             char const* voie = "aucune";
             if (d.obtenu && materiau)
-            {
-                if (s)
-                {
-                    remis = Donner(s, materiau, 1, s->GetGUID(), _def->expediteur);
-                    voie = "sacs";
-                }
-                else if (materiau == OBJET_COEUR_DE_FOUDRE && ObjectAccessor::FindConnectedPlayer(_specialiste))
-                {
-                    MettreEnFile(_specialiste);   // videe sur le fil du joueur (AscensionArtisanatSourcier.cpp, ViderRemises)
-                    remis = true;
-                    voie = "file";
-                }
-                else if (materiau == OBJET_COEUR_DE_FOUDRE)
-                {
-                    remis = PosterCoeurs(_specialiste, 1);
-                    voie = "courrier";
-                }
-                else   // lot DEPECAGE : Suaire des rois, specialiste hors de la carte
-                {
-                    remis = PosterMateriau(_specialiste, materiau, _def->expediteur);
-                    voie = "courrier";
-                }
-            }
+                voie = RemettreMateriau(s, _specialiste, materiau, _def->expediteur, remis);
             LOG_INFO("module", "coa sourcier: remise evenement={} pivot={} specialiste={} materiau={} garanti={} obtenu={} remis={} voie={} semaine={} comptes={}",
                 Code(), _pivot.GetCounter(), _specialiste.GetCounter(), materiau, d.garanti ? 1 : 0, d.obtenu ? 1 : 0, remis ? 1 : 0, voie,
                 int32(semaine), uint32(comptes.size()));
@@ -598,6 +593,7 @@ namespace
         {
             _phase = Phase::Fini;
             RetirerActif(_pivot);
+            FermerSession(_pivot, raison);
             LOG_INFO("module", "coa sourcier: nettoyage evenement={} pivot={} raison={}", Code(), _pivot.GetCounter(), raison);
             me->SetRespawnTime(0);
             me->Delete();
@@ -607,7 +603,7 @@ namespace
         Phase _phase = Phase::Attente;
         ObjectGuid _pivot, _specialiste, _groupe, _chef;
         TeamId _equipe = TEAM_NEUTRAL;
-        time_t _debut = 0, _specialisteMortA = 0;
+        time_t _debut = 0, _specialisteMortA = 0, _premiere = 0;
         int64 _avantJour = 0;
         uint32 _avantRelance = 0;
         bool _mortParJoueur = false;
@@ -638,12 +634,17 @@ namespace
     // ---- Le sort lance ---------------------------------------------------------------------------------------------------
 
     // Vide si le lancement est permis ; sinon le message montre au joueur.
-    std::string RefusLancement(Player* j, DefDirecteur const* d, std::string& code)
+    // `auLancement` (crochet OnSpellCast, apres l'incantation) : un refus y est MUET, alors que mod-playerbots ecrit sa
+    // demande au Directeur sur ce meme lancement ; on n'y rejoue donc pas ce qui a pu changer pendant l'incantation de 3 s
+    // (entree en combat) et la nuit y est toleree 10 s de plus (lance a 05:59:58, fini a 06:00:01). Revue DEPECAGE 2.
+    std::string RefusLancement(Player* j, DefDirecteur const* d, std::string& code, bool auLancement = false)
     {
         auto refus = [&](char const* c, std::string m) { code = c; return m; };
         if (!EstPret(d) || !TableRegistre)
             return refus("inerte", "Ce mini-événement n'est pas encore disponible.");
-        if (j->IsInCombat())
+        if (!EstHumain(j))
+            return refus("bot", "Ce mini-événement est réservé aux joueurs.");
+        if (!auLancement && j->IsInCombat())
             return refus("combat", "Impossible en combat.");
         Map* carte = j->GetMap();
         if (!carte || carte->Instanceable() || carte->IsBattlegroundOrArena())
@@ -658,7 +659,7 @@ namespace
         if ((drapeaux & (AREA_FLAG_CAPITAL | AREA_FLAG_SANCTUARY)) || j->IsInSanctuary())
             return refus("sanctuaire", "Impossible dans une capitale ou un sanctuaire.");
         time_t const maintenant = Maintenant();
-        if (d->nuitCimetiere && !DeNuit(maintenant))
+        if (d->nuitCimetiere && !DeNuit(maintenant) && !(auLancement && DeNuit(maintenant - 10)))
             return refus("heure", Acore::StringFormat("Le Linceul ne se déploie que la nuit, de {}:00 à {:02}:00 (heure de Paris).",
                 HEURE_LINCEUL_DEBUT, HEURE_LINCEUL_FIN));
         if (d->nuitCimetiere && !PresDUnCimetiere(j))
@@ -672,7 +673,7 @@ namespace
             return refus("deja", Acore::StringFormat("Vous avez déjà lancé un mini-événement du Sourcier aujourd'hui. De nouveau "
                 "possible à {} (heure de Paris).", HeureParis(fin)));
         }
-        if (EvenementProche(j->GetMapId(), j->GetInstanceId(), j->GetPositionX(), j->GetPositionY()))
+        if (EvenementProche(j->GetMapId(), j->GetInstanceId(), j->GetPositionX(), j->GetPositionY(), RAYON_EXCLUSIF_DIRECTEUR))
             return refus("voisin", "Un autre mini-événement gronde déjà tout près.");
         return {};
     }
@@ -713,8 +714,15 @@ namespace
             if (!j)
                 return;
             std::string code;
-            if (!RefusLancement(j, d, code).empty())
-                return;   // deja refuse par CheckCast ; un lancement force qui ne passe pas la garde ne fait rien
+            if (!RefusLancement(j, d, code, true).empty())
+            {
+                // Deja refuse par CheckCast ; un lancement qui ne passe plus la garde (registre pris entre-temps, voisin
+                // apparu) ne pose rien. La demande au Directeur, ecrite par mod-playerbots sur ce meme lancement, ne trouve
+                // aucune session : l'enfant s'arrete au bout de 30 s (sourcier_fin.py, SANS_SESSION_S).
+                LOG_INFO("module", "coa sourcier: refus au lancement evenement={} joueur={} raison={}", d->code, j->GetGUID().GetCounter(), code);
+                ChatHandler(j->GetSession()).SendNotification("Le mini-événement ne peut plus commencer ici.");
+                return;
+            }
             Registre const avant = LireRegistre(j->GetGUID().GetCounter());
             GameObject* pivot = j->GetMap()->SummonGameObject(d->pivot, j->GetPositionX(), j->GetPositionY(), j->GetPositionZ(),
                 j->GetOrientation(), 0.0f, 0.0f, 0.0f, 0.0f, d->dureeS + 120);
@@ -821,11 +829,13 @@ namespace
 
         void OnPlayerLearnSpell(Player* j, uint32 sort) override
         {
+            if (!EstHumain(j))
+                return;   // un bot n'apprend jamais le sort lance (revue MINAGE 6)
             for (DefDirecteur const& d : EVENEMENTS)
                 if (d.marqueur && sort == d.marqueur)
                 {
                     Synchroniser(j, d);
-                    if (EstHumain(j) && j->HasSpell(d.sort))
+                    if (j->HasSpell(d.sort))
                         AfficherRecharge(j, LireRegistre(j->GetGUID().GetCounter()));
                 }
         }

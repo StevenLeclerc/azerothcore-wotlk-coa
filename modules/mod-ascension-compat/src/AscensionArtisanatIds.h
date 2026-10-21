@@ -334,6 +334,18 @@ namespace CoaArtisanatIds
     constexpr uint32 ATTENTE_DEBUT_S = 180;
     constexpr float RAYON_ADOPTION = 120.0f;                    // m autour du pivot (la faille du Directeur est a 45 yd)
     constexpr uint32 ADOPTION_PERIODE_MS = 2000;
+    // Integration T2 (21/10, revues MINAGE 1-2 et HERBORISTERIE 3) :
+    // - exclusivite d'un lancement de voie Directeur : plus large que deux rayons d'adoption (2 x 120) plus une marge,
+    //   deux pivots de voie Directeur ne se volent jamais leurs creatures ; une creature n'est de plus adoptee que par le
+    //   pivot ACTIF le plus proche d'elle (PivotLePlusProche) ;
+    // - adoption aussi autour du SPECIALISTE (le Directeur pose son chef a 60 yd au plus du joueur, rapprocher_chef, et
+    //   sa faille le suit au-dela de 70 yd) : un combat qui s'eloigne du pivot ne perd plus ses creatures.
+    constexpr float RAYON_EXCLUSIF_DIRECTEUR = 300.0f;
+    // Echeance d'une session de voie Directeur : la plus tardive de (sort + dureeS) et (premiere menace + dureeS -
+    // ECHEANCE_APRES_MENACE_MARGE_S) : l'enfant du Directeur peut partir jusqu'a ~25 s apres le sort (passe de 5 s,
+    // AGE_MAX_S de sourcier.py) et sa propre echeance part de SON demarrage (revue MINAGE 4). La premiere menace sort au
+    // plus tot 40 s apres ce demarrage (presage 20 s + attente des bots 20 s) : premiere + 350 - 20 > demarrage + 330.
+    constexpr uint32 ECHEANCE_APRES_MENACE_MARGE_S = 20;
 
     // ---- Lot T2 du Sourcier au 60 (21/10/2026), lot HERBORISTERIE : Jardin d'orage et Floraison des tombes ------------
     //
@@ -367,6 +379,9 @@ namespace CoaArtisanatIds
     constexpr uint32 JAUGE_POUSSE_PERIODE_S = 6;
     constexpr uint32 JAUGE_PERTE = 80;
     constexpr float RAYON_GRAINE = 4.0f;                        // m (a l'horizontale) : un attire plus pres se dissout
+    // Integration T2 (revue HERBORISTERIE 3) : un attire n'est adopte que si SA destination est cette Graine (`charger_vers`
+    // fixe son point de retour sur la Graine, CoaDirecteur.cpp ChargerVers) a GRAINE_DESTINATION_ECART pres.
+    constexpr float GRAINE_DESTINATION_ECART = 10.0f;
     constexpr uint32 JAUGE_ANNONCE_S = 60;                      // la jauge est dite au groupe toutes les 60 s
     constexpr uint32 FLEUR_VIE_S = 180;                         // Fleur-tempete epanouie : cueillette, puis disparition
     constexpr uint32 PLACE_CUEILLETTE = 3;                      // cases libres exigees (butin : 3 objets au plus)
@@ -396,6 +411,9 @@ namespace CoaArtisanatIds
     constexpr float AME_ECART_MIN = 10.0f;
     constexpr float AME_ECART_MAX = 25.0f;
     constexpr uint32 CAPTURES_AME_ANCIENNE = 10;
+    // Integration T2 (revue HERBORISTERIE 4) [H, au PO] : l'Ame ancienne levee laisse au moins ce delai pour la tuer, meme
+    // si DUREE_FLORAISON_S tombe avant (10e capture a 9 min 55 s).
+    constexpr uint32 AME_ANCIENNE_DELAI_S = 180;
     constexpr float RAYON_CIMETIERE = 150.0f;                   // m : un point d'ame (game_graveyard) de la carte [H]
     // Ressources d'evenement de la Nuit des morts (famille Glas), epique [M item_template du PTR, 21/10] : recompense de
     // participant de la Floraison (les tombes sont du Glas ; le Jardin paie l'Orage, comme le Filon-mere).
@@ -425,7 +443,6 @@ namespace CoaArtisanatIds
     constexpr uint32 INDICES_TRAQUE = 3;
     constexpr float INDICE_ECART_MIN = 60.0f;                   // [H]
     constexpr float INDICE_ECART_MAX = 120.0f;                  // [H]
-    constexpr float INDICE_PORTEE = 30.0f;                      // m : le joueur qui examine un indice, du pivot de session
     // Zones 48-60 [H, liste au PO] (AreaTable.dbc, ids de zone) : Un'Goro, Silithus, Berceau-de-l'Hiver, Maleterres de
     // l'Ouest et de l'Est, Gangrebois, Azshara, Terres foudroyees, Steppes ardentes.
     constexpr std::array<uint32, 9> ZONES_TRAQUE = { 490, 1377, 618, 28, 139, 361, 16, 4, 46 };

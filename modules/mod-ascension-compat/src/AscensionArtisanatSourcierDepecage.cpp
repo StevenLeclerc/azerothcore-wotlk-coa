@@ -32,6 +32,10 @@
 // migration data/sql/db-characters/2026_10_21_01_coa_artisanat_trophee.sql ; absente : la Lame est INERTE). Le trophee est
 // compte quand il est POSE au butin, pas quand il est ramasse.
 //
+// Integration T2 (21/10, corrections des revues) : un indice ou une bete qui ne peut pas etre pose (frontiere de zone, eau)
+// REND le lancement au lieu de le consommer ; un indice peut tomber dans la zone de traque de l'indice precedent ou dans
+// une zone de traque ; bots refuses ; Peau remise par la file commune ; session persistee (un redemarrage rend le
+// lancement). Les Betes de legende ne s'apprivoisent pas (type_flags 0, generateur).
 // Journal : « coa sourcier: ... evenement=traque_legendaire pivot=<guid> ... » et « coa sourcier: trophee ... ». Au
 // demarrage : « coa sourcier: depecage evenement=traque_legendaire ... PRET|INERTE » et « coa sourcier: lame de trophee ...
 // ACTIVE|INERTE ». Banc (PTR seulement) : `.sourcier banc trophees <nom> [remettre]`.
@@ -127,24 +131,6 @@ namespace
             if (b.entree == entree)
                 return b.phrase;
         return "Une bête de légende surgit !";
-    }
-
-    // Courrier en BASE (MailReceiver par GUID bas) : le specialiste absent de la carte du pivot a la victoire.
-    bool PosterObjet(ObjectGuid destinataire, uint32 entree, char const* expediteur)
-    {
-        if (!entree || !sObjectMgr->GetItemTemplate(entree))
-            return false;
-        Item* objet = Item::CreateItem(entree, 1, nullptr);
-        if (!objet)
-            return false;
-        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        MailDraft courrier(expediteur, "Votre récolte légendaire.");
-        objet->SetGuidValue(ITEM_FIELD_CREATOR, destinataire);
-        objet->SaveToDB(trans);
-        courrier.AddItem(objet);
-        courrier.SendMailTo(trans, MailReceiver(destinataire.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-        CharacterDatabase.CommitTransaction(trans);
-        return true;
     }
 
     uint32 HumainsDuGroupe(Player* specialiste, float rayon)
@@ -318,6 +304,7 @@ namespace
             }
             Marquer(specialiste, _pivot);
             InscrireActif(me);
+            OuvrirSession(_pivot, _specialiste, CODE, avant);
             LOG_INFO("module", "coa sourcier: lancement evenement={} specialiste={} pivot={} carte={} zone={} x={:.1f} y={:.1f} duree_s={} indices={}",
                 CODE, _specialiste.GetCounter(), _pivot.GetCounter(), me->GetMapId(), me->GetZoneId(), me->GetPositionX(),
                 me->GetPositionY(), DUREE_TRAQUE_S, INDICES_TRAQUE);
@@ -368,7 +355,7 @@ namespace
                 return true;
             }
             if (!PoserIndice(ici))
-                Echouer("indice_absent", false);
+                Rendre("indice_absent");   // le terrain, pas le joueur : le lancement est rendu (revue DEPECAGE 3)
             return true;
         }
 
@@ -424,7 +411,7 @@ namespace
             if (!present && !GroupeEnVie())
                 return Echouer("groupe", _mortParJoueur);
             if (maintenant - _debut >= time_t(DUREE_TRAQUE_S))
-                return Echouer("temps", false);
+                return Echouer("temps", _specialisteMortA && _mortParJoueur);
             if (_phase == Phase::Indices && _indice && !ObjectAccessor::GetGameObject(*me, _indice))
                 return Echouer("indice_disparu", false);
             if (_phase == Phase::Bete)
@@ -470,6 +457,11 @@ namespace
         bool ChercherPoint(Position const& depuis, Position& point)
         {
             Map* carte = me->GetMap();
+            uint32 zoneDepart = 0, aireDepart = 0;
+            carte->GetZoneAndAreaId(me->GetPhaseMask(), zoneDepart, aireDepart, depuis.GetPositionX(), depuis.GetPositionY(),
+                depuis.GetPositionZ());
+            if (!ZoneDeTraque(zoneDepart))
+                zoneDepart = 0;
             for (uint32 essai = 0; essai < 12; ++essai)
             {
                 float const reduit = essai < 8 ? 1.0f : 0.5f;
@@ -481,7 +473,9 @@ namespace
                     continue;
                 uint32 zone = 0, aire = 0;
                 carte->GetZoneAndAreaId(me->GetPhaseMask(), zone, aire, pos.GetPositionX(), pos.GetPositionY(), pos.GetPositionZ());
-                if (!ZoneDeTraque(zone))
+                // Une zone de traque, ou celle du point de depart (le joueur l'a lance dans une zone de traque, et la piste
+                // peut longer une frontiere : revue DEPECAGE 3).
+                if (!ZoneDeTraque(zone) && zone != zoneDepart)
                     continue;
                 AreaTableEntry const* z = sAreaTableStore.LookupEntry(zone);
                 AreaTableEntry const* a = sAreaTableStore.LookupEntry(aire);
@@ -543,7 +537,7 @@ namespace
                     _pivot.GetCounter());
                 if (bete)
                     bete->DespawnOrUnsummon();
-                return Echouer("bete_absente", false);
+                return Rendre("bete_absente");   // panne de donnees, pas faute du joueur (revue DEPECAGE 3)
             }
             // Calibrage reduit (table du Colosse) : PV en % du modele selon les humains du groupe presents a 40 m.
             uint32 humains = 1;
@@ -621,18 +615,7 @@ namespace
             bool remis = false;
             char const* voie = "aucune";
             if (d.obtenu)
-            {
-                if (s)
-                {
-                    remis = Donner(s, OBJET_PEAU_LEGENDE, 1, s->GetGUID(), EXPEDITEUR);
-                    voie = "sacs";
-                }
-                else
-                {
-                    remis = PosterObjet(_specialiste, OBJET_PEAU_LEGENDE, EXPEDITEUR);
-                    voie = "courrier";
-                }
-            }
+                voie = RemettreMateriau(s, _specialiste, OBJET_PEAU_LEGENDE, EXPEDITEUR, remis);
             LOG_INFO("module", "coa sourcier: remise evenement={} pivot={} specialiste={} materiau={} garanti={} obtenu={} remis={} voie={} semaine={} comptes={}",
                 CODE, _pivot.GetCounter(), _specialiste.GetCounter(), OBJET_PEAU_LEGENDE, d.garanti ? 1 : 0, d.obtenu ? 1 : 0,
                 remis ? 1 : 0, voie, int32(semaine), uint32(comptes.size()));
@@ -708,6 +691,27 @@ namespace
             Terminer(raison);
         }
 
+        // Panne de terrain ou de donnees (indice ou bete impossibles a poser) : les deux champs de LANCEMENT du registre
+        // reprennent leur valeur d'avant ce lancement (meme regle que le refus du Directeur, RendreCommun).
+        void Rendre(char const* raison)
+        {
+            if (_phase == Phase::Fini || _phase == Phase::Attente)
+                return;
+            _phase = Phase::Fini;
+            Registre r = LireRegistre(_specialiste.GetCounter());
+            r.jourLance = _avantJour;
+            r.relanceTs = _avantRelance;
+            EcrireRegistre(_specialiste.GetCounter(), r);
+            if (Player* s = ObjectAccessor::GetPlayer(*me, _specialiste))
+            {
+                AfficherRecharge(s, r);
+                ChatHandler(s->GetSession()).SendNotification("La piste se perd dans un terrain impraticable : vous pourrez en suivre une autre.");
+            }
+            LOG_INFO("module", "coa sourcier: rendu evenement={} pivot={} specialiste={} raison={} examines={}", CODE, _pivot.GetCounter(),
+                _specialiste.GetCounter(), raison, _examines);
+            Terminer(raison);
+        }
+
         // La bete vivante (echec) s'en va ; son cadavre (succes) reste a son minuteur, et se depece. L'indice courant et la
         // piste disparaissent.
         void Terminer(char const* raison)
@@ -726,6 +730,7 @@ namespace
                 i->Delete();
             }
             RetirerActif(_pivot);
+            FermerSession(_pivot, raison);
             LOG_INFO("module", "coa sourcier: nettoyage evenement={} pivot={} raison={} examines={} bete_retiree={}", CODE, _pivot.GetCounter(),
                 raison, _examines, beteRetiree ? 1 : 0);
             me->setActive(false);
@@ -813,6 +818,8 @@ namespace
         auto refus = [&](char const* c, std::string m) { code = c; return m; };
         if (!Pret || !TableRegistre)
             return refus("inerte", "Ce mini-événement n'est pas encore disponible.");
+        if (!EstHumain(j))
+            return refus("bot", "Ce mini-événement est réservé aux joueurs.");
         if (j->IsInCombat())
             return refus("combat", "Impossible en combat.");
         Map* carte = j->GetMap();
@@ -1080,10 +1087,10 @@ namespace
 
         void OnPlayerLearnSpell(Player* j, uint32 sort) override
         {
-            if (sort != SORT_MARQUEUR_TRAQUE)
+            if (sort != SORT_MARQUEUR_TRAQUE || !EstHumain(j))
                 return;
             Synchroniser(j);
-            if (EstHumain(j) && j->HasSpell(SORT_SUIVRE_PISTE))
+            if (j->HasSpell(SORT_SUIVRE_PISTE))
                 AfficherRecharge(j, LireRegistre(j->GetGUID().GetCounter()));
         }
 

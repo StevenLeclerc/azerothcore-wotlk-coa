@@ -31,6 +31,10 @@
 //   - a la CAPTURES_AME_ANCIENNE-ieme capture, l'Ame ancienne (9105026, elite 60, PV par la table du Colosse) se leve ;
 //   - victoire : sa mort -> Fleur d'eternite au specialiste, recompenses de participant (Glas) ;
 //   - echec : DUREE_FLORAISON_S, regles du Filon-mere ; pas de refus du Directeur (il n'y est pour rien).
+// Integration T2 (21/10, corrections des revues) : un attire n'est adopte que si sa destination est CETTE Graine et que la
+// Graine est le pivot actif le plus proche ; exclusivite de RAYON_EXCLUSIF_DIRECTEUR pour le Jardin ; l'Ame ancienne
+// laisse au moins AME_ANCIENNE_DELAI_S ; bots refuses ; materiau remis par la file commune ; session persistee (un
+// redemarrage rend le lancement, le Directeur arrete ses vagues quand la Graine n'est plus : sourcier_fin.py).
 // Journal : « coa sourcier: ... evenement=jardin_orage|floraison_tombes pivot=<guid> ... ». Au demarrage :
 // « coa sourcier: herboristerie evenement=... PRET|INERTE ».
 //
@@ -137,25 +141,6 @@ namespace
         return std::find(PNJ_ATTIRES_JARDIN.begin(), PNJ_ATTIRES_JARDIN.end(), entree) != PNJ_ATTIRES_JARDIN.end();
     }
 
-    // Courrier en BASE seulement (MailReceiver par GUID bas) : vu a la prochaine connexion. Le specialiste absent de la
-    // carte du pivot a la victoire (cas rare : il faut etre present, ou mort et revenu, pour qu'elle ait lieu).
-    bool PosterObjet(ObjectGuid destinataire, uint32 entree, char const* expediteur)
-    {
-        if (!entree || !sObjectMgr->GetItemTemplate(entree))
-            return false;
-        CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        MailDraft courrier(expediteur, "Votre récolte légendaire.");
-        Item* objet = Item::CreateItem(entree, 1, nullptr);
-        if (!objet)
-            return false;
-        objet->SetGuidValue(ITEM_FIELD_CREATOR, destinataire);
-        objet->SaveToDB(trans);
-        courrier.AddItem(objet);
-        courrier.SendMailTo(trans, MailReceiver(destinataire.GetCounter()), MailSender(MAIL_NORMAL, 0, MAIL_STATIONERY_GM));
-        CharacterDatabase.CommitTransaction(trans);
-        return true;
-    }
-
     uint32 HumainsDuGroupe(Player* specialiste, float rayon)
     {
         uint32 n = 0;
@@ -223,6 +208,7 @@ namespace
             _avantRelance = avant.relanceTs;
             Marquer(specialiste, _pivot);
             InscrireActif(_moi);
+            OuvrirSession(_pivot, _specialiste, Code(), avant);
         }
 
         // Regles du Filon-mere, une fois par seconde : -> raison d'echec, ou nullptr. `parJoueur` : la relance immediate.
@@ -314,18 +300,7 @@ namespace
             bool remis = false;
             char const* voie = "aucune";
             if (d.obtenu)
-            {
-                if (s)
-                {
-                    remis = Donner(s, _def.materiau, 1, s->GetGUID(), _def.expediteur);
-                    voie = "sacs";
-                }
-                else
-                {
-                    remis = PosterObjet(_specialiste, _def.materiau, _def.expediteur);
-                    voie = "courrier";
-                }
-            }
+                voie = RemettreMateriau(s, _specialiste, _def.materiau, _def.expediteur, remis);
             LOG_INFO("module", "coa sourcier: remise evenement={} pivot={} specialiste={} materiau={} garanti={} obtenu={} remis={} voie={} semaine={} comptes={}",
                 Code(), _pivot.GetCounter(), _specialiste.GetCounter(), _def.materiau, d.garanti ? 1 : 0, d.obtenu ? 1 : 0,
                 remis ? 1 : 0, voie, int32(semaine), uint32(comptes.size()));
@@ -643,6 +618,10 @@ namespace
             {
                 if (!c->IsAlive() || PivotDe(c))
                     continue;
+                // Sa destination est-elle CETTE Graine ? `charger_vers` pose le point de retour de l'attire sur la Graine
+                // (CoaDirecteur.cpp ChargerVers) ; un attire en route vers une autre Graine passe sans etre pris.
+                if (c->GetHomePosition().GetExactDist2d(me) > GRAINE_DESTINATION_ECART)
+                    continue;
                 Marquer(c, _pivot);
                 _adoptes.insert(c->GetGUID());
                 ++_adoptesTotal;
@@ -747,6 +726,7 @@ namespace
             _fini = true;
             RetirerActif(_pivot);
             LOG_INFO("module", "coa sourcier: nettoyage evenement={} pivot={} raison={} jauge={}", Code(), _pivot.GetCounter(), raison, _jauge);
+            FermerSession(_pivot, raison);
             me->DespawnOrUnsummon();
         }
 
@@ -845,8 +825,12 @@ namespace
             bool parJoueur = false;
             if (char const* raison = SurveillerSpecialiste(maintenant, parJoueur))
                 return Echouer(raison, parJoueur);
-            if (maintenant - _debut >= time_t(DUREE_FLORAISON_S))
-                return Echouer("temps", false);
+            // L'Ame ancienne levee a toujours AME_ANCIENNE_DELAI_S pour tomber (revue HERBORISTERIE 4).
+            time_t echeance = _debut + time_t(DUREE_FLORAISON_S);
+            if (_leveeA)
+                echeance = std::max(echeance, _leveeA + time_t(AME_ANCIENNE_DELAI_S));
+            if (maintenant >= echeance)
+                return Echouer("temps", _specialisteMortA && _mortParJoueur);
             if (_phase == Phase::Ames)
             {
                 // Les ames effacees a leur echeance (AME_VIE_S) quittent la liste.
@@ -908,7 +892,7 @@ namespace
             EffacerAmes();
             Position pos = me->GetPosition();
             me->MovePosition(pos, 4.0f, float(rand_norm()) * 2.0f * float(M_PI));
-            uint32 const reste = uint32(std::max<int64>(60, int64(DUREE_FLORAISON_S) - int64(Maintenant() - _debut)));
+            uint32 const reste = uint32(std::max<int64>(AME_ANCIENNE_DELAI_S, int64(DUREE_FLORAISON_S) - int64(Maintenant() - _debut)));
             TempSummon* ame = me->GetMap()->SummonCreature(PNJ_AME_ANCIENNE, pos, nullptr, (reste + 300) * IN_MILLISECONDS);
             if (!ame)
             {
@@ -933,6 +917,7 @@ namespace
             _creditOuvert = true;
             Marquer(ame, _pivot);
             _phase = Phase::AmeAncienne;
+            _leveeA = Maintenant();
             if (declencheur && ame->IsAIEnabled && ame->AI())
                 ame->AI()->AttackStart(declencheur);
             DireAuGroupe("Les âmes captives réveillent l'Âme ancienne !");
@@ -976,6 +961,7 @@ namespace
                 }
             EffacerAmes();
             RetirerActif(_pivot);
+            FermerSession(_pivot, raison);
             LOG_INFO("module", "coa sourcier: nettoyage evenement={} pivot={} raison={} captures={} ame_retiree={}", Code(), _pivot.GetCounter(),
                 raison, _captures, ameRetiree ? 1 : 0);
             me->SetRespawnTime(0);
@@ -984,7 +970,7 @@ namespace
 
         Phase _phase = Phase::Attente;
         uint32 _cumul = 0, _captures = 0, _amesPosees = 0;
-        time_t _prochaineAme = 0;
+        time_t _prochaineAme = 0, _leveeA = 0;
         ObjectGuid _chef;
         std::set<ObjectGuid> _ames;
     };
@@ -1038,6 +1024,8 @@ namespace
         auto refus = [&](char const* c, std::string m) { code = c; return m; };
         if (!EstPret(d) || !TableRegistre)
             return refus("inerte", "Ce mini-événement n'est pas encore disponible.");
+        if (!EstHumain(j))
+            return refus("bot", "Ce mini-événement est réservé aux joueurs.");
         if (j->IsInCombat())
             return refus("combat", "Impossible en combat.");
         Map* carte = j->GetMap();
@@ -1064,7 +1052,9 @@ namespace
             return refus("deja", Acore::StringFormat("Vous avez déjà lancé un mini-événement du Sourcier aujourd'hui. De nouveau "
                 "possible à {} (heure de Paris).", HeureParis(fin)));
         }
-        if (EvenementProche(j->GetMapId(), j->GetInstanceId(), j->GetPositionX(), j->GetPositionY()))
+        // Le Jardin est de voie Directeur : exclusivite large (deux Graines ne se disputent pas leurs attires).
+        if (EvenementProche(j->GetMapId(), j->GetInstanceId(), j->GetPositionX(), j->GetPositionY(),
+                d->genre == Genre::Jardin ? RAYON_EXCLUSIF_DIRECTEUR : RAYON_EXCLUSIF))
             return refus("voisin", "Un autre mini-événement gronde déjà tout près.");
         return {};
     }
@@ -1273,11 +1263,13 @@ namespace
 
         void OnPlayerLearnSpell(Player* j, uint32 sort) override
         {
+            if (!EstHumain(j))
+                return;   // un bot n'apprend jamais le sort lance (revue HERBORISTERIE 8)
             for (DefHerbo const& d : EVENEMENTS)
                 if (d.marqueur && sort == d.marqueur)
                 {
                     Synchroniser(j, d);
-                    if (EstHumain(j) && j->HasSpell(d.sort))
+                    if (j->HasSpell(d.sort))
                         AfficherRecharge(j, LireRegistre(j->GetGUID().GetCounter()));
                 }
         }
