@@ -1365,6 +1365,42 @@ namespace
             || e == "passif_hors_combat" || e == "baton_serein";
     }
 
+    // T2-7 (21/10) : facettes de degats de l'Oeuvre du Fabricant d'armes.
+    //  grondement : aura passive (sort_effet, SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE) posee tant que la facette est active
+    //    (AppliquerPassifs, montant = valeur) ; le coeur la declenche sur un coup de melee PARE ou BLOQUE (spell_proc :
+    //    HitMask parade | blocage, 20 %) et lance son EffectTriggerSpell sur l'attaquant avec ce montant ; valeur JcJ par
+    //    victime dans ReduireZoneEnJcJ.
+    //  fendeur_orage : DeclencherProcs, coups de la piece qui porte la facette ; eclair en chaine (sort_effet, 3 cibles) a
+    //    la valeur, ou SORT_FENDEUR_JCJ (1 cible) a la valeur JcJ si la cible est controlee par un joueur ; un rebond sur
+    //    une victime controlee par un joueur est ramene a la valeur JcJ (ReduireZoneEnJcJ).
+    bool EstEffetT2_7(std::string const& e)
+    {
+        return e == CoaArtisanatIds::EFFET_GRONDEMENT || e == CoaArtisanatIds::EFFET_FENDEUR_ORAGE;
+    }
+
+    // Controles de chargement propres a T2-7 (vide = valide) : sort d'effet dans le bloc T2-7, aura de Grondement qui
+    // declenche un sort connu, version JcJ du Fendeur presente, valeur JcJ <= valeur (le rapport sert de reduction).
+    std::string RaisonT2_7Invalide(SignatureDef const& s, SpellInfo const* info)
+    {
+        using namespace CoaArtisanatIds;
+        if (!EstEffetT2_7(s.effet))
+            return {};
+        if (!info || s.sortEffet < SORTS_T2_7_MIN || s.sortEffet > SORTS_T2_7_MAX)
+            return "sort d'effet absent ou hors du bloc T2-7";
+        if (!s.valeur || s.valeurArene > s.valeur)
+            return "valeur nulle ou valeur JcJ superieure a la valeur";
+        if (s.effet == EFFET_GRONDEMENT)
+        {
+            uint32 const declenche = info->Effects[EFFECT_0].TriggerSpell;
+            if (info->Effects[EFFECT_0].ApplyAuraName != SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE || !declenche
+                || !sSpellMgr->GetSpellInfo(declenche) || declenche < SORTS_T2_7_MIN || declenche > SORTS_T2_7_MAX)
+                return "aura de Grondement sans declenchement (231) d'un sort du bloc T2-7";
+        }
+        else if (!sSpellMgr->GetSpellInfo(SORT_FENDEUR_JCJ) || !s.chanceCentiemes)
+            return "Fendeur d'orage sans sa version JcJ ou sans chance par coup";
+        return {};
+    }
+
     // Pieces que couvre une ligne de signature : classe et masque de sous-classes ; pour une arme (classe 2), le bit 31 du
     // masque (aucune sous-classe d'arme ne l'atteint) ajoute les boucliers (classe 4, sous-classe 6) : voie du Fabricant
     // d'armes, « melee et boucliers » (talents.py, BIT_BOUCLIERS).
@@ -1546,13 +1582,15 @@ namespace
                     bool const coeur = s.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE;
                     // Astrolabe (18/10) : effets qui exigent leur sort d'effet ; Bastion d'orage est un pourcentage de l'Egide.
                     // Lot T : tous les effets des 7 autres metiers (EstEffetLotT).
+                    // T2-7 : Grondement (aura de proc a montant) et Fendeur d'orage (eclair en chaine).
                     bool const avecSort = coeur || s.effet == "fournaise" || s.effet == "entaille" || s.effet == "garde_lame"
-                        || s.effet == "bastion_d_orage" || EstEffetLotT(s.effet);
+                        || s.effet == "bastion_d_orage" || EstEffetLotT(s.effet) || EstEffetT2_7(s.effet);
                     // Un effet a proportions (passifs, auras de proc) lit le point de base de l'effet 0 de son sort : nul, il
                     // diviserait par zero (le sort d'effet de fil_orage, lui, recoit ses montants du C++).
                     SpellInfo const* infoEffet = s.sortEffet ? sSpellMgr->GetSpellInfo(s.sortEffet) : nullptr;
                     bool const proportions = s.effet == "passif" || s.effet == "passif_principal" || s.effet == "proc_aura"
-                        || s.effet == "proc_aura_critique" || s.effet == "passif_hors_combat";
+                        || s.effet == "proc_aura_critique" || s.effet == "passif_hors_combat"
+                        || s.effet == CoaArtisanatIds::EFFET_GRONDEMENT;
                     if (proportions && infoEffet && !infoEffet->Effects[EFFECT_0].BasePoints)
                     {
                         ++signaturesRejetees;
@@ -1569,6 +1607,12 @@ namespace
                         ++signaturesRejetees;
                         LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} effet={} (enchantement ou sort d'effet inconnu, forme ou "
                             "rang vide, effet sans son sort d'effet, pourcentage au-dela de 100 ou chance au-dela de 10000)", s.enchant, s.effet);
+                        continue;
+                    }
+                    if (std::string const raison = RaisonT2_7Invalide(s, infoEffet); !raison.empty())
+                    {
+                        ++signaturesRejetees;
+                        LOG_ERROR("module", "coa artisanat: signature rejetee enchant={} effet={} : {}", s.enchant, s.effet, raison);
                         continue;
                     }
                     if (coeur)
@@ -2094,6 +2138,15 @@ namespace
             LOG_ERROR("module", "coa sourcier: facette {} sans ligne coa_artisanat_signature (metier {}) : Oeuvre sans facette", forme, metier);
             return 0;
         }
+        // T2-7 : une facette ne se pose que sur une Oeuvre de sa voie (Grondement et Fendeur d'orage, voie du Fabricant
+        // d'armes, jamais sur la Cuirasse du Maitre armurier). Seules les Oeuvres de l'Armurier existent au 21/10.
+        std::string_view const voieOeuvre = EstOeuvre(objet->GetEntry()) ? CoaArtisanatIds::VOIE_OEUVRES_ARMURIER : "";
+        if (choisie->voie != voieOeuvre)
+        {
+            LOG_ERROR("module", "coa sourcier: facette {} (voie {}) sur l'Oeuvre {} (voie {}) : facette non posee", forme,
+                choisie->voie, objet->GetEntry(), voieOeuvre.empty() ? "aucune" : voieOeuvre);
+            return 0;
+        }
         objet->SetEnchantment(EMPLACEMENT_FACETTE, choisie->enchant, 0, 0, joueur->GetGUID());
         objet->SetState(ITEM_CHANGED, joueur);
         return choisie->enchant;
@@ -2117,6 +2170,7 @@ namespace
         uint32 egides = 0;                  // declenchements de l'Egide (absorbe_sous_seuil) de ce joueur (banc de garde G1)
         uint32 pierres = 0;                 // lot T : declenchements de Pierre de garde (soin_sous_seuil), hors compteur G1
         uint32 coeurs = 0;                  // declenchements de Coeur de forge de ce joueur (banc de garde G1)
+        uint32 procs = 0;                   // declenchements des signatures a proc (DeclencherProcs) et de Grondement (banc G1)
         int32 gardeParade = 0;              // Garde-lame pose : score de parade et de blocage (0 : aucune aura)
         int32 gardeBlocage = 0;
         uint32 gardeSort = 0;
@@ -2210,7 +2264,9 @@ namespace
             {
                 SignatureDef const* s = a->actives[i];
                 bool const horsCombat = s->effet == "passif_hors_combat", serein = s->effet == "baton_serein";
-                if ((s->effet != "passif" && s->effet != "passif_principal" && !horsCombat && !serein) || !s->sortEffet)
+                // T2-7 : l'aura de Grondement est un passif (montant de l'effet 0 = valeur, transmis aux degats declenches).
+                bool const grondement = s->effet == CoaArtisanatIds::EFFET_GRONDEMENT;
+                if ((s->effet != "passif" && s->effet != "passif_principal" && !horsCombat && !serein && !grondement) || !s->sortEffet)
                     continue;
                 if (horsCombat && joueur->IsInCombat())   // Cape du voyageur : reposee a la sortie du combat
                     continue;
@@ -2508,8 +2564,9 @@ namespace
             bool const fournaise = e == "fournaise";
             // Effets qui passent par les sorts (objet nul) ; les autres ne tirent que sur un coup de la piece.
             bool const parSort = fournaise || e == "proc_aura" || e == "proc_degats" || e == "fil_orage" || e == "fil_accalmie";
+            bool const fendeur = e == CoaArtisanatIds::EFFET_FENDEUR_ORAGE;   // T2-7 : coups de la piece seulement
             bool const parCoup = fournaise || e == "entaille" || e == "proc_aura" || e == "proc_aura_critique" || e == "proc_degats"
-                || e == "proc_degats_distance";
+                || e == "proc_degats_distance" || fendeur;
             bool const surCritique = e == "proc_aura_critique" || e == "fil_orage" || e == "fil_accalmie";
             if ((!parSort && !parCoup) || !s->sortEffet || (!surCritique && !s->chanceCentiemes))
                 continue;
@@ -2581,6 +2638,21 @@ namespace
                 joueur->CastCustomSpell(joueur, s->sortEffet, &rendu, nullptr, nullptr, true);
                 LOG_INFO("module", "coa artisanat: fil d'accalmie joueur={} enchant={} mana={}", joueur->GetGUID().GetCounter(), s->enchant, rendu);
             }
+            else if (fendeur)
+            {
+                // T2-7, Fendeur d'orage : eclair en chaine (3 cibles) a la valeur ; cible controlee par un joueur : un seul
+                // eclair (SORT_FENDEUR_JCJ) a la valeur JcJ. Un rebond sur un joueur est reduit dans ReduireZoneEnJcJ.
+                if (!joueur->IsValidAttackTarget(cible))
+                    continue;
+                bool const jcj = ControleParUnJoueur(cible);
+                int32 const v = int32(ValeurSignature(s, jcj, constantes[i], joueur->GetLevel()));
+                if (v <= 0)
+                    continue;
+                uint32 const sort = jcj ? CoaArtisanatIds::SORT_FENDEUR_JCJ : s->sortEffet;
+                joueur->CastCustomSpell(cible, sort, &v, nullptr, nullptr, true);
+                LOG_INFO("module", "coa artisanat: fendeur d'orage joueur={} cible={} enchant={} sort={} valeur={} jcj={}",
+                    joueur->GetGUID().GetCounter(), cible->GetGUID().ToString(), s->enchant, sort, v, jcj ? 1 : 0);
+            }
             else if (e == "proc_degats" || e == "proc_degats_distance")
             {
                 if (!joueur->IsValidAttackTarget(cible))
@@ -2613,26 +2685,44 @@ namespace
             }
             recharge = maintenant + Milliseconds(s->rechargeMs);
             ++DeclenchementsProcs;
+            ++a->procs;   // banc G1 : declenchements par bot
         }
     }
 
     // Mecanisme (proc_degats_distance, lot T) : degats de zone lances a la valeur hors JcJ (DeclencherProcs) ; une victime
     // controlee par un joueur recoit la part valeur_arene / valeur (garde JcJ D-PO-43), cible principale comprise. La
     // signature est cherchee dans les places actives du lanceur (Get, jamais GetDefault : rien n'est cree ici).
+    //
+    // T2-7 : meme regle pour les rebonds du Fendeur d'orage (sort_effet ; la version JcJ a une cible est deja a la valeur
+    // JcJ et n'est pas reduite) et pour les degats de Grondement (EffectTriggerSpell de l'aura sort_effet, lances a la
+    // valeur : la victime, l'attaquant du porteur, est ramenee a la valeur JcJ). Grondement : compte au banc G1.
     void ReduireZoneEnJcJ(Unit* cible, Unit* attaquant, int32& degats, SpellInfo const* sort)
     {
-        if (!sort || sort->Id < 9113440 || sort->Id > 9113499 || degats <= 0 || !attaquant || !attaquant->IsPlayer()
-            || !ControleParUnJoueur(cible))
+        bool const t2_7 = sort && sort->Id >= CoaArtisanatIds::SORTS_T2_7_MIN && sort->Id <= CoaArtisanatIds::SORTS_T2_7_MAX;
+        if (!sort || ((sort->Id < 9113440 || sort->Id > 9113499) && !t2_7) || degats <= 0 || !attaquant || !attaquant->IsPlayer())
             return;
-        SignaturesActives const* a = attaquant->CustomData.Get<SignaturesActives>(CLE_SIGNATURES);
+        SignaturesActives* a = attaquant->CustomData.Get<SignaturesActives>(CLE_SIGNATURES);
         if (!a)
             return;
+        bool const jcj = ControleParUnJoueur(cible);
         for (SignatureDef const* s : a->actives)
-            if (s->effet == "proc_degats_distance" && s->sortEffet == sort->Id && s->valeur)
+        {
+            bool vise = false;
+            if (s->effet == "proc_degats_distance" || s->effet == CoaArtisanatIds::EFFET_FENDEUR_ORAGE)
+                vise = s->sortEffet == sort->Id;
+            else if (s->effet == CoaArtisanatIds::EFFET_GRONDEMENT)
             {
-                degats = int32(int64(degats) * s->valeurArene / s->valeur);
-                return;
+                SpellInfo const* aura = sSpellMgr->GetSpellInfo(s->sortEffet);
+                vise = aura && aura->Effects[EFFECT_0].TriggerSpell == sort->Id;
+                if (vise)
+                    ++a->procs;   // un Grondement parti (banc G1), JcJ ou non
             }
+            if (!vise || !s->valeur)
+                continue;
+            if (jcj)
+                degats = int32(int64(degats) * s->valeurArene / s->valeur);
+            return;
+        }
     }
 
     // Coeur de forge (T1-5) : chaque critique (compte par les crochets de ArtisanatPlayer et ArtisanatSorts) charge la
@@ -2945,7 +3035,7 @@ namespace
         Milliseconds debut{ 0 }, fin{ 0 };
         bool ouverte = false;
         uint64 degats = 0, soins = 0, soinsBruts = 0, subis = 0;
-        uint32 morts = 0, egides0 = 0, coeurs0 = 0, pression = 100;
+        uint32 morts = 0, egides0 = 0, coeurs0 = 0, procs0 = 0, pression = 100;
         std::vector<ObjectGuid> pieces;
         std::vector<uint8> emplacements;                     // emplacement d'equipement de chaque piece du banc
         std::vector<std::pair<uint8, ObjectGuid>> origine;   // (emplacement, piece d'origine renvoyee en sac par equiper)
@@ -3170,8 +3260,10 @@ namespace
             SpellInfo const* info = sort->GetSpellInfo();
             if (!joueur || !info || info->Id == AuraCoeurDeForge || (degats && PasseParObjetDeCombat(info)))
                 return;
-            // Fournaise (Astrolabe) : « coups et sorts » ; un sort d'effet d'artisanat (9113440-9113499) ne declenche rien.
-            if (cible && (info->Id < 9113440 || info->Id > 9113499))
+            // Fournaise (Astrolabe) : « coups et sorts » ; un sort d'effet d'artisanat (9113440-9113499, et T2-7
+            // 9113500-9113519 : Fendeur d'orage, Grondement) ne declenche rien.
+            if (cible && (info->Id < 9113440 || info->Id > 9113499)
+                && (info->Id < CoaArtisanatIds::SORTS_T2_7_MIN || info->Id > CoaArtisanatIds::SORTS_T2_7_MAX))
                 DeclencherProcs(joueur, cible, nullptr, critique, soins > 0);
             if (critique && AuraCoeurDeForge)
                 ChargerCoeurDeForge(joueur);
@@ -5666,7 +5758,6 @@ namespace
                     PoserEnchantement(j, o, EMPLACEMENT_FACETTE, 0, 0);
                 }
                 std::string texte;
-                std::size_t suivante = 0;
                 for (uint32 id : ids)
                 {
                     auto s = Signatures.find(id);
@@ -5677,7 +5768,8 @@ namespace
                     }
                     Item* cible = nullptr;
                     EnchantmentSlot emplacement = EMPLACEMENT_SIGNATURE;
-                    if (s->second.effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE)
+                    std::string const& effet = s->second.effet;
+                    if (effet == CoaArtisanatIds::EFFET_COEUR_DE_FORGE || effet == "bastion_d_orage")
                     {
                         emplacement = EMPLACEMENT_FACETTE;
                         for (Item* o : pieces)
@@ -5685,12 +5777,20 @@ namespace
                                 cible = o;
                     }
                     else
-                        while (suivante < pieces.size() && !cible)
-                        {
-                            Item* o = pieces[suivante++];
-                            if (!o->GetEnchantmentId(EMPLACEMENT_SIGNATURE))
+                    {
+                        // T2-7 (21/10) : une signature va sur la premiere piece du banc qu'elle couvre (classe, sous-classe,
+                        // emplacement : PieceDeLaSignature) et qui n'en porte pas ; une facette du Fabricant d'armes (Oeuvre
+                        // absente) va en 8 sur la premiere piece qu'elle couvre (arme de melee ou bouclier) sans facette.
+                        // Avant : la piece suivante, quelle qu'elle soit (Egide sur du tissu, 18/10).
+                        if (EstEffetT2_7(effet))
+                            emplacement = EMPLACEMENT_FACETTE;
+                        for (Item* o : pieces)
+                            if (!o->GetEnchantmentId(emplacement) && PieceDeLaSignature(s->second, o->GetTemplate()))
+                            {
                                 cible = o;
-                        }
+                                break;
+                            }
+                    }
                     if (!cible)
                     {
                         texte += Acore::StringFormat(" {}:SANS PIECE", id);
@@ -5742,6 +5842,9 @@ namespace
                 avant->sursaut = Milliseconds(0);
                 avant->recharges.clear();
                 avant->chargesCoeur = 0;
+                // Les auras passives des signatures (Garde-lame, passifs du lot T, Grondement de T2-7) viennent d'etre retirees
+                // avec les autres : reposees ici, sinon elles manqueraient jusqu'au prochain changement d'equipement (21/10).
+                RecalculerSignatures(j);
                 j->RemoveAllSpellCooldown();
                 j->SetFullHealth();
                 Powers const ressource = j->getPowerType();
@@ -5765,6 +5868,7 @@ namespace
                 m.morts = 0;
                 m.egides0 = sa->egides;
                 m.coeurs0 = sa->coeurs;
+                m.procs0 = sa->procs;
                 m.pression = *pression;
                 m.ouverte = true;
                 ecrire(m);
@@ -5796,17 +5900,18 @@ namespace
                     actives += Acore::StringFormat("{}{}", actives.empty() ? "" : ",", d->enchant);
                 double const s = dureeMs / 1000.0;
                 // CustomData remis a zero (bot reconnecte, P-238) : compteurs de declenchements inferieurs au depart.
-                bool const reinit = sa->egides < m.egides0 || sa->coeurs < m.coeurs0;
+                bool const reinit = sa->egides < m.egides0 || sa->coeurs < m.coeurs0 || sa->procs < m.procs0;
                 Creature const* adv = m.adversaire ? ObjectAccessor::GetCreature(*j, m.adversaire) : nullptr;
                 std::string const etatAdv = !adv ? "parti" : !adv->IsAlive() ? "mort"
                     : Acore::StringFormat("{}{}", adv->IsInCombat() ? "combat" : "hors_combat", adv->GetVictim() == j ? "_bot" : "_autre");
                 auto const [nPortees, nTenues] = portees(m, false);
                 std::string const ligne = Acore::StringFormat("coa garde: bot={} classe={} etat={} actives={} portees={}/{} duree_ms={} degats={} "
                     "soins={} soins_bruts={} subis={} morts={} egides={} coeurs={} pression={} adversaire={} reinit={} dps={:.1f} hps={:.1f} "
-                    "hps_brut={:.1f} dtps={:.1f}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
+                    "hps_brut={:.1f} dtps={:.1f} procs={}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
                     actives.empty() ? "aucune" : actives, nPortees, nTenues, dureeMs, m.degats, m.soins, m.soinsBruts, m.subis, m.morts,
                     reinit ? 0 : sa->egides - m.egides0, reinit ? 0 : sa->coeurs - m.coeurs0, m.pression, etatAdv, reinit ? 1 : 0,
-                    s > 0 ? m.degats / s : 0.0, s > 0 ? m.soins / s : 0.0, s > 0 ? m.soinsBruts / s : 0.0, s > 0 ? m.subis / s : 0.0);
+                    s > 0 ? m.degats / s : 0.0, s > 0 ? m.soins / s : 0.0, s > 0 ? m.soinsBruts / s : 0.0, s > 0 ? m.subis / s : 0.0,
+                    reinit ? 0 : sa->procs - m.procs0);
                 if (echue || action == "rendre")
                 {
                     fermer(m);

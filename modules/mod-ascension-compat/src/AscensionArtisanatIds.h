@@ -107,6 +107,21 @@ namespace CoaArtisanatIds
     // <forme> est la forme de la ligne coa_artisanat_signature de la facette (ex. « facette:coeur_de_forge »).
     constexpr char const* PREFIXE_TALENT_FACETTE = "facette:";
 
+    // ---- T2-7 (21/10/2026) : facettes de degats de l'Oeuvre du Fabricant d'armes -----------------------------------------
+    // Ids figes par outils/artisanat-t2-7-dbc.py (artisanat/ids-figes-v2.json, bloc « plage:t2-7-facettes » 9113500-9113519).
+    // Effets (colonne coa_artisanat_signature.effet) : « grondement » (aura de proc sort_effet, passive tant que la facette est
+    // active ; degats = EffectTriggerSpell de l'aura) et « fendeur_orage » (eclair en chaine sort_effet, 3 cibles ; sur une
+    // cible controlee par un joueur, SORT_FENDEUR_JCJ a une seule cible, a la valeur JcJ).
+    constexpr char const* EFFET_GRONDEMENT = "grondement";
+    constexpr char const* EFFET_FENDEUR_ORAGE = "fendeur_orage";
+    constexpr uint32 SORT_FENDEUR_JCJ = 9113505;                // « effet:forge:fendeur-d-orage:jcj »
+    constexpr uint32 SORTS_T2_7_MIN = 9113500;                  // « plage:t2-7-facettes »
+    constexpr uint32 SORTS_T2_7_MAX = 9113519;
+    // Voie de chaque Oeuvre (forme eveillee et rangs) : une facette ne se pose que sur une Oeuvre de sa voie. Le Fabricant
+    // d'armes n'a pas encore d'Oeuvre (Lame d'orage maitresse, Pavois d'orage : a creer par le generateur) : ses facettes
+    // ne se posent sur aucune piece fabriquee, seulement par le banc G1.
+    constexpr char const* VOIE_OEUVRES_ARMURIER = "armurier";
+
     // Creatures du Directeur (mod-playerbots, EV_ENTREE_MIN/MAX de CoaDirecteur) : au butin des materiaux de monde, celles
     // de rang 2 (rare elite) et 4 (rare) sont classees elite ordinaire, dehors comme en donjon ; rangs 0, 1, 3 inchanges
     // (D-PO-48, precise par le PO le 16/10). Comprend aussi
