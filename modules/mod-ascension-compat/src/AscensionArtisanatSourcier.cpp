@@ -35,6 +35,7 @@
 // disponible », rien n'apparait.
 
 #include "AscensionArtisanatIds.h"
+#include "AscensionArtisanatSourcierSocle.h"
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "CommandScript.h"
@@ -73,7 +74,9 @@
 using namespace Acore::ChatCommands;
 using namespace CoaArtisanatIds;
 
-namespace
+// T2 (21/10) : le socle commun (temps, registre, exclusivite, marques, remises) passe de l'espace anonyme a CoaSourcier
+// (AscensionArtisanatSourcierSocle.h) pour les autres mini-evenements ; corps inchanges hors AfficherRecharge et Donner.
+namespace CoaSourcier
 {
     // ---- Temps de jeu : jour et semaine, remise a 06:00 (Paris) ----------------------------------------------------
 
@@ -143,16 +146,9 @@ namespace
     bool TableRegistre = false;
     bool ColonneRelanceJcj = false;   // relance_jcj_jour (migration 2026_10_16_01) ; absente : jamais de relance immediate
 
-    struct Registre
-    {
-        int64 jourLance = 0;
-        uint32 relanceTs = 0;       // instant (UTC) a partir duquel une relance est accordee le meme jour ; 0 : aucune
-        int64 essai2Jour = 0;       // jour ou le second essai (echec ordinaire) a ete accorde
-        int64 semaineGaranti = -1;  // semaine ou le Coeur garanti a ete donne
-        int64 recompJour = 0;
-        uint32 recompN = 0;
-        int64 relanceJcjJour = 0;   // jour ou la relance immediate (mort causee par un humain adverse) a ete accordee
-    };
+    // Registre (AscensionArtisanatSourcierSocle.h) : jourLance ; relanceTs = instant (UTC) a partir duquel une relance est
+    // accordee le meme jour (0 : aucune) ; essai2Jour = jour du second essai (echec ordinaire) ; semaineGaranti = semaine
+    // du Coeur garanti ; recompJour / recompN ; relanceJcjJour = jour de la relance immediate (mort par un humain adverse).
 
     Registre LireRegistre(uint32 guid)
     {
@@ -197,22 +193,28 @@ namespace
     }
 
     // Recharge affichee sur le bouton : jusqu'a la relance accordee, sinon jusqu'a la remise ; rien si accorde.
+    // T2 (21/10) : le registre est commun a tous les mini-evenements (un lancement de Sourcier par jour) : la recharge est
+    // posee sur CHAQUE sort lance de Sourcier que le joueur connait (Filon-mere, Faille tellurique...).
     void AfficherRecharge(Player* joueur, Registre const& r)
     {
-        if (!SORT_REVEILLER_FILON || !joueur->HasSpell(SORT_REVEILLER_FILON))
-            return;
         time_t const maintenant = Maintenant();
-        joueur->RemoveSpellCooldown(SORT_REVEILLER_FILON, true);
-        if (LancementAccorde(r, maintenant))
-            return;
+        bool const accorde = LancementAccorde(r, maintenant);
         time_t fin = ProchaineRemise(maintenant);
         if (r.relanceTs && time_t(r.relanceTs) > maintenant && time_t(r.relanceTs) < fin)
             fin = time_t(r.relanceTs);
         uint32 const ms = uint32(std::max<int64>(1, int64(fin - maintenant))) * IN_MILLISECONDS;
-        joueur->AddSpellCooldown(SORT_REVEILLER_FILON, 0, ms, true);
-        WorldPacket paquet;
-        joueur->BuildCooldownPacket(paquet, SPELL_COOLDOWN_FLAG_NONE, SORT_REVEILLER_FILON, ms);
-        joueur->SendDirectMessage(&paquet);
+        for (uint32 const sort : { SORT_REVEILLER_FILON, SORT_OUVRIR_FAILLE_TELLURIQUE })
+        {
+            if (!sort || !joueur->HasSpell(sort))
+                continue;
+            joueur->RemoveSpellCooldown(sort, true);
+            if (accorde)
+                continue;
+            joueur->AddSpellCooldown(sort, 0, ms, true);
+            WorldPacket paquet;
+            joueur->BuildCooldownPacket(paquet, SPELL_COOLDOWN_FLAG_NONE, sort, ms);
+            joueur->SendDirectMessage(&paquet);
+        }
     }
 
     // ---- Evenements actifs (exclusivite a RAYON_EXCLUSIF) : toutes cartes, donc sous verrou ----------------------------
@@ -254,15 +256,17 @@ namespace
 
     // ---- Marques (CustomData) : relient une unite a son Filon, sur le fil de sa carte -----------------------------------
 
-    std::string const CLE_FILON = "CoaSourcierFilon";
-    struct MarqueFilon final : public DataMap::Base
-    {
-        ObjectGuid filon;
-    };
+    std::string const CLE_FILON = "CoaSourcierFilon";   // MarqueFilon : AscensionArtisanatSourcierSocle.h
 
     void Marquer(Unit* u, ObjectGuid filon)
     {
         u->CustomData.GetDefault<MarqueFilon>(CLE_FILON)->filon = filon;
+    }
+
+    ObjectGuid PivotDe(Unit const* u)
+    {
+        MarqueFilon const* m = u ? u->CustomData.Get<MarqueFilon>(CLE_FILON) : nullptr;
+        return m ? m->filon : ObjectGuid::Empty;
     }
 
     bool EstHumain(Player const* p)
@@ -272,7 +276,7 @@ namespace
 
     // Donne `nombre` x `entree` a `joueur` (sur sa carte), fabricant `createur` si non vide ; ce qui ne tient pas en sac part
     // par courrier. Rend vrai si tout est parti.
-    bool Donner(Player* joueur, uint32 entree, uint32 nombre, ObjectGuid createur)
+    bool Donner(Player* joueur, uint32 entree, uint32 nombre, ObjectGuid createur, char const* expediteur)
     {
         if (!nombre || !sObjectMgr->GetItemTemplate(entree))
             return false;
@@ -300,7 +304,7 @@ namespace
             return true;
         // Sacs pleins : courrier, comme le coeur le fait pour les butins de quete (rien ne se perd).
         CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
-        MailDraft courrier("Le Filon-mère", "Vos sacs étaient pleins.");
+        MailDraft courrier(expediteur, "Vos sacs étaient pleins.");
         while (restant)
         {
             ItemTemplate const* proto = sObjectMgr->GetItemTemplate(entree);
@@ -386,12 +390,7 @@ namespace
             ChatHandler(j->GetSession()).SendNotification("Le Filon-mère vous livre un Cœur de foudre.");
     }
 
-    // Le Coeur garanti, puis la chance : decision pure (le banc la rejoue sans rien ecrire).
-    struct DecisionCoeur
-    {
-        bool garanti = false;
-        bool obtenu = false;
-    };
+    // Le Coeur garanti, puis la chance : decision pure (le banc la rejoue sans rien ecrire). DecisionCoeur : socle.
     DecisionCoeur DeciderCoeur(Registre& r, int64 semaine, uint32 comptesHumains)
     {
         DecisionCoeur d;
@@ -404,6 +403,11 @@ namespace
         d.obtenu = urand(1, 100) <= CHANCE_COEUR_POUR_CENT;
         return d;
     }
+}
+
+namespace
+{
+    using namespace CoaSourcier;
 
     // ---- Le Filon-mere ----------------------------------------------------------------------------------------------
 

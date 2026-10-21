@@ -24,6 +24,7 @@ void AddSC_AscensionClosestResurrection();
 void AddSC_AscensionThreatRedirect();
 void AddAscensionArtisanatScripts();
 void AddAscensionArtisanatSourcierScripts();
+void AddAscensionArtisanatSourcierDirecteurScripts();   // lot T2 du Sourcier (21/10) : voie Directeur
 void AddAscensionStockCoefficientScripts();
 void AddAscensionScalingBaseScripts();
 void AddCoABugReportScripts();
@@ -369,4 +370,5 @@ void Addmod_ascension_compatScripts()
     AddSC_AscensionThreatRedirect();
     AddAscensionArtisanatScripts();
     AddAscensionArtisanatSourcierScripts();
+    AddAscensionArtisanatSourcierDirecteurScripts();
 }

@@ -302,6 +302,38 @@ namespace CoaArtisanatIds
     constexpr float FLAIR_PORTEE = 300.0f;          // m
     constexpr float FLAIR_DEJA_VU = 60.0f;          // m : plus pres, le noeud se voit, rien n'est signale
     constexpr uint32 FLAIR_PERIODE_MS = 10000;
+
+    // ---- Lot T2 du Sourcier au 60 (21/10/2026), lot MINAGE : la Faille tellurique et le socle des mini-evenements -----
+    //
+    // Conception : docs/CONCEPTION-artisanat-T2-sourcier-60.md (coa-project, branche t2-sourcier). Bloc d'ids reserve au
+    // registre (artisanat/ids-figes-v2.json, cles plage:t2-sourcier-*), mesure libre le 21/10 au PTR et au Live :
+    // sorts 9113900-9113919, objets 9101280-9101289, creatures 9105010-9105049, objets de jeu 9101091-9101099,
+    // verrous 5190-5194. Pose : outils/artisanat-sourcier-t2.py (DBC et monde, SQL de pose et de retour).
+    //
+    // Voie « module + Directeur » : le module tient le lancement, le registre (le MEME que le Filon-mere : un lancement de
+    // Sourcier par jour, quel que soit l'evenement), l'objet pivot, les participants, la victoire (mort du chef reserve)
+    // et toutes les recompenses ; le Directeur ne fournit que les vagues, sur la demande `sourcier` ecrite par
+    // mod-playerbots (aucun lien de code : ids recopies la-bas, CoaDirecteurSourcier.inc). Le module ne lit jamais
+    // l'etat du Directeur : il ADOPTE les creatures des gabarits reserves qui paraissent a RAYON_ADOPTION du pivot.
+    constexpr uint32 SORT_OUVRIR_FAILLE_TELLURIQUE = 9113900;   // sort LANCE (sur soi, hors combat), PartA : outils/artisanat-sourcier-t2.py
+    constexpr uint32 SORT_MARQUEUR_FAILLE_TELLURIQUE = 9113358; // dev-dbc eb2a980 « talent:minage:sourcier:faille-tellurique:1 »
+    constexpr uint32 GO_FAILLE_TELLURIQUE = 9101095;            // objet pivot (type 5, decor, sans butin), ScriptName ci-dessous
+    constexpr char const* SCRIPT_FAILLE_TELLURIQUE = "go_coa_faille_tellurique";
+    // Menace (gabarits du Directeur, copies au niveau 1 de 9100001-9100003 ; niveau impose a l'invocation) et chef.
+    constexpr std::array<uint32, 3> PNJ_MENACE_TELLURIQUE = { 9105010, 9105011, 9105012 };   // Etincelle, Cyclone, Rageur
+    constexpr uint32 PNJ_GARDIEN_TELLURIQUE = 9105013;          // chef (copie de 9100004) : sa mort = victoire
+    constexpr uint32 GO_GEODES_FOUDRE = 9101010;                // [M] gameobject_template 9101010 « Geodes de foudre »
+    constexpr uint32 GEODES_NOMBRE = 3;
+    constexpr uint32 GEODES_VIE_S = 300;
+    constexpr float GEODES_ECART = 6.0f;                        // m autour du pivot
+    // Durees (conception § 2.1) : 5 min de combat + 20 s de presage + 30 s de marge ; le Directeur s'eteint a sa propre
+    // echeance (faille_tellurique.py, DUREE_MAX_S = 330 s).
+    constexpr uint32 DUREE_TELLURIQUE_S = 5 * 60 + 20 + 30;
+    // Refus du Directeur (service eteint, place prise, pause, demande perdue) : aucune creature reservee en ATTENTE_DEBUT_S
+    // -> pivot retire, lancement RENDU (registre remis), message au joueur. [H] 180 s.
+    constexpr uint32 ATTENTE_DEBUT_S = 180;
+    constexpr float RAYON_ADOPTION = 120.0f;                    // m autour du pivot (la faille du Directeur est a 45 yd)
+    constexpr uint32 ADOPTION_PERIODE_MS = 2000;
 }
 
 #endif
