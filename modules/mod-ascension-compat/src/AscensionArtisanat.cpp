@@ -5784,8 +5784,10 @@ namespace
                         // Avant : la piece suivante, quelle qu'elle soit (Egide sur du tissu, 18/10).
                         if (EstEffetT2_7(effet))
                             emplacement = EMPLACEMENT_FACETTE;
+                        // Une Oeuvre ne porte que sa facette, jamais une signature a part (conception T v2 § 5).
                         for (Item* o : pieces)
-                            if (!o->GetEnchantmentId(emplacement) && PieceDeLaSignature(s->second, o->GetTemplate()))
+                            if (!o->GetEnchantmentId(emplacement) && !EstOeuvre(o->GetEntry())
+                                && PieceDeLaSignature(s->second, o->GetTemplate()))
                             {
                                 cible = o;
                                 break;
