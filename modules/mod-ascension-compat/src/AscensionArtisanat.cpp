@@ -124,6 +124,13 @@ namespace
             != CoaArtisanatIds::OEUVRES.end();
     }
 
+    // Voie (talents) d'une Oeuvre : toutes les entrees de OEUVRES sont la Cuirasse du Maitre armurier (forme eveillee et
+    // rangs). Une Oeuvre d'une autre voie s'ajoutera ici avec sa propre liste (T2-7, revue du 21/10). Vide : pas une Oeuvre.
+    std::string_view VoieDeLOeuvre(uint32 entree)
+    {
+        return EstOeuvre(entree) ? std::string_view(CoaArtisanatIds::VOIE_OEUVRES_ARMURIER) : std::string_view();
+    }
+
     // Un enchantement peut-il porter un GUID dans ses charges sans que le coeur les decompte ? Verdict T1-1 : le coeur ne
     // touche aux charges d'un emplacement PROP que pour un type ITEM_ENCHANTMENT_TYPE_COMBAT_SPELL (Player.cpp:7664-7733)
     // et ne vide un emplacement que si sa duree est non nulle (UpdateEnchantTime, Player::AddEnchantmentDuration). On
@@ -1395,6 +1402,12 @@ namespace
             if (info->Effects[EFFECT_0].ApplyAuraName != SPELL_AURA_PROC_TRIGGER_SPELL_WITH_VALUE || !declenche
                 || !sSpellMgr->GetSpellInfo(declenche) || declenche < SORTS_T2_7_MIN || declenche > SORTS_T2_7_MAX)
                 return "aura de Grondement sans declenchement (231) d'un sort du bloc T2-7";
+            // Sans sa ligne spell_proc, le coeur fabrique une entree par defaut (HitMask 0 = coups normaux et critiques,
+            // SpellMgr::LoadSpellProcs) : le Grondement partirait sur 20 % de TOUS les coups recus, sans erreur (revue du
+            // 21/10, M1). Charge apres LoadSpellProcs (OnStartup).
+            SpellProcEntry const* proc = sSpellMgr->GetSpellProcEntry(s.sortEffet);
+            if (!proc || proc->HitMask != (PROC_HIT_PARRY | PROC_HIT_BLOCK))
+                return "aura de Grondement sans sa ligne spell_proc (HitMask parade | blocage) : artisanat/genere/t2-7/sql/spell_proc.sql";
         }
         else if (!sSpellMgr->GetSpellInfo(SORT_FENDEUR_JCJ) || !s.chanceCentiemes)
             return "Fendeur d'orage sans sa version JcJ ou sans chance par coup";
@@ -2122,9 +2135,12 @@ namespace
         uint32 const metier = MetierDeRecette(recette);
         if (!metier || metier != e->metierC)
             return 0;
+        // T2-7 (revue du 21/10, m5) : seule une facette de la voie de l'Oeuvre fabriquee est retenue (le jour ou un artisan
+        // pourrait connaitre des facettes de deux voies, l'Oeuvre ne doit pas sortir sans facette ni avec celle d'une autre).
+        std::string_view const voieOeuvre = VoieDeLOeuvre(objet->GetEntry());
         std::string forme;
         for (uint32 sort : e->sorts)
-            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier
+            if (auto it = Talents.find(sort); it != Talents.end() && it->second.metier == metier && it->second.voie == voieOeuvre
                 && it->second.talent.starts_with(CoaArtisanatIds::PREFIXE_TALENT_FACETTE))
                 forme = it->second.talent.substr(std::string_view(CoaArtisanatIds::PREFIXE_TALENT_FACETTE).size());
         if (forme.empty())
@@ -2140,7 +2156,6 @@ namespace
         }
         // T2-7 : une facette ne se pose que sur une Oeuvre de sa voie (Grondement et Fendeur d'orage, voie du Fabricant
         // d'armes, jamais sur la Cuirasse du Maitre armurier). Seules les Oeuvres de l'Armurier existent au 21/10.
-        std::string_view const voieOeuvre = EstOeuvre(objet->GetEntry()) ? CoaArtisanatIds::VOIE_OEUVRES_ARMURIER : "";
         if (choisie->voie != voieOeuvre)
         {
             LOG_ERROR("module", "coa sourcier: facette {} (voie {}) sur l'Oeuvre {} (voie {}) : facette non posee", forme,
@@ -2170,7 +2185,9 @@ namespace
         uint32 egides = 0;                  // declenchements de l'Egide (absorbe_sous_seuil) de ce joueur (banc de garde G1)
         uint32 pierres = 0;                 // lot T : declenchements de Pierre de garde (soin_sous_seuil), hors compteur G1
         uint32 coeurs = 0;                  // declenchements de Coeur de forge de ce joueur (banc de garde G1)
-        uint32 procs = 0;                   // declenchements des signatures a proc (DeclencherProcs) et de Grondement (banc G1)
+        uint32 procs = 0;                   // declenchements des signatures a proc du lot T et de l'Astrolabe (DeclencherProcs, banc G1)
+        uint32 fendeurs = 0;                // T2-7 : eclairs du Fendeur d'orage partis (lancement accepte), banc G1
+        uint32 grondements = 0;             // T2-7 : degats du Grondement calcules sur une victime (ReduireZoneEnJcJ), banc G1
         int32 gardeParade = 0;              // Garde-lame pose : score de parade et de blocage (0 : aucune aura)
         int32 gardeBlocage = 0;
         uint32 gardeSort = 0;
@@ -2649,9 +2666,11 @@ namespace
                 if (v <= 0)
                     continue;
                 uint32 const sort = jcj ? CoaArtisanatIds::SORT_FENDEUR_JCJ : s->sortEffet;
-                joueur->CastCustomSpell(cible, sort, &v, nullptr, nullptr, true);
-                LOG_INFO("module", "coa artisanat: fendeur d'orage joueur={} cible={} enchant={} sort={} valeur={} jcj={}",
-                    joueur->GetGUID().GetCounter(), cible->GetGUID().ToString(), s->enchant, sort, v, jcj ? 1 : 0);
+                SpellCastResult const res = joueur->CastCustomSpell(cible, sort, &v, nullptr, nullptr, true);
+                LOG_INFO("module", "coa artisanat: fendeur d'orage joueur={} cible={} enchant={} sort={} valeur={} jcj={} resultat={}",
+                    joueur->GetGUID().GetCounter(), cible->GetGUID().ToString(), s->enchant, sort, v, jcj ? 1 : 0, uint32(res));
+                if (res == SPELL_CAST_OK)
+                    ++a->fendeurs;
             }
             else if (e == "proc_degats" || e == "proc_degats_distance")
             {
@@ -2685,7 +2704,8 @@ namespace
             }
             recharge = maintenant + Milliseconds(s->rechargeMs);
             ++DeclenchementsProcs;
-            ++a->procs;   // banc G1 : declenchements par bot
+            if (!fendeur)
+                ++a->procs;   // banc G1 : declenchements par bot (le Fendeur a son propre compteur)
         }
     }
 
@@ -2715,7 +2735,7 @@ namespace
                 SpellInfo const* aura = sSpellMgr->GetSpellInfo(s->sortEffet);
                 vise = aura && aura->Effects[EFFECT_0].TriggerSpell == sort->Id;
                 if (vise)
-                    ++a->procs;   // un Grondement parti (banc G1), JcJ ou non
+                    ++a->grondements;   // un Grondement qui touche (banc G1), JcJ ou non
             }
             if (!vise || !s->valeur)
                 continue;
@@ -3035,7 +3055,7 @@ namespace
         Milliseconds debut{ 0 }, fin{ 0 };
         bool ouverte = false;
         uint64 degats = 0, soins = 0, soinsBruts = 0, subis = 0;
-        uint32 morts = 0, egides0 = 0, coeurs0 = 0, procs0 = 0, pression = 100;
+        uint32 morts = 0, egides0 = 0, coeurs0 = 0, procs0 = 0, fendeurs0 = 0, grondements0 = 0, pression = 100;
         std::vector<ObjectGuid> pieces;
         std::vector<uint8> emplacements;                     // emplacement d'equipement de chaque piece du banc
         std::vector<std::pair<uint8, ObjectGuid>> origine;   // (emplacement, piece d'origine renvoyee en sac par equiper)
@@ -5871,6 +5891,8 @@ namespace
                 m.egides0 = sa->egides;
                 m.coeurs0 = sa->coeurs;
                 m.procs0 = sa->procs;
+                m.fendeurs0 = sa->fendeurs;
+                m.grondements0 = sa->grondements;
                 m.pression = *pression;
                 m.ouverte = true;
                 ecrire(m);
@@ -5902,18 +5924,20 @@ namespace
                     actives += Acore::StringFormat("{}{}", actives.empty() ? "" : ",", d->enchant);
                 double const s = dureeMs / 1000.0;
                 // CustomData remis a zero (bot reconnecte, P-238) : compteurs de declenchements inferieurs au depart.
-                bool const reinit = sa->egides < m.egides0 || sa->coeurs < m.coeurs0 || sa->procs < m.procs0;
+                bool const reinit = sa->egides < m.egides0 || sa->coeurs < m.coeurs0 || sa->procs < m.procs0
+                    || sa->fendeurs < m.fendeurs0 || sa->grondements < m.grondements0;
                 Creature const* adv = m.adversaire ? ObjectAccessor::GetCreature(*j, m.adversaire) : nullptr;
                 std::string const etatAdv = !adv ? "parti" : !adv->IsAlive() ? "mort"
                     : Acore::StringFormat("{}{}", adv->IsInCombat() ? "combat" : "hors_combat", adv->GetVictim() == j ? "_bot" : "_autre");
                 auto const [nPortees, nTenues] = portees(m, false);
                 std::string const ligne = Acore::StringFormat("coa garde: bot={} classe={} etat={} actives={} portees={}/{} duree_ms={} degats={} "
                     "soins={} soins_bruts={} subis={} morts={} egides={} coeurs={} pression={} adversaire={} reinit={} dps={:.1f} hps={:.1f} "
-                    "hps_brut={:.1f} dtps={:.1f} procs={}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
+                    "hps_brut={:.1f} dtps={:.1f} procs={} fendeurs={} grondements={}", cle, uint32(j->getClass()), m.ouverte ? (echue ? "echue" : "en_cours") : "fermee",
                     actives.empty() ? "aucune" : actives, nPortees, nTenues, dureeMs, m.degats, m.soins, m.soinsBruts, m.subis, m.morts,
                     reinit ? 0 : sa->egides - m.egides0, reinit ? 0 : sa->coeurs - m.coeurs0, m.pression, etatAdv, reinit ? 1 : 0,
                     s > 0 ? m.degats / s : 0.0, s > 0 ? m.soins / s : 0.0, s > 0 ? m.soinsBruts / s : 0.0, s > 0 ? m.subis / s : 0.0,
-                    reinit ? 0 : sa->procs - m.procs0);
+                    reinit ? 0 : sa->procs - m.procs0, reinit ? 0 : sa->fendeurs - m.fendeurs0,
+                    reinit ? 0 : sa->grondements - m.grondements0);
                 if (echue || action == "rendre")
                 {
                     fermer(m);
