@@ -203,7 +203,8 @@ namespace CoaSourcier
         if (r.relanceTs && time_t(r.relanceTs) > maintenant && time_t(r.relanceTs) < fin)
             fin = time_t(r.relanceTs);
         uint32 const ms = uint32(std::max<int64>(1, int64(fin - maintenant))) * IN_MILLISECONDS;
-        for (uint32 const sort : { SORT_REVEILLER_FILON, SORT_OUVRIR_FAILLE_TELLURIQUE })
+        for (uint32 const sort : { SORT_REVEILLER_FILON, SORT_OUVRIR_FAILLE_TELLURIQUE, SORT_PLANTER_GRAINE_TEMPETE,
+                                   SORT_FAIRE_ECLORE_TOMBES })
         {
             if (!sort || !joueur->HasSpell(sort))
                 continue;
@@ -240,7 +241,7 @@ namespace CoaSourcier
         return false;
     }
 
-    void InscrireActif(GameObject* filon)
+    void InscrireActif(WorldObject* filon)
     {
         std::lock_guard<std::mutex> verrou(VerrouActifs);
         Actifs.push_back({ filon->GetGUID(), filon->GetMapId(), filon->GetInstanceId(), filon->GetPositionX(), filon->GetPositionY() });

@@ -25,6 +25,7 @@ void AddSC_AscensionThreatRedirect();
 void AddAscensionArtisanatScripts();
 void AddAscensionArtisanatSourcierScripts();
 void AddAscensionArtisanatSourcierDirecteurScripts();   // lot T2 du Sourcier (21/10) : voie Directeur
+void AddAscensionArtisanatSourcierHerboristerieScripts();   // lot T2 du Sourcier (21/10) : Jardin d'orage, Floraison des tombes
 void AddAscensionStockCoefficientScripts();
 void AddAscensionScalingBaseScripts();
 void AddCoABugReportScripts();
@@ -371,4 +372,5 @@ void Addmod_ascension_compatScripts()
     AddAscensionArtisanatScripts();
     AddAscensionArtisanatSourcierScripts();
     AddAscensionArtisanatSourcierDirecteurScripts();
+    AddAscensionArtisanatSourcierHerboristerieScripts();
 }

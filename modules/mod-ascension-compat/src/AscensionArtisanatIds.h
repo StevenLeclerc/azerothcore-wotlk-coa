@@ -334,6 +334,72 @@ namespace CoaArtisanatIds
     constexpr uint32 ATTENTE_DEBUT_S = 180;
     constexpr float RAYON_ADOPTION = 120.0f;                    // m autour du pivot (la faille du Directeur est a 45 yd)
     constexpr uint32 ADOPTION_PERIODE_MS = 2000;
+
+    // ---- Lot T2 du Sourcier au 60 (21/10/2026), lot HERBORISTERIE : Jardin d'orage et Floraison des tombes ------------
+    //
+    // Conception : docs/CONCEPTION-artisanat-T2-sourcier-60.md § 2.2 (coa-project, branche t2-sourcier). Code :
+    // AscensionArtisanatSourcierHerboristerie.cpp (les deux evenements, un seul .cpp : remises et participants communs).
+    // Pose : outils/artisanat-sourcier-t2-herboristerie.py (DBC et monde, SQL de pose et de retour). Memes regles que la
+    // Faille tellurique : registre commun du Sourcier (un lancement par jour, tous evenements confondus), garanti
+    // hebdomadaire a COMPTES_HUMAINS_GARANTI comptes sinon CHANCE_COEUR_POUR_CENT, recompenses de participant
+    // (RECOMPENSES_PAR_JOUR, NIVEAU_RECOMPENSE), echecs et relances du Filon-mere.
+    //
+    // JARDIN D'ORAGE, voie module + Directeur : le module tient la Graine (creature pivot, PV = jauge), la jauge, la
+    // victoire (jauge > 0 a l'echeance), la Fleur-tempete epanouie et toutes les remises ; le Directeur envoie les
+    // elementaires ATTIRES en `charger_vers` sur la Graine (exploitation/directeur/jardin_orage.py, demande `sourcier`
+    // « jardin_orage » ecrite par mod-playerbots). Un attire adopte a RAYON_GRAINE de la Graine s'y dissout (retire par le
+    // module : c'est l'objectif de l'evenement) et la jauge recule. Refus du Directeur : aucun attire en ATTENTE_DEBUT_S.
+    constexpr uint32 SORT_PLANTER_GRAINE_TEMPETE = 9113901;     // sort LANCE (sur soi, hors combat)
+    constexpr uint32 SORT_MARQUEUR_JARDIN = 9113399;            // talents.py « talent:herboristerie:sourcier:jardin-orage:1 »
+    constexpr uint32 PNJ_GRAINE_TEMPETE = 9105020;              // pivot : creature neutre, immobile, inattaquable
+    constexpr char const* SCRIPT_GRAINE_TEMPETE = "npc_coa_graine_tempete";
+    constexpr std::array<uint32, 3> PNJ_ATTIRES_JARDIN = { 9105021, 9105022, 9105023 };   // copies de 9100001-9100003
+    constexpr uint32 GO_FLEUR_TEMPETE_EPANOUIE = 9101092;       // coffre sans verrou, butin propre, cueilli 1 fois chacun
+    constexpr char const* SCRIPT_FLEUR_TEMPETE = "go_coa_fleur_tempete";
+    constexpr uint32 OBJET_FLEUR_TEMPETE = 9101280;             // materiau legendaire (qualite 5, non lie, pile 1)
+    // Durees : 10 min de croissance, presage de 20 s compris, plus 10 s de marge ; le service s'eteint a 600 s
+    // (jardin_orage.py DUREE_MAX_S), avant l'eclosion.
+    constexpr uint32 DUREE_JARDIN_S = 10 * 60 + 10;
+    // Jauge en pour mille [H] (conception § 4 (6)) : depart 30 %, +1 % toutes les 6 s, -8 % par attire arrive a la Graine.
+    constexpr uint32 JAUGE_DEPART = 300;
+    constexpr uint32 JAUGE_MAX = 1000;
+    constexpr uint32 JAUGE_POUSSE = 10;
+    constexpr uint32 JAUGE_POUSSE_PERIODE_S = 6;
+    constexpr uint32 JAUGE_PERTE = 80;
+    constexpr float RAYON_GRAINE = 4.0f;                        // m (a l'horizontale) : un attire plus pres se dissout
+    constexpr uint32 JAUGE_ANNONCE_S = 60;                      // la jauge est dite au groupe toutes les 60 s
+    constexpr uint32 FLEUR_VIE_S = 180;                         // Fleur-tempete epanouie : cueillette, puis disparition
+    constexpr uint32 PLACE_CUEILLETTE = 3;                      // cases libres exigees (butin : 3 objets au plus)
+    // Le pur de la cueillette (conception § 2.2 : « pur a 25 % » [H]) : Fleur d'eclair pure (MATERIAUX_PURS, base 9101206),
+    // donnee par le module avec son fabricant (Donner), comme tout materiau pur ; le butin de l'objet (Fleurs d'eclair,
+    // Fragments de foudre) est celui de gameobject_loot_template 9101092.
+    constexpr uint32 PUR_FLEUR_TEMPETE = 9101245;
+    constexpr uint32 CHANCE_PUR_FLEUR_POUR_CENT = 25;
+
+    // FLORAISON DES TOMBES, voie module seule (changement par rapport a la conception v2, § 2.2) : le champ (objet pivot)
+    // fait apparaitre une Ame egaree toutes les AME_PERIODE_S a AME_ECART_MIN-MAX m de lui ; on la capture par le sort
+    // d'ouverture de son verrou (2 s d'incantation, verrou LOCK_KEY_SPELL, comme nos noeuds : D-PO-35) ; a la
+    // CAPTURES_AME_ANCIENNE-ieme capture, l'Ame ancienne (elite 60, PV par la table du Colosse) se leve ; sa mort = victoire.
+    constexpr uint32 SORT_FAIRE_ECLORE_TOMBES = 9113902;        // sort LANCE (sur soi, hors combat), pres d'un cimetiere
+    constexpr uint32 SORT_MARQUEUR_FLORAISON = 9113398;         // talents.py « talent:herboristerie:sourcier:floraison-tombes:1 »
+    constexpr uint32 SORT_CAPTURER_AME = 9113903;               // ouverture du verrou VERROU_AME_EGAREE (jamais appris)
+    constexpr uint32 VERROU_AME_EGAREE = 5190;                  // Lock.dbc : cas 0 = LOCK_KEY_SPELL SORT_CAPTURER_AME
+    constexpr uint32 GO_CHAMP_FLEURS_TOMBE = 9101093;           // pivot (type 5, decor)
+    constexpr char const* SCRIPT_CHAMP_FLEURS_TOMBE = "go_coa_champ_fleurs_tombe";
+    constexpr uint32 GO_AME_EGAREE = 9101097;                   // coffre a verrou, sans butin
+    constexpr char const* SCRIPT_AME_EGAREE = "go_coa_ame_egaree";
+    constexpr uint32 PNJ_AME_ANCIENNE = 9105026;                // elite 60/60, copie du Colosse d'orage, sans butin
+    constexpr uint32 OBJET_FLEUR_ETERNITE = 9101281;            // materiau legendaire (qualite 5, non lie, pile 1)
+    constexpr uint32 DUREE_FLORAISON_S = 10 * 60;
+    constexpr uint32 AME_PERIODE_S = 15;                        // [H]
+    constexpr uint32 AME_VIE_S = 40;
+    constexpr float AME_ECART_MIN = 10.0f;
+    constexpr float AME_ECART_MAX = 25.0f;
+    constexpr uint32 CAPTURES_AME_ANCIENNE = 10;
+    constexpr float RAYON_CIMETIERE = 150.0f;                   // m : un point d'ame (game_graveyard) de la carte [H]
+    // Ressources d'evenement de la Nuit des morts (famille Glas), epique [M item_template du PTR, 21/10] : recompense de
+    // participant de la Floraison (les tombes sont du Glas ; le Jardin paie l'Orage, comme le Filon-mere).
+    constexpr uint32 RESSOURCE_GLAS_EPIQUE = 9100117;           // Ame captive, qualite 4
 }
 
 #endif

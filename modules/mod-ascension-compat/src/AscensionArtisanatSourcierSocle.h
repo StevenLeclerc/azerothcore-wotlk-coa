@@ -31,6 +31,7 @@
 class GameObject;
 class Player;
 class Unit;
+class WorldObject;
 
 namespace CoaSourcier
 {
@@ -64,7 +65,8 @@ namespace CoaSourcier
     // ---- Exclusivite (toutes cartes, sous verrou) ----
     extern std::atomic<uint32> NombreActifs;
     bool EvenementProche(uint32 carte, uint32 instance, float x, float y);
-    void InscrireActif(GameObject* pivot);
+    // T2 HERBORISTERIE (21/10) : WorldObject, le pivot du Jardin d'orage est une creature (la Graine-tempete).
+    void InscrireActif(WorldObject* pivot);
     void RetirerActif(ObjectGuid pivot);
 
     // ---- Marque d'unite -> objet pivot (CustomData, fil de la carte) ----
