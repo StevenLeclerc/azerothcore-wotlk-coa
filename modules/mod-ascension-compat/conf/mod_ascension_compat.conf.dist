@@ -225,6 +225,25 @@ AscensionCompat.DeadPlayerHealthGuard = 1
 
 AscensionCompat.FlyingMountsOnlyInFlyingAreas = 1
 
+#
+#    AscensionCompat.WhirlpoolAirborneVisual
+#    AscensionCompat.WhirlpoolAirborneVisualMs
+#        Description: Repere visuel de la projection de Whirlpool (21/10/2026, R-20261021-1505,
+#                     coa-project/docs/DIAG-bot-envol-kattailu-20261020.md). Whirlpool (526362) projette les
+#                     personnages pris dans son tourbillon (526365 : ~5,8 m, ~1,6 s) ; la projection ne change pas.
+#                     A 1, un personnage (joueur ou bot) projete porte pendant la duree donnee un tourbillon d'eau
+#                     cosmetique (aura 47335, sans aucun effet de jeu, cachee de la barre d'auras et du journal),
+#                     pour qu'on voie qu'il est pris dans un sort et non qu'il vole. Exige la ligne
+#                     spell_script_names de data/sql/db-world/2026_10_21_01_ascension_whirlpool_visuel.sql :
+#                     sans elle, l'option ne fait rien. Relues a chaque projection (`reload config`).
+#                     Duree bornee a 500-5000 ms.
+#        Default:     1    - (tourbillon visible pendant la projection)
+#                     0    - (comportement d'avant : aucun repere)
+#                     2000 - (duree en millisecondes)
+
+AscensionCompat.WhirlpoolAirborneVisual = 1
+AscensionCompat.WhirlpoolAirborneVisualMs = 2000
+
 ###################################################################################################
 # ARTISANAT (refonte, lot 1) - AscensionArtisanat.cpp
 #

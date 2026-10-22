@@ -1,4 +1,5 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
+#include "Config.h"
 #include "Creature.h"
 #include "EventMap.h"
 #include "MotionMaster.h"
@@ -8,6 +9,7 @@
 #include "SpellAuras.h"
 #include "SpellScript.h"
 #include "TemporarySummon.h"
+#include <algorithm>
 
 namespace
 {
@@ -147,6 +149,70 @@ class spell_ascension_zephyr_pull : public SpellScript
     }
 };
 
+// CoA (21/10/2026, R-20261021-1505, coa-project/docs/DIAG-bot-envol-kattailu-20261020.md) : Whirlpool (526362)
+// projette les personnages pris dans son tourbillon par 526365 (KNOCK_BACK, vz 15 : ~5,8 m, ~1,6 s en l'air). La
+// projection reste telle quelle (decision du commanditaire) ; seul un repere visuel s'y ajoute, pour qu'un joueur
+// comprenne qu'un personnage en l'air est pris dans un sort et non qu'il vole. Au moment ou 526365 frappe un
+// personnage (joueur ou bot) que le coeur va effectivement projeter, on pose sur lui l'aura cosmetique 47335
+// « Cyclone Impact Visual (Blue) » (Spell.dbc client = serveur, md5 identique) : un seul effet APPLY_AURA DUMMY,
+// aucun gestionnaire dans le coeur ni dans ce module, aucune ligne spell_script_names / spell_proc / spell_linked_spell,
+// cachee de la barre d'auras et du journal de combat (Attributes 0x180, AttributesEx 0x10000000), non dissipable
+// (DispelType 0). Son SpellVisual 10556 porte le StateKit 9711 : Spells\CycloneWater_State, echelle 3, au pied du
+// personnage, donc il le suit pendant la projection ; modele, peau et 4 textures presents dans le client (common-2,
+// common, patch-N). Lancee par la cible sur elle-meme, sans cout, sans portee, sans declenchement. Duree ramenee a
+// AscensionCompat.WhirlpoolAirborneVisualMs (2000 par defaut ; 3000 dans le DBC). Option
+// AscensionCompat.WhirlpoolAirborneVisual (defaut 1), relue a chaque projection. Lie par spell_script_names
+// (data/sql/db-world/2026_10_21_01_ascension_whirlpool_visuel.sql) : sans cette ligne, rien ne change.
+enum WhirlpoolVisualSpells : uint32
+{
+    SPELL_WHIRLPOOL_KNOCK_UP = 526365,
+    SPELL_WHIRLPOOL_AIRBORNE_VISUAL = 47335
+};
+
+class spell_ascension_whirlpool_airborne_visual : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_whirlpool_airborne_visual);
+
+    bool Validate(SpellInfo const* spellInfo) override
+    {
+        return spellInfo->Id == SPELL_WHIRLPOOL_KNOCK_UP &&
+            spellInfo->Effects[EFFECT_0].Effect == SPELL_EFFECT_KNOCK_BACK &&
+            ValidateSpellInfo({SPELL_WHIRLPOOL_AIRBORNE_VISUAL});
+    }
+
+    // Runs before the default knockback handler of the same effect: reproduce the core's own refusals for a player
+    // (Spell::EffectKnockBack) so the cyclone is only shown on a character that is really thrown up.
+    void ShowAirborneVisual(SpellEffIndex /*effIndex*/)
+    {
+        if (!sConfigMgr->GetOption<bool>("AscensionCompat.Enable", true) ||
+            !sConfigMgr->GetOption<bool>("AscensionCompat.WhirlpoolAirborneVisual", true))
+            return;
+
+        Player* target = GetHitPlayer();
+        if (!target || !target->IsAlive() || !target->IsInWorld() || target->IsBeingTeleported() ||
+            target->GetVehicle() || target->IsInFlight() || target->HasUnitState(UNIT_STATE_ROOT))
+            return;
+
+        int32 const duration = int32(std::clamp<uint32>(
+            sConfigMgr->GetOption<uint32>("AscensionCompat.WhirlpoolAirborneVisualMs", 2000), 500, 5000));
+
+        // A second Whirlpool tick on a character still in the air refreshes the same aura (one aura per character).
+        Aura* aura = target->GetAura(SPELL_WHIRLPOOL_AIRBORNE_VISUAL, target->GetGUID());
+        if (!aura)
+            aura = target->AddAura(SPELL_WHIRLPOOL_AIRBORNE_VISUAL, target);
+        if (!aura)
+            return;
+        aura->SetMaxDuration(duration);
+        aura->SetDuration(duration);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_whirlpool_airborne_visual::ShowAirborneVisual,
+            EFFECT_0, SPELL_EFFECT_KNOCK_BACK);
+    }
+};
+
 class stormbringer_zephyr_metadata : public GlobalScript
 {
 public:
@@ -170,5 +236,6 @@ void AddSC_AscensionStormbringerZephyr()
     RegisterCreatureAI(npc_ascension_stormbringer_zephyr);
     RegisterSpellScript(spell_ascension_raging_zephyr);
     RegisterSpellScript(spell_ascension_zephyr_pull);
+    RegisterSpellScript(spell_ascension_whirlpool_airborne_visual);
     new stormbringer_zephyr_metadata();
 }
