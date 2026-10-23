@@ -24,11 +24,61 @@ uint32 SummonVulnerability(Player* player, Unit* attacker, Unit* target)
             percent = std::max(percent,uint32(std::max(0,Amount(805657,1))));
     return percent;
 }
+namespace
+{
+// The layout a rewrite below assumes, read in Spell.dbc on 2026-10-23. A client import that moves it
+// is journalled once instead of being rewritten blind (T-31), and the rewrite is then skipped.
+bool ExpectEffect(SpellInfo const* info, uint8 slot, uint32 effect, uint32 aura)
+{
+    SpellEffectInfo const& current = info->Effects[slot];
+    if (current.Effect == effect && current.ApplyAuraName == aura)
+        return true;
+    if (AscensionContract::Detail::FirstFailure("Tinker",
+            AscensionContract::Detail::Key("Tinker", info->Id, slot, "layout")))
+        LOG_ERROR("module.ascension_compat",
+            "Ascension contract Tinker: spell {} slot {} is effect {} aura {}, expected effect {} aura {}; "
+            "its rewrite is not applied.", info->Id, slot, uint32(current.Effect), uint32(current.ApplyAuraName),
+            effect, aura);
+    return false;
+}
+// Family 18 records that only the Tinker uses. MatchesFamily(34) used to reject them, so their
+// branches below never ran (T-30).
+bool TinkerForeign(uint32 id)
+{
+    return id == 807499 || id == 807500 || id == 807635;
+}
+}
 void ApplyContracts(SpellInfo* info)
 {
-    if (!AscensionContract::MatchesFamily(info, 34, "Tinker"))
+    if (!AscensionContract::MatchesFamily(info, 34, "Tinker") && !(info && TinkerForeign(info->Id)))
         return;
     uint32 id = info->Id;
+    // Mechsuit was a mount (803451 effect 0, aura 78): the client dismounted at the first attack, which
+    // removed 803451 and ejected the Tinker, and the server refused auto attack and every non-Tinker spell
+    // while mounted (P-314, T-01/T-02/T-27). A transform into the same creature keeps the look without the
+    // mount. HandleAuraTransform reads MiscValue as a creature_template entry: 229921 "Build:Mechsuit",
+    // display 916645 (GnomeSpiderTank02).
+    if (id == 803451)
+    {
+        if (ExpectEffect(info, 0, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOUNTED) && info->Effects[0].MiscValue == 229921)
+        {
+            info->Effects[0].ApplyAuraName = SPELL_AURA_TRANSFORM;
+            // Display 916645 has no ExtendedDisplayInfo, so Unit::IsInDisallowedMountForm held the transformed
+            // Tinker: no taxi, every mount refused. This attribute is the core's own exemption there; the
+            // mount then removes 801384 through its MOUNT interrupt flag, which ejects the Tinker (T-27).
+            info->Attributes |= SPELL_ATTR0_ALLOW_WHILE_MOUNTED;
+        }
+        // Form 49 "Mechsuit: Shredder" has bonusActionBar 1 and no model (SpellShapeshiftForm.dbc): the client
+        // swapped action bar 1 to the empty slots 72-83, hiding Gatling Gun. No Tinker spell requires form 49.
+        if (ExpectEffect(info, 2, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_SHAPESHIFT) && info->Effects[2].MiscValue == 49)
+        {
+            info->Effects[2].Effect = 0;
+            info->Effects[2].ApplyAuraName = SPELL_AURA_NONE;
+        }
+    }
+    // Same value, now outside a mount: aura 32 only counts while mounted (Unit::UpdateSpeed).
+    if (id == 803329 && ExpectEffect(info, 0, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_INCREASE_MOUNTED_SPEED))
+        info->Effects[0].ApplyAuraName = SPELL_AURA_MOD_INCREASE_SPEED;
     // Overcharged is a beacon-only one-use guard. The native exclusion field also applies it on hit.
     if (info->ExcludeTargetAuraSpell == 560711 &&
         (id == 801707 || (id >= 502573 && id <= 502581) || id == 574152 || id == 529288))
@@ -277,7 +327,24 @@ void ApplyContracts(SpellInfo* info)
     if (id == 561267)
         info->Effects[1].Effect = 0; // The explicit pet mana restoration is independent of heal modifiers.
     if (id == 524903)
+    {
         info->Effects[1].Effect = 0; // Consume only the triggering owner's mark.
+        // DeviceEvent removes the mark before casting: TargetAuraSpell 524904 then refused every cast (T-10).
+        info->TargetAuraSpell = 0;
+    }
+    // Turret Upgrade Z-15: "increase critical strike chance of the turret by $573269s1%". The data's aura
+    // 197 raised the crit chance of the turret's attackers instead (T-14). 706700 effect 1 also triggered
+    // 573269 on the enemy; the turret stack is applied by DeviceEvent alone.
+    if (id == 573269 && ExpectEffect(info, 0, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_ATTACKER_SPELL_AND_WEAPON_CRIT_CHANCE))
+        info->Effects[0].ApplyAuraName = SPELL_AURA_MOD_CRIT_PCT;
+    if (id == 706700 && ExpectEffect(info, 1, SPELL_EFFECT_TRIGGER_SPELL, 0) && info->Effects[1].TriggerSpell == 573269)
+        info->Effects[1].Effect = 0;
+    // Rocket Bombardment: effect 1 (aura 271) names class mask (16777216,0,0), which no Tinker spell carried,
+    // so "increased by $s2% for each subsequent Rocket Cluster" never applied (T-24). No other family 34
+    // record or mask uses that bit (Spell.dbc, spell_proc).
+    if (id == 706696 && ExpectEffect(info, 1, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_DAMAGE_FROM_CASTER) &&
+        info->Effects[1].SpellClassMask == flag96(16777216,0,0) && !info->SpellFamilyFlags)
+        info->SpellFamilyFlags = flag96(16777216,0,0);
     if (id == 578335)
         info->Attributes |= SPELL_ATTR0_NO_IMMUNITIES;
     if (id == 801982 || id == 802477 || id == 500601 || id == 806074 || id == 706648 || id == 802336)
@@ -285,9 +352,16 @@ void ApplyContracts(SpellInfo* info)
         info->Speed = 0;
         info->Attributes |= SPELL_ATTR0_ALLOW_CAST_WHILE_DEAD;
     }
+    // Its party target also took the Tinker's turret, beacons and pets; Explode (50045) throws 804306 at
+    // the owner and his party's players instead (T-08).
+    if (id == 802336 && ExpectEffect(info, 2, SPELL_EFFECT_TRIGGER_SPELL, 0) && info->Effects[2].TriggerSpell == 804306)
+        info->Effects[2].Effect = 0;
     // The device AI selects the complete explosion set once. Each helper is one selected hit.
+    // 802336 (Blast Mine) keeps its own area targeting: one cast from the mine (T-06). Split per enemy it
+    // drew one flare missile per target, and its effect 2 threw the allied knockback 804306 at the enemies
+    // instead of the party.
     if (id == 801982 || id == 802477 || id == 500601 || id == 806074 || id == 706648 ||
-        id == 802336 || id == 712680 || id == 561269)
+        id == 712680 || id == 561269)
         for (auto& effect : info->Effects)
             if (effect.Effect)
             {

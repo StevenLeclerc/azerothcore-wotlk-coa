@@ -1,11 +1,16 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionTinkerCombustion.h"
+#include "Log.h"
 #include "SpellInfo.h"
 
-void ApplyAscensionTinkerCombustionContracts(SpellInfo* spellInfo)
+namespace
 {
-    if (!spellInfo || spellInfo->Id != 801388 || spellInfo->SpellFamilyName != 34 ||
+// The exact record the ranged attack power switch was written for. Any divergence leaves 801388 on its
+// native coefficient source; it is now journalled instead of skipped in silence (T-31).
+bool CombustionLayoutHolds(SpellInfo const* spellInfo)
+{
+    if (spellInfo->SpellFamilyName != 34 ||
         spellInfo->SpellFamilyFlags != flag96(0, 4096, 16384) ||
         spellInfo->DmgClass != SPELL_DAMAGE_CLASS_RANGED || spellInfo->SchoolMask != SPELL_SCHOOL_MASK_FIRE ||
         spellInfo->EquippedItemClass != -1 || spellInfo->EquippedItemSubClassMask ||
@@ -17,7 +22,7 @@ void ApplyAscensionTinkerCombustionContracts(SpellInfo* spellInfo)
         !spellInfo->RangeEntry || spellInfo->RangeEntry->ID != 6 || spellInfo->GetCategory() ||
         spellInfo->RecoveryTime || spellInfo->CategoryRecoveryTime || spellInfo->ProcFlags ||
         spellInfo->ProcChance != 101 || spellInfo->ProcCharges)
-        return;
+        return false;
 
     for (uint8 index = EFFECT_0; index <= EFFECT_2; ++index)
     {
@@ -26,7 +31,7 @@ void ApplyAscensionTinkerCombustionContracts(SpellInfo* spellInfo)
             effect.PointsPerComboPoint || effect.BonusMultiplier || effect.ValueMultiplier ||
             effect.DamageMultiplier != 1.0f || effect.MiscValue || effect.MiscValueB ||
             effect.Mechanic || effect.ChainTarget || effect.ItemType || effect.TriggerSpell || effect.SpellClassMask)
-            return;
+            return false;
 
         if (index == EFFECT_0)
         {
@@ -34,11 +39,25 @@ void ApplyAscensionTinkerCombustionContracts(SpellInfo* spellInfo)
                 effect.TargetA.GetTarget() != TARGET_DEST_TARGET_ENEMY ||
                 effect.TargetB.GetTarget() != TARGET_UNIT_DEST_AREA_ENEMY ||
                 !effect.RadiusEntry || effect.RadiusEntry->ID != 14)
-                return;
+                return false;
         }
         else if (effect.Effect || effect.TargetA.GetTarget() || effect.TargetB.GetTarget() || effect.RadiusEntry ||
             effect.BasePoints != (index == EFFECT_1 ? 0 : -1) || effect.DieSides != (index == EFFECT_1 ? 0 : 1))
-            return;
+            return false;
+    }
+    return true;
+}
+}
+
+void ApplyAscensionTinkerCombustionContracts(SpellInfo* spellInfo)
+{
+    if (!spellInfo || spellInfo->Id != 801388)
+        return;
+    if (!CombustionLayoutHolds(spellInfo))
+    {
+        LOG_ERROR("module.ascension_compat", "Ascension contract Tinker: Combustion 801388 no longer matches the "
+            "record its contract was written for; it keeps its native attack power source.");
+        return;
     }
 
     // Preserve native hit, equipment, rank values and per-target modifiers.

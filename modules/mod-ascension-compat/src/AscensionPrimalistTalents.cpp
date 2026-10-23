@@ -1,5 +1,6 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
+#include "ObjectAccessor.h"
 #include "ObjectMgr.h"
 #include "Pet.h"
 #include "Player.h"
@@ -153,7 +154,465 @@ enum PrimalistWave5TalentSpells : uint32
     SPELL_SON_OF_URSOC_FORM    = 806048,
     SPELL_SACRED_GROVE         = 800180,
     SPELL_SACRED_GROVE_DATA    = 800186,
-    SPELL_SACRED_GROVE_TICK    = 800179
+    SPELL_SACRED_GROVE_TICK    = 800179,
+    // revue du 23/10
+    SPELL_ROCKSLIDE_DELAY      = 560155,
+    SPELL_STONESHARD_R1        = 680448,
+    SPELL_REXXARS_BLEED        = 806562,
+    SPELL_MISHAS_RAGE          = 504227,
+    SPELL_HUFFERS_SPEED        = 560973,
+    SPELL_LEOKKS_FURY          = 560974,
+    SPELL_PRIMAL_SHRED_R1      = 500940,
+    SPELL_WILDCLAW_R1          = 800140,
+    SPELL_RYLAKS_BITE_R1       = 706342,
+    SPELL_LEGACY_OF_REXXAR     = 800184,
+    SPELL_ROCK_BARRIER         = 503630,
+    SPELL_ROCK_BARRIER_SLS     = 504853,
+    SPELL_EARTHMOTHERS_PROTECTION = 560298
+};
+
+constexpr uint8 PRIMALIST_CHAIN_WALK = 32;
+
+// Le plus haut rang de la chaine que le joueur connait ; le rang 1 hors joueur (rien a lire).
+uint32 HighestKnownRank(Player const* player, uint32 firstRank)
+{
+    uint32 best = player ? 0 : firstRank;
+    uint32 current = sSpellMgr->GetFirstSpellInChain(firstRank);
+    for (uint8 step = 0; player && current && step < PRIMALIST_CHAIN_WALK; ++step)
+    {
+        if (player->HasSpell(current))
+            best = current;
+        current = sSpellMgr->GetNextSpellInChain(current);
+    }
+    return best;
+}
+
+// Les effets de recharge d'Ascension (165 en ms, 192 en %) nomment UN id, le rang 1, alors que la
+// recharge vit sous l'id du rang lance (Spell.cpp, Player::AddSpellAndCategoryCooldowns). On marche
+// la chaine spell_ranks et on traite chaque rang qui porte une recharge en cours, comme
+// ReduceCooldownOverChain (AscensionStormbringerEvents.cpp). cutOf(rang) rend la reduction en ms ;
+// une reduction au moins egale au reste efface l'entree (et la categorie si resetCategory).
+// cutOf rend UINT64_MAX pour la sentinelle « remise a zero » (valeur 0 de l'effet 165).
+template <typename CutOf>
+void ReduceCooldownOverChain(Player* player, uint32 spellId, bool resetCategory, CutOf cutOf)
+{
+    if (!player || !spellId)
+        return;
+    uint32 current = sSpellMgr->GetFirstSpellInChain(spellId);
+    for (uint8 step = 0; current && step < PRIMALIST_CHAIN_WALK; ++step)
+    {
+        if (uint32 remaining = player->GetSpellCooldownDelay(current))
+        {
+            uint64 cut = cutOf(current);
+            if (cut >= remaining)
+            {
+                player->RemoveSpellCooldown(current, true);
+                if (resetCategory)
+                    if (SpellInfo const* rank = sSpellMgr->GetSpellInfo(current))
+                        if (uint32 category = rank->GetCategory())
+                            player->RemoveCategoryCooldown(category);
+            }
+            else if (cut)
+                player->ModifySpellCooldown(current, -int32(cut));
+        }
+        current = sSpellMgr->GetNextSpellInChain(current);
+    }
+}
+
+// C-05 / C-06 : 680411 Thane's Guidance (Mountain Hammer, Primal Rush) et 681365 Spiritbound
+// (Seismic Crash, Seismic Spike, Seismic Smash). Effet 165 : MiscValue = sort, valeur = ms, MiscValueB
+// = categorie aussi. Le gestionnaire natif ne touche que l'id du rang 1 : des le rang 2 (niveaux 16 a
+// 26) plus rien n'etait reduit. L'effet 1 de 680411 (remise a zero d'Earthen Avatar) est retire au
+// chargement (mountain_talent_metadata), il n'arrive plus ici.
+class spell_ascension_primalist_cooldown_chain : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_primalist_cooldown_chain);
+
+    void Handle(SpellEffIndex effIndex)
+    {
+        PreventHitDefaultEffect(effIndex);
+        Player* player = Primalist(GetHitUnit());
+        SpellEffectInfo const& effect = GetSpellInfo()->Effects[effIndex];
+        int32 const delta = GetEffectValue();
+        if (!player || effect.MiscValue <= 0 || delta > 0)
+            return;
+        uint64 const cut = delta ? uint64(-int64(delta)) : std::numeric_limits<uint64>::max();
+        ReduceCooldownOverChain(player, uint32(effect.MiscValue), effect.MiscValueB != 0,
+            [cut](uint32) { return cut; });
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_primalist_cooldown_chain::Handle, EFFECT_ALL,
+            SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN);
+    }
+};
+
+// C-24 : effet prive 192 (Spell::EffectNULL), MiscValue = sort, valeur = pourcentage. 807249 Wildheart
+// (Mountain Hammer, Boulder Dash, Stone Grip, toutes les 1,5 s pendant 15 s) et 560306 Hand of Neptulon,
+// tick de Verdant Chase 560305 (Spirit Charge, Primal Rush, toutes les 2,5 s). SUPPOSE, comme
+// spell_ascension_runemaster_cooldown_percent : le pourcentage de la recharge ENTIERE du rang, retire du
+// temps restant. MiscValueB (1 sur 560306) = la categorie aussi, comme l'effet 165.
+class spell_ascension_primalist_cooldown_percent : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_primalist_cooldown_percent);
+
+    void Handle(SpellEffIndex effIndex)
+    {
+        PreventHitDefaultEffect(effIndex);
+        Player* player = Primalist(GetHitUnit());
+        SpellEffectInfo const& effect = GetSpellInfo()->Effects[effIndex];
+        if (!player || player != GetCaster() || effect.MiscValue <= 0)
+            return;
+        uint64 const pct = uint64(std::clamp(GetEffectValue(), 0, 100));
+        if (!pct)
+            return;
+        ReduceCooldownOverChain(player, uint32(effect.MiscValue), effect.MiscValueB != 0, [pct](uint32 rank)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(rank);
+            return info ? uint64(std::max(info->RecoveryTime, info->CategoryRecoveryTime)) * pct / 100 : 0;
+        });
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_primalist_cooldown_percent::Handle, EFFECT_ALL,
+            SpellEffects(192));
+    }
+};
+
+// C-09 520134 Fury of the Earthmother : « add 1 charge to an active Rock Barrier ». L'effet 0 est un
+// effet 171 (Spell::EffectNULL), MiscValue 503630 ; l'effet 1 (177) allonge deja la duree, natif.
+// Ce sont les charges de l'AURA (« Lasts for $n attacks », ProcCharges 10), plafonnees par
+// Aura::ModCharges. La valeur 2 du DBC n'est pas reprise : l'infobulle dit 1.
+class spell_ascension_primalist_fury_of_the_earthmother : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_primalist_fury_of_the_earthmother);
+
+    void Handle(SpellEffIndex effIndex)
+    {
+        PreventHitDefaultEffect(effIndex);
+        Player* player = Primalist(GetHitUnit());
+        int32 const barrier = GetSpellInfo()->Effects[effIndex].MiscValue;
+        if (!player || barrier <= 0 || !player->IsAlive())
+            return;
+        if (Aura* aura = player->GetAura(uint32(barrier), player->GetGUID()))
+            aura->ModCharges(1);
+    }
+
+    void Register() override
+    {
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_primalist_fury_of_the_earthmother::Handle, EFFECT_0,
+            SpellEffects(171));
+    }
+};
+
+// C-10 573308 Stone Skin (pose toutes les 3 s par 806583, 5 s) : ADD_PCT_MODIFIER (degats) a 0 sur
+// Geode Barrage, Geode et les sorts Seismic. 806583 : « damage now additionally scales with your parry
+// rating » (573308 dit « defense » : l'infobulle du passif appris fait foi). SUPPOSE, aucune formule
+// dans les donnees : +1 % de degats par point de pourcentage de parade apporte par le SCORE de parade
+// (Player::GetRatingBonusValue(CR_PARRY)), borne a [0, 100]. Recalcule a chaque nouvelle pose
+// (Aura::SetStackAmount -> CalculateAmount).
+class aura_ascension_primalist_stone_skin : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_stone_skin);
+
+    void Calculate(AuraEffect const*, int32& amount, bool& canBeRecalculated)
+    {
+        canBeRecalculated = true;
+        Player* player = Primalist(GetCaster());
+        if (!player)
+            return;
+        amount = std::clamp(int32(player->GetRatingBonusValue(CR_PARRY)), 0, 100);
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_ascension_primalist_stone_skin::Calculate, EFFECT_0,
+            SPELL_AURA_ADD_PCT_MODIFIER);
+    }
+};
+
+// C-22 560154 Rockslide : « Stoneshard now has a $h% chance to cast an additional time. This effect can
+// trigger itself. » 560155 (effet 183, 500 ms) relancait toujours 680448, le rang 1 (environ 60 de
+// base au lieu d'environ 1 150 au niveau 60). On relance, avec le meme delai, l'id du Stoneshard qui
+// vient de partir. La recursion reste celle du DBC (15 % a chaque relance, AttributesMask 2 de la
+// ligne spell_proc) : une suite de 5 relances a une chance sur 13 000.
+class aura_ascension_primalist_rockslide : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_rockslide);
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({SPELL_ROCKSLIDE_DELAY}); }
+
+    bool Check(ProcEventInfo& eventInfo)
+    {
+        SpellInfo const* info = eventInfo.GetSpellInfo();
+        Spell const* spell = eventInfo.GetProcSpell();
+        return Primalist(GetTarget()) && GetTarget()->IsAlive() && eventInfo.GetActor() == GetTarget() && info &&
+            spell && info->SpellFamilyName == 37 && sSpellMgr->GetFirstSpellInChain(info->Id) == SPELL_STONESHARD_R1 &&
+            spell->m_targets.GetUnitTarget();
+    }
+
+    void Proc(AuraEffect const*, ProcEventInfo& eventInfo)
+    {
+        PreventDefaultAction();
+        Unit* caster = GetTarget();
+        Unit* target = eventInfo.GetProcSpell()->m_targets.GetUnitTarget();
+        uint32 const spellId = eventInfo.GetSpellInfo()->Id;
+        int32 const delay = sSpellMgr->AssertSpellInfo(SPELL_ROCKSLIDE_DELAY)->Effects[EFFECT_0].CalcValue(caster);
+        ObjectGuid const targetGuid = target->GetGUID();
+        // Meme forme que Spell::EffectAscensionTriggerSpellDelayed : l'evenement vit sur le lanceur.
+        caster->m_Events.AddEventAtOffset([caster, targetGuid, spellId]()
+        {
+            if (!caster->IsAlive())
+                return;
+            if (Unit* delayed = ObjectAccessor::GetUnit(*caster, targetGuid))
+                if (delayed->IsAlive() && caster->IsValidAttackTarget(delayed))
+                    caster->CastSpell(delayed, spellId, true);
+        }, Milliseconds(std::max<int32>(1, delay)));
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_primalist_rockslide::Check);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_rockslide::Proc, EFFECT_0,
+            SPELL_AURA_PROC_TRIGGER_SPELL);
+    }
+};
+
+// Le maitre Primalist d'un familier ou d'une invocation controlee, sinon nul.
+Player* PrimalistPetOwner(Unit* unit)
+{
+    if (!unit || unit->IsPlayer() || !unit->IsSummon())
+        return nullptr;
+    Player* player = Primalist(unit->GetOwner());
+    return player && unit->GetOwnerGUID() == player->GetGUID() ? player : nullptr;
+}
+
+// C-13 806561 Rexxar's Might, sur le familier (pose par 806559 a chaque critique physique du joueur,
+// tA 5) : « your pet's next attack to apply a bleed, dealing ${$806562m1+$806562ppl1+$AP*0.15} ».
+// La ligne spell_proc (Charges 1) consomme l'aura au premier coup du familier. $AP est lu sur
+// 806559, un sort du JOUEUR : sa PA, pas celle du familier qui lance 806562 (meme lecture que
+// Bring Me Their Bones, AscensionPrimalistEvents.cpp). CalcValue ajoute ensuite le niveau.
+class aura_ascension_primalist_rexxars_might_pet : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_rexxars_might_pet);
+
+    bool Validate(SpellInfo const*) override { return ValidateSpellInfo({SPELL_REXXARS_BLEED}); }
+
+    bool Check(ProcEventInfo& eventInfo)
+    {
+        Unit* pet = GetTarget();
+        Unit* victim = eventInfo.GetActionTarget();
+        return PrimalistPetOwner(pet) && pet->IsAlive() && eventInfo.GetActor() == pet && victim &&
+            victim != pet && victim->IsAlive() && pet->IsValidAttackTarget(victim);
+    }
+
+    void Proc(AuraEffect const*, ProcEventInfo& eventInfo)
+    {
+        PreventDefaultAction();
+        Unit* pet = GetTarget();
+        Player* owner = PrimalistPetOwner(pet);
+        Unit* victim = eventInfo.GetActionTarget();
+        if (!owner || !victim)
+            return;
+        SpellEffectInfo const& bleed = sSpellMgr->AssertSpellInfo(SPELL_REXXARS_BLEED)->Effects[EFFECT_0];
+        float const ap = std::max(0.0f, owner->GetTotalAttackPowerValue(BASE_ATTACK)) * 0.15f;
+        int32 const value = bleed.BasePoints + (bleed.DieSides ? 1 : 0) +
+            int32(std::min(ap, float(std::numeric_limits<int32>::max() / 2)));
+        pet->CastCustomSpell(SPELL_REXXARS_BLEED, SPELLVALUE_BASE_POINT0, value, victim, TRIGGERED_FULL_MASK);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_primalist_rexxars_might_pet::Check);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_rexxars_might_pet::Proc, EFFECT_0,
+            SPELL_AURA_PROC_TRIGGER_SPELL);
+    }
+};
+
+// C-14 800184 Legacy of Rexxar. Effet 0 (DUMMY) sur le joueur, effet 1 (190 -> aura 42 vers 504227)
+// sur les invocations : aucun ne proc sans ligne spell_proc, et 504227 seul ne couvrait qu'un des
+// trois buffs. Une ligne spell_proc (critiques ; sorts de melee et periodiques) et ce script :
+//  - joueur, critique de Wildclaw (800140) -> Huffer's Speed 560973 ; de Rylak's Bite (706342) ->
+//    Leokk's Fury 560974 (son effet 1 vise le familier, tA 5) ;
+//  - familier, tick critique du saignement de Primal Shred (lance par le familier : 500940 est un
+//    FORCE_CAST) -> Misha's Rage 504227, au joueur et au familier.
+// « grant you and your pet » : chaque buff sur les deux, une seule fois chacun.
+class aura_ascension_primalist_legacy_of_rexxar : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_legacy_of_rexxar);
+
+    bool Validate(SpellInfo const*) override
+    {
+        return ValidateSpellInfo({SPELL_MISHAS_RAGE, SPELL_HUFFERS_SPEED, SPELL_LEOKKS_FURY});
+    }
+
+    // Le saignement de Primal Shred est le sort que l'effet 0 (FORCE_CAST) d'un rang de 500940 fait lancer.
+    static bool IsPrimalShredBleed(uint32 spellId)
+    {
+        uint32 current = SPELL_PRIMAL_SHRED_R1;
+        for (uint8 step = 0; current && step < PRIMALIST_CHAIN_WALK; ++step)
+        {
+            if (SpellInfo const* rank = sSpellMgr->GetSpellInfo(current))
+                if (rank->Effects[EFFECT_0].TriggerSpell == spellId)
+                    return true;
+            current = sSpellMgr->GetNextSpellInChain(current);
+        }
+        return false;
+    }
+
+    bool Check(ProcEventInfo& eventInfo)
+    {
+        SpellInfo const* info = eventInfo.GetSpellInfo();
+        Unit* owner = GetTarget();
+        if (!info || info->SpellFamilyName != 37 || !(eventInfo.GetHitMask() & PROC_HIT_CRITICAL) ||
+            eventInfo.GetActor() != owner || !owner->IsAlive())
+            return false;
+        if (Primalist(owner))
+        {
+            uint32 const first = sSpellMgr->GetFirstSpellInChain(info->Id);
+            return first == SPELL_WILDCLAW_R1 || first == SPELL_RYLAKS_BITE_R1;
+        }
+        Player* master = PrimalistPetOwner(owner);
+        return master && owner == master->GetGuardianPet() && IsPrimalShredBleed(info->Id);
+    }
+
+    // Sur le familier : AddAura (lanceur = joueur, refraichit ou empile) plutot qu'un second lancer
+    // par le familier, qui compterait deux fois le joueur (tB 27 de 504227 = TARGET_UNIT_MASTER).
+    static void GrantToPet(Player* player, uint32 spellId)
+    {
+        Guardian* pet = player->GetGuardianPet();
+        if (pet && pet->IsAlive() && pet->IsInWorld() && pet->IsInMap(player))
+            player->AddAura(spellId, pet);
+    }
+
+    void PlayerProc(AuraEffect const*, ProcEventInfo& eventInfo)
+    {
+        PreventDefaultAction();
+        Player* player = Primalist(GetTarget());
+        if (!player)
+            return;
+        uint32 const first = sSpellMgr->GetFirstSpellInChain(eventInfo.GetSpellInfo()->Id);
+        if (first == SPELL_WILDCLAW_R1)
+        {
+            // 560973 : tA 1 et tB 5 (le familier) sur son seul effet. Que le lancer atteigne le
+            // familier n'est pas mesure : on releve sa pile et sa duree avant, et on ne complete
+            // que si le lancer ne l'a pas touche (ni pile ajoutee, ni duree remise a neuf).
+            Guardian* pet = player->GetGuardianPet();
+            Aura const* before = pet ? pet->GetAura(SPELL_HUFFERS_SPEED, player->GetGUID()) : nullptr;
+            uint8 const stacks = before ? before->GetStackAmount() : 0;
+            int32 const duration = before ? before->GetDuration() : 0;
+            player->CastSpell(player, SPELL_HUFFERS_SPEED, true);
+            pet = player->GetGuardianPet();
+            Aura const* after = pet ? pet->GetAura(SPELL_HUFFERS_SPEED, player->GetGUID()) : nullptr;
+            if (!after || (before && after->GetStackAmount() == stacks && after->GetDuration() <= duration))
+                GrantToPet(player, SPELL_HUFFERS_SPEED);
+        }
+        else if (first == SPELL_RYLAKS_BITE_R1)
+            player->CastSpell(player, SPELL_LEOKKS_FURY, true);   // e0 joueur, e1 familier (tA 5)
+    }
+
+    void PetProc(AuraEffect const*, ProcEventInfo&)
+    {
+        PreventDefaultAction();
+        Unit* pet = GetTarget();
+        Player* player = PrimalistPetOwner(pet);
+        if (!player || !player->IsAlive() || !player->IsInMap(pet))
+            return;
+        player->CastSpell(player, SPELL_MISHAS_RAGE, true);
+        GrantToPet(player, SPELL_MISHAS_RAGE);
+    }
+
+    void Register() override
+    {
+        DoCheckProc += AuraCheckProcFn(aura_ascension_primalist_legacy_of_rexxar::Check);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_legacy_of_rexxar::PlayerProc, EFFECT_0,
+            SPELL_AURA_DUMMY);
+        OnEffectProc += AuraEffectProcFn(aura_ascension_primalist_legacy_of_rexxar::PetProc, EFFECT_1,
+            SPELL_AURA_PROC_TRIGGER_SPELL);
+    }
+};
+
+// C-14, suite de la revue : le saignement de Primal Shred (504669 a 504676, 504684 : TriggerSpell de
+// l'effet 0 des rangs 1 a 9 de 500940) ne pouvait jamais etre critique. Un tick periodique ne critique
+// que par une aura 286 (ABILITY_PERIODIC_CRIT) qui le couvre (AuraEffect::CalcPeriodicCritChance) ;
+// aucune des trois de la famille 37 (300698, 560156, 704245) ne couvre son masque, et Aura::RefreshTimers
+// remet la chance a 0 a chaque relance (CalculatePeriodicData). « Critical strikes with Primal Shred »
+// (800184) : seulement si le maitre a Legacy of Rexxar, la chance est posee avant chaque tick, au calcul
+// du coeur (DmgClass 2 melee, ecole physique : SpellDoneCritChance du familier, puis SpellTakenCritChance).
+class aura_ascension_primalist_primal_shred_crit : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_primal_shred_crit);
+
+    void Tick(AuraEffect const* aurEff)
+    {
+        AuraEffect* effect = GetEffect(aurEff->GetEffIndex());
+        Unit* pet = GetCaster();
+        Unit* target = GetUnitOwner();
+        Player* master = PrimalistPetOwner(pet);
+        if (!effect || !target || !master || !master->HasAura(SPELL_LEGACY_OF_REXXAR))
+            return;
+        SpellInfo const* info = GetSpellInfo();
+        float chance = pet->SpellDoneCritChance(nullptr, info, info->GetSchoolMask(), BASE_ATTACK, true);
+        if (chance > 0.0f)
+            chance = target->SpellTakenCritChance(pet, info, info->GetSchoolMask(), chance, BASE_ATTACK, true);
+        effect->SetCritChance(std::max(0.0f, chance));
+    }
+
+    void Register() override
+    {
+        OnEffectPeriodic += AuraEffectPeriodicFn(aura_ascension_primalist_primal_shred_crit::Tick, EFFECT_0,
+            SPELL_AURA_PERIODIC_DAMAGE);
+    }
+};
+
+// C-08, suite de la revue : 504853 (SLS de Rock Barrier, effet 2 = cout de Hand of the Earthmother, que
+// 560298 Earthmother's Protection ramene a -50 %) n'est pose qu'avec le talent : un lien
+// spell_linked_spell sans condition l'affichait chez tout Primalist (Attributes 0, icone visible).
+// « While your Rock Barrier is active » : pose a l'application ET a la relance (le lien ne suivait pas la
+// relance), a la duree de Rock Barrier (504853 dure 8 s par lui-meme, Rock Barrier 10 s), retire avec lui.
+class aura_ascension_primalist_rock_barrier : public AuraScript
+{
+    PrepareAuraScript(aura_ascension_primalist_rock_barrier);
+
+    void Apply(AuraEffect const*, AuraEffectHandleModes)
+    {
+        Player* player = Primalist(GetUnitOwner());
+        if (!player || GetCasterGUID() != player->GetGUID())
+            return;
+        if (!player->HasAura(SPELL_EARTHMOTHERS_PROTECTION))
+        {
+            player->RemoveAurasDueToSpell(SPELL_ROCK_BARRIER_SLS, player->GetGUID());
+            return;
+        }
+        // AddAura refait l'aura existante sans recalculer ses montants : on la retire pour relire le mod
+        // de 560298 (qui a pu changer de rang), puis on la repose.
+        player->RemoveAurasDueToSpell(SPELL_ROCK_BARRIER_SLS, player->GetGUID());
+        if (Aura* sls = player->AddAura(SPELL_ROCK_BARRIER_SLS, player))
+        {
+            int32 const duration = GetAura()->GetDuration();
+            if (duration > 0)
+            {
+                sls->SetMaxDuration(duration);
+                sls->SetDuration(duration);
+            }
+        }
+    }
+
+    void Remove(AuraEffect const*, AuraEffectHandleModes)
+    {
+        if (Unit* owner = GetUnitOwner())
+            owner->RemoveAurasDueToSpell(SPELL_ROCK_BARRIER_SLS, GetCasterGUID());
+    }
+
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(aura_ascension_primalist_rock_barrier::Apply, EFFECT_0,
+            SPELL_AURA_MOD_RESISTANCE, AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_ascension_primalist_rock_barrier::Remove, EFFECT_0,
+            SPELL_AURA_MOD_RESISTANCE, AURA_EFFECT_HANDLE_REAL);
+    }
 };
 
 constexpr uint32 SON_OF_URSOC_CREATURE = 421493;   // absente de creature_template (MESURE)
@@ -241,12 +700,18 @@ class aura_ascension_primalist_totemic_crash : public AuraScript
 {
     PrepareAuraScript(aura_ascension_primalist_totemic_crash);
 
+    // C-23 : 547216 relance toujours 800178, le rang 1 (zone environ 8 fois plus faible au rang 7).
+    // Le declencheur natif est toujours empeche ; on lance le plus haut rang connu de la chaine.
     void Tick(AuraEffect const*)
     {
+        PreventDefaultAction();
         Unit* caster = GetCaster();
-        if (!caster || !caster->IsAlive() || !caster->IsInMap(GetTarget()) ||
-            !caster->IsWithinDist(GetTarget(), 5.0f))
-            PreventDefaultAction();
+        Unit* target = GetTarget();
+        if (!caster || !caster->IsAlive() || !target->IsAlive() || !caster->IsInMap(target) ||
+            !caster->IsWithinDist(target, 5.0f) || !caster->IsValidAttackTarget(target))
+            return;
+        if (uint32 rank = HighestKnownRank(caster->ToPlayer(), SPELL_TOTEMIC_SMASH_R1))
+            caster->CastSpell(target, rank, true);
     }
 
     void Register() override
@@ -533,4 +998,13 @@ void AddSC_AscensionPrimalistTalents()
     RegisterSpellScript(spell_ascension_primalist_soothing_touch);
     RegisterSpellScript(aura_ascension_primalist_sacred_grove);
     RegisterSpellScript(spell_ascension_primalist_missing_pct);
+    RegisterSpellScript(spell_ascension_primalist_cooldown_chain);
+    RegisterSpellScript(spell_ascension_primalist_cooldown_percent);
+    RegisterSpellScript(spell_ascension_primalist_fury_of_the_earthmother);
+    RegisterSpellScript(aura_ascension_primalist_stone_skin);
+    RegisterSpellScript(aura_ascension_primalist_rockslide);
+    RegisterSpellScript(aura_ascension_primalist_rexxars_might_pet);
+    RegisterSpellScript(aura_ascension_primalist_legacy_of_rexxar);
+    RegisterSpellScript(aura_ascension_primalist_primal_shred_crit);
+    RegisterSpellScript(aura_ascension_primalist_rock_barrier);
 }

@@ -319,7 +319,16 @@ void Refresh(Player* player)
     SetHelper(player,801385,mech);
     SetHelper(player,803329,mech);
     SetHelper(player,680999,mech && player->HasAura(806631));
-    SetAmount(player,801385,1,mech && player->HasAura(681001) ? -std::abs(Amount(681001)) : 0);
+    // Blazewrought Titan (681001) lowers 801385 effect 1 through its own spell modifier, which Turbo
+    // Upgrade! (707115) doubles; forcing -10 here every 500 ms erased that doubling (T-18). Only the
+    // talentless value is held, as before.
+    if (mech && !player->HasAura(681001))
+        SetAmount(player,801385,1,0);
+    // Learnt inside the Mechsuit, the talent's modifier only reached 801385 at the next entry.
+    else if (AuraEffect* reduction = mech ? player->GetAuraEffect(801385,EFFECT_1) : nullptr;
+             reduction && !reduction->GetAmount())
+        if (int32 amount = reduction->CalculateAmount(player))
+            reduction->ChangeAmount(amount);
     if (!mech)
     {
         player->RemoveAurasDueToSpell(803451,player->GetGUID());
@@ -331,9 +340,13 @@ void Refresh(Player* player)
     // Bomb Ready (500354) is an owner area aura the mine itself carries, see
     // npc_ascension_tinker_device::IsSummonedBy. Casting it from the Tinker can never apply it - the
     // area aura only reaches the aura owner's own owner - and revoking it here would strip the mine's.
-    if (mine && !player->HasSpell(801798))
+    // Remote Detonation stays known as long as a mine can be laid: learnt and unlearnt with every mine,
+    // it was announced each time and its button came and went (T-09). Its CasterAuraSpell 500354 still
+    // keeps it unusable without a mine in range.
+    bool detonator = mine || player->HasSpell(801718) || player->HasSpell(706647);
+    if (detonator && !player->HasSpell(801798))
         player->learnSpell(801798,true);
-    else if (!mine)
+    else if (!detonator)
         player->removeSpell(801798,SPEC_MASK_ALL,true);
     bool gear = player->HasAura(681245);
     if (Spell* channel = player->GetCurrentSpell(CURRENT_CHANNELED_SPELL); channel &&
@@ -382,6 +395,20 @@ public:
     void OnPlayerUpdate(Player* player, uint32 diff) override
     {
         using namespace AscensionTinker;
+        // Every player and bot comes through here. A non-Tinker only needs the module reconciliation,
+        // and only while he carries a Tinker module: skip the global state lock otherwise (T-23).
+        if (player->getClass() != CLASS_TINKER)
+        {
+            bool carries = false;
+            for (uint32 module : TinkerModules)
+                if (player->HasAura(module))
+                {
+                    carries = true;
+                    break;
+                }
+            if (!carries)
+                return;
+        }
         if (Owner(player) == player)
             ObserveAttack(player);
         auto& state = State(player);

@@ -1,0 +1,22 @@
+-- =====================================================================================
+-- mod-ascension-compat — Tinker, revue du 2026-10-23 (docs/REVUE-classe-tinker-20261023.md).
+--
+-- Le nom de ce fichier est la clé d'update : NE PLUS LE RENOMMER.
+-- Prise d'effet à chaud : `.reload spell_proc`.
+--
+-- T-13 — 707239 « War Crimes » (Tinker / Firearms, famille 34)
+--   « Damage dealt by Explosive Augmentation and Tracer Augmentation now has a $h% chance
+--     to apply an additional stack of Napalm. »
+--   La ligne posée par 2026_09_20_03_ascension_talents_proc_masque_famille.sql porte
+--   ProcFlags 262160 = 0x10 | 0x40000. Son propre commentaire dit pourtant que 653238
+--   « Explosive Augmentation / Damage » est DmgClass 1 : c'est la classe MAGIC, donc
+--   PROC_FLAG_DONE_SPELL_MAGIC_DMG_CLASS_NEG 0x10000 (SpellMgr.h), pas 0x10 (MELEE).
+--   Lu dans Spell.dbc le 2026-10-23 : 653238 DmgClass 1, SpellFamilyFlags (0,16777216,0) ;
+--   653247 « Tracer Augmentation / Stack Damage » porte ses dégâts par l'aura 3 périodique
+--   (DONE_PERIODIC 0x40000, déjà présent).
+--   Résultat : 0x10 | 0x10000 | 0x40000 = 327696. Le 0x10 est gardé, il ne coûte rien
+--   (le masque de famille borne déjà le proc à ces deux sorts).
+--   Idempotent : un OU binaire ciblé sur une seule ligne.
+-- =====================================================================================
+
+UPDATE `spell_proc` SET `ProcFlags` = `ProcFlags` | 65536 WHERE `SpellId` = 707239;

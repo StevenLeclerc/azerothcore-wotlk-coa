@@ -2,6 +2,7 @@
 #include "AscensionSpellSafe.h"
 #include "AscensionTinker.h"
 #include "AscensionTinkerData.h"
+#include "Chat.h"
 #include "Creature.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
@@ -117,7 +118,17 @@ public:
             result != SPELL_CAST_OK)
             return;
         if (info->Id == Mechsuit && !Count(player,Scrap))
-            result = SPELL_FAILED_NO_POWER;
+        {
+            // NO_POWER printed a generic power error that never named Scrap (T-21). A human gets the
+            // reason in words instead, and the silent result keeps the client from adding its own line.
+            if (WorldSession* session = player->GetSession(); session && !session->IsBot())
+            {
+                ChatHandler(session).SendNotification("Pas assez de Scrap pour activer le Mechsuit.");
+                result = SPELL_FAILED_DONT_REPORT;
+            }
+            else
+                result = SPELL_FAILED_NO_POWER;
+        }
         if ((info->Id == 500213 || Any(info,{801387,801389,805372})) && !player->HasAura(Mechsuit))
             result = SPELL_FAILED_CANT_DO_THAT_RIGHT_NOW;
         if (info->Id == 504594 && !player->HasAura(681245))
@@ -169,8 +180,6 @@ public:
         bool sticky = Named(info,500232);
         bool rocket = Named(info,500235);
         bool bomb = Named(info,801005);
-        if (player->HasAura(92141) && (shot || sticky))
-            Resource(player,Scrap,shot ? 3 : 10);
         if (NotifySpellAttack(player,info,target))
             for (Creature* device : Devices(player))
                 device->AI()->SetGUID(target->GetGUID(),1);
@@ -189,7 +198,8 @@ public:
             PetCast(player,nullptr,705787);
         if (MechAbility(info) && player->HasAura(707395))
             PetCast(player,nullptr,805519);
-        if ((shot || MechAbility(info)) && player->HasAura(520022))
+        // Gatling Gun is the Mechsuit's form of Scrap Shot: Master Technician counts it (T-19).
+        if ((shot || id == 500213 || MechAbility(info)) && player->HasAura(520022))
             for (Creature* device : Devices(player))
                 if (Turret(device->GetEntry()))
                 {
@@ -324,6 +334,14 @@ public:
         // for the same payload, one stack per cast - that no proc mask can express.
         if (spell->GetCaster() != player)
             return;
+        // Build: Mechsuit (92141): Scrap Shot +3 and Sticky Bomb +10 Scrap, once per cast and only on a
+        // landed hit. Given at the cast, a miss or an immune target paid them as well (T-22).
+        if (player->HasAura(92141) && !spell->IsTriggered() && !spell->GetScriptValue(92141) &&
+            (Named(info,500549) || Named(info,500232)))
+        {
+            spell->SetScriptValue(92141,1);
+            Resource(player,Scrap,Named(info,500549) ? 3 : 10);
+        }
         // Piercing Impact. 705756 is listed in TinkerDrivers, so ApplyContracts dummies its
         // aura 42 and clears its ProcFlags before LoadSpellProcs runs: in the DBC that proc
         // is armed with ProcFlags 0x4 at 100%, which would fire on every melee auto attack.

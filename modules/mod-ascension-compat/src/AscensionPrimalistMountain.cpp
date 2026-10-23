@@ -112,7 +112,17 @@ enum PrimalistWave5Spells : uint32
     SPELL_NATURES_CALL        = 800146,
     SPELL_NATURES_CALL_TAUNT  = 680430,
     SPELL_BOULDER_DASH        = 500692,
-    SPELL_BOULDER_DASH_HIT    = 500693
+    SPELL_BOULDER_DASH_HIT    = 500693,
+    // revue du 23/10 (C-07, C-12, C-15, C-27)
+    SPELL_SEISMIC_SMASH_R1    = 300693,
+    SPELL_AFTERSHOCK          = 301086,
+    SPELL_TERRASURGE_DEBUFF   = 573070,
+    SPELL_PRIMAL_RUSH_R1      = 500696,
+    SPELL_RUNNING_ON_INSTINCT = 300744,
+    SPELL_INSTINCT_HEAL       = 301203,
+    SPELL_INSTINCT_STACK      = 572029,
+    SPELL_MOUNTAIN_FURY_PULL  = 806186,
+    SPELL_MOUNTAIN_FURY_DR    = 807434
 };
 
 struct EmpoweredBoon
@@ -172,6 +182,21 @@ public:
         // 561193 Quaking Thane : « casting Mountain Hammer now grants you Thane's Rage ».
         if (IsRankOf(info, SPELL_MOUNTAIN_HAMMER_R1) && player->HasAura(SPELL_QUAKING_THANE))
             player->CastSpell(player, SPELL_THANES_RAGE, true);
+
+        // C-07 300693 Seismic Smash : « granting you Thane's Rage and Aftershock », tous rangs. Le sort
+        // n'a qu'un effet de degats : rien ne posait les deux buffs.
+        if (IsRankOf(info, SPELL_SEISMIC_SMASH_R1))
+        {
+            player->CastSpell(player, SPELL_THANES_RAGE, true);
+            player->CastSpell(player, SPELL_AFTERSHOCK, true);
+        }
+
+        // C-15 300744 Running on Instinct : « Passing through allies with Primal Rush heals up to
+        // $301203i of them ». Aura 42 sans ProcFlags ni spell_proc : rien ne lancait 301203. Lance ici,
+        // avant le deplacement de la ruee : 301203 vise lui-meme un cone d'allies devant le lanceur
+        // (tA 59) plafonne par MaxAffectedTargets. La pile 572029 est posee une fois par ruee, plus bas.
+        if (IsRankOf(info, SPELL_PRIMAL_RUSH_R1) && player->HasAura(SPELL_RUNNING_ON_INSTINCT))
+            player->CastSpell(player, SPELL_INSTINCT_HEAL, true);
 
         // 706160 Heavy Earth : Terrasurge consomme toutes les piles d'Earthshaping ; 560142
         // retire une pile (effet 175), rafraichit Golem Form (effet 173) et pose Heavy Earth.
@@ -236,8 +261,48 @@ public:
         Player* player = PrimalistSpellCaster(spell);
         SpellInfo const* info = spell->GetSpellInfo();
         if (!player || !info || info->SpellFamilyName != 37 || miss != SPELL_MISS_NONE || !target ||
-            target == player || player->IsFriendlyTo(target))
+            target == player)
             return;
+
+        // C-15 Running on Instinct : « heals up to $301203i of them [...] and grants a stack » : UNE pile
+        // par ruee des qu'un allie est soigne, quel que soit leur nombre (valeur de script du sort 301203,
+        // qui touche tout le cone en un seul lancer).
+        if (info->Id == SPELL_INSTINCT_HEAL)
+        {
+            if (player->IsFriendlyTo(target) && player->HasAura(SPELL_RUNNING_ON_INSTINCT) &&
+                !spell->GetScriptValue(SPELL_INSTINCT_STACK))
+            {
+                spell->SetScriptValue(SPELL_INSTINCT_STACK, 1);
+                player->CastSpell(player, SPELL_INSTINCT_STACK, true);
+            }
+            return;
+        }
+
+        if (player->IsFriendlyTo(target))
+            return;
+
+        // C-12 Terrasurge, 9 rangs : l'effet 1 (178, Spell::EffectNULL) porte 573070 (-50 % d'armure)
+        // en TriggerSpell et la duree en valeur (bp 9999 : 10 s, « for $/1000;S2 sec »). 573070 a sa
+        // propre duree de 5 s (DurationIndex 28) : on la remplace par celle de l'infobulle.
+        if (IsRankOf(info, SPELL_TERRASURGE_R1) && target->IsAlive())
+        {
+            SpellEffectInfo const& effect = info->Effects[EFFECT_1];
+            uint32 debuff = effect.TriggerSpell ? effect.TriggerSpell : uint32(SPELL_TERRASURGE_DEBUFF);
+            player->CastSpell(target, debuff, true);
+            int32 duration = effect.CalcValue(player);
+            if (duration > 0)
+                if (Aura* armor = target->GetAura(debuff, player->GetGUID()))
+                {
+                    armor->SetMaxDuration(duration);
+                    armor->SetDuration(duration);
+                }
+        }
+
+        // C-27 806185 Mountain Fury : « Each time an enemy is pulled toward you, you gain $807434s1%
+        // reduced damage taken ». Une pile par ennemi touche par la traction 806186 ; l'effet 1 de
+        // 806185, qui posait la pile toutes les 2 s sans condition, est neutralise plus bas.
+        if (info->Id == SPELL_MOUNTAIN_FURY_PULL)
+            player->CastSpell(player, SPELL_MOUNTAIN_FURY_DR, true);
 
         // 561193 Quaking Thane : « Striking at least 5 enemies with Quake ». Une fois par lancer.
         if (IsRankOf(info, SPELL_QUAKE_R1) && player->HasAura(SPELL_QUAKING_THANE))
@@ -322,13 +387,22 @@ public:
 
     void ModifySpellEffectBaseValue(Unit const* caster, SpellInfo const* info, uint8 index, float& value) override
     {
-        if (!caster || !info || info->Id != MountainFuryPull || index != EFFECT_1 ||
-            info->Effects[EFFECT_1].Effect != SPELL_EFFECT_SCHOOL_DAMAGE)
+        if (!caster || !info || info->SpellFamilyName != 37 || index >= MAX_SPELL_EFFECTS ||
+            info->Effects[index].Effect != SPELL_EFFECT_SCHOOL_DAMAGE)
+            return;
+        // C-07 Seismic Smash, tous rangs : « ${$m1+0+$AP*.22+$STA*.5} » ; la part de PA est dans
+        // spell_bonus_data (2026_10_24_31_ascension_primalist_revue.sql), l'Endurance ici.
+        float factor = 0.0f;
+        if (info->Id == MountainFuryPull && index == EFFECT_1)
+            factor = 1.25f;
+        else if (index == EFFECT_0 && IsRankOf(info, SPELL_SEISMIC_SMASH_R1))
+            factor = 0.5f;
+        if (!factor)
             return;
         Player const* player = caster->ToPlayer();
         if (!player || player->getClass() != CLASS_WILDWALKER)
             return;
-        value += std::max(0.0f, player->GetStat(STAT_STAMINA)) * 1.25f;
+        value += std::max(0.0f, player->GetStat(STAT_STAMINA)) * factor;
     }
 };
 
@@ -342,6 +416,28 @@ public:
         // Old trigger granted Mountain on the first stack without its talent.
         if (info->Id == EarthsRage && info->SpellFamilyName == 37)
             info->Effects[EFFECT_2].Effect = 0;
+
+        if (info->SpellFamilyName != 37)
+            return;
+
+        // C-05 680411 Thane's Guidance : « reduce the cooldown of Mountain Hammer and Primal Rush ».
+        // L'effet 1 (165, valeur 0, Earthen Avatar 680421) est la sentinelle de remise a zero : chaque
+        // coup blanc rendait les 3 min d'Earthen Avatar. Hors infobulle, neutralise. Garde : forme lue.
+        if (info->Id == 680411 && info->Effects[EFFECT_1].Effect == SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN &&
+            info->Effects[EFFECT_1].MiscValue == 680421)
+            info->Effects[EFFECT_1].Effect = 0;
+
+        // C-27 806185 Mountain Fury : l'effet 1 (aura 23 toutes les 2 s vers 807434) donnait la pile
+        // sans ennemi attire. La pile part de la traction (OnSpellHitResult de 806186).
+        if (info->Id == 806185 && info->Effects[EFFECT_1].IsAura(SPELL_AURA_PERIODIC_TRIGGER_SPELL) &&
+            info->Effects[EFFECT_1].TriggerSpell == SPELL_MOUNTAIN_FURY_DR)
+            info->Effects[EFFECT_1].Effect = 0;
+
+        // C-13 806559 Rexxar's Might : « increases your critical strike chance by ${$w2}% » - l'effet 1
+        // est un effet DUMMY (3) qui porte l'aura 290 (MOD_CRIT_PCT, 4) : jamais appliquee.
+        if (info->Id == 806559 && info->Effects[EFFECT_1].Effect == SPELL_EFFECT_DUMMY &&
+            info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_MOD_CRIT_PCT)
+            info->Effects[EFFECT_1].Effect = SPELL_EFFECT_APPLY_AURA;
     }
 };
 }
