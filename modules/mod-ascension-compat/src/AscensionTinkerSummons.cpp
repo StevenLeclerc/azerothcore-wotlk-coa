@@ -4,6 +4,7 @@
 #include "Creature.h"
 #include "DBCStores.h"
 #include "GameObject.h"
+#include "Group.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "Pet.h"
@@ -18,6 +19,7 @@
 #include "TemporarySummon.h"
 #include "Vehicle.h"
 #include <algorithm>
+#include <vector>
 namespace AscensionTinker
 {
 enum TinkerSummonSpell : uint32
@@ -97,11 +99,13 @@ void Scale(Player* player, Creature* creature, bool initial)
     creature->UpdateArmor();
     if (!creature->HasAura(707698))
         Cast(player,creature,707698);
+    // Inventor's Tool Belt says "you and your pet"; Fine Tuned says "your summons" (T-25).
     for (uint32 talent : {560742,705792})
     {
-        if (player->HasAura(talent) && !creature->HasAura(talent))
+        bool eligible = talent != 560742 || Permanent(creature->GetEntry());
+        if (eligible && player->HasAura(talent) && !creature->HasAura(talent))
             Cast(player,creature,talent);
-        else if (!player->HasAura(talent))
+        else if (!eligible || !player->HasAura(talent))
             creature->RemoveAurasDueToSpell(talent);
     }
 }
@@ -223,18 +227,62 @@ struct npc_ascension_tinker_pet : PetAI
                     me->SetReactState(REACT_DEFENSIVE);
                 if (CharmInfo* charmInfo = me->GetCharmInfo())
                     charmInfo->SetPlayerReactState(me->GetReactState());
-            }
-            if (!initialized || events.ExecuteEvent())
-            {
-                Scale(player,me,!initialized);
+                Scale(player,me,true);
                 initialized = true;
                 events.ScheduleEvent(1,1000ms);
-                if (me->GetEntry() == 500481)
-                    if (Unit* enemy = player->GetVictim(); enemy && player->IsValidAttackTarget(enemy))
-                        Cast(me,enemy,520375);
+                events.ScheduleEvent(2,1000ms);
+            }
+            while (uint32 event = events.ExecuteEvent())
+            {
+                if (event == 1)
+                {
+                    Scale(player,me,false);
+                    events.ScheduleEvent(1,1000ms);
+                }
+                else if (event == 2)
+                    events.ScheduleEvent(2,Milliseconds(Ability(player)));
             }
         }
         PetAI::UpdateAI(diff);
+    }
+    // The pet's own ability, at its own rhythm; answers the delay before the next attempt.
+    uint32 Ability(Player* player)
+    {
+        if (me->HasUnitState(UNIT_STATE_CONTROLLED | UNIT_STATE_CASTING) ||
+            me->HasAuraType(SPELL_AURA_MOD_PACIFY) || me->HasAuraType(SPELL_AURA_MOD_PACIFY_SILENCE))
+            return 500;
+        if (me->GetEntry() == 500481)
+        {
+            // ZIGGI-6K: Gear Toss "dealing Nature Damage and healing the lowest health nearby ally equal to the
+            // damage dealt". The heal is DeviceEvent's 561267 copy of the damage; the old cast of the heal
+            // 520375 every second came on top of it and Gear Toss itself was never cast (T-12). Rhythm: the
+            // 2.5 s cast time of 520368, which has no cooldown in Spell.dbc.
+            SpellInfo const* toss = sSpellMgr->GetSpellInfo(520368);
+            Unit* enemy = player->GetVictim();
+            if (!toss || !enemy || !enemy->IsAlive() || !player->IsValidAttackTarget(enemy) ||
+                !me->IsWithinDistInMap(enemy,toss->GetMaxRange(false,me)) || !me->IsWithinLOSInMap(enemy))
+                return 500;
+            me->SetFacingToObject(enemy);
+            Cast(me,enemy,520368);
+            return 2500;
+        }
+        if (me->GetEntry() == 60070)
+        {
+            // Clockwork Assistant: Arclight Smash, which Arclight Core 707396 and Warcore 704450 name as this
+            // bot's attack, was cast by nothing, so the Arclight mark was never consumed (T-11). 3 s cooldown
+            // (Spell.dbc). Warcore's cooldown modifier (704450 effect 2) is read on the owner; nothing applies
+            // 704450 yet, so that shortening is unproven.
+            SpellInfo const* smash = sSpellMgr->GetSpellInfo(806169);
+            Unit* enemy = me->GetVictim();
+            if (!smash || !enemy || !enemy->IsAlive() || !player->IsValidAttackTarget(enemy) ||
+                !me->IsWithinMeleeRange(enemy))
+                return 500;
+            Cast(me,enemy,806169);
+            int32 cooldown = int32(smash->RecoveryTime);
+            player->ApplySpellMod(806169,SPELLMOD_COOLDOWN,cooldown);
+            return uint32(std::max(500,cooldown));
+        }
+        return 1000;
     }
 };
 struct npc_ascension_tinker_device : ScriptedAI
@@ -249,6 +297,13 @@ struct npc_ascension_tinker_device : ScriptedAI
     float travelled = 0;
     bool exploded = false;
     bool deregistered = false;
+    // Devices that damage enemies: Blast and Shrapnel Mine, Spider Bomb, Firepot Drone, Deathball, Heavy Spider
+    // Bomb, Clockwork Guardian, Repulsion Unit, Noise Box (creature_template names).
+    static bool Offensive(uint32 entry)
+    {
+        return entry == 50045 || entry == 50600 || entry == 226012 || entry == 226112 || entry == 226312 ||
+            entry == 840028 || entry == 500711 || entry == 500366 || entry == 52036;
+    }
     bool Mobile() const
     {
         return me->GetEntry() == 226312 || me->GetEntry() == 226012 || me->GetEntry() == 840028 ||
@@ -269,10 +324,12 @@ struct npc_ascension_tinker_device : ScriptedAI
         // sans quoi le prochain Cleanup() sauterait un effacement devenu necessaire.
         deregistered = false;
         me->SetFaction(player->GetFaction());
-        if (Turret(me->GetEntry()))
+        if (Turret(me->GetEntry()) || Offensive(me->GetEntry()))
         {
             // TempSummon skips SetMinion: owner GUID alone still leaves shots
-            // on the creature-vs-creature target and immunity checks.
+            // on the creature-vs-creature target and immunity checks. Mines, bombs and the
+            // Clockwork Guardian had the same fault: nothing at all on neutral (yellow) or
+            // IMMUNE_TO_NPC targets (T-07). Player-controlled, they follow the owner's rules.
             me->m_ControlledByPlayer = true;
             me->SetUnitFlag(UNIT_FLAG_PLAYER_CONTROLLED);
             me->SetByteValue(UNIT_FIELD_BYTES_2, 1, player->GetByteValue(UNIT_FIELD_BYTES_2, 1));
@@ -341,11 +398,42 @@ struct npc_ascension_tinker_device : ScriptedAI
         if (!player || exploded)
             return;
         exploded = true;
-        uint32 id = me->GetEntry() == 50045 ? 802336 : me->GetEntry() == 50600 ? 706648 :
+        if (me->GetEntry() == 50045)
+        {
+            // Blast Mine: one explosion with the data's own targeting (T-06), from a player-controlled
+            // mine so neutral enemies are hit too (T-07). Effect 0 and 1 take the enemies within 8 yd.
+            // The allied knockback 804306 (T-08) is thrown here, with or without an enemy, at the owner and
+            // the players of his party: the data's party target (effect 2, removed by contract) also took
+            // the Tinker's turret, beacons and pets, since IsInPartyWith climbs to their owner. The visual
+            // plays once, at the mine. Damage keeps the data's values ("a minor amount of Fire damage", no
+            // coefficient in the tooltip).
+            explosionTargets = 0;
+            me->CastSpell(me,802336,true);
+            SpellInfo const* blast = sSpellMgr->GetSpellInfo(802336);
+            if (!blast || blast->Effects[2].Effect == SPELL_EFFECT_TRIGGER_SPELL)
+            {
+                me->DespawnOrUnsummon(100ms); // The contract was not applied: the data still knocks back.
+                return;
+            }
+            float reach = Radius(802336,2);
+            std::vector<Player*> allies{player};
+            if (Group* group = player->GetGroup())
+                for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+                    if (Player* member = ref->GetSource(); member && member != player && player->IsInPartyWith(member))
+                        allies.push_back(member);
+            for (Player* ally : allies)
+                if (ally->IsInMap(me) && !ally->IsInFlight() && me->IsWithinDistInMap(ally,reach))
+                    Cast(me,ally,804306);
+            me->DespawnOrUnsummon(100ms);
+            return;
+        }
+        uint32 id = me->GetEntry() == 50600 ? 706648 :
             me->GetEntry() == 840028 ? 802477 : me->GetEntry() == 226112 ? 500601 :
             me->GetEntry() == 226312 ? 806074 : 801982;
         auto targets = Nearby(me,Radius(id));
         targets.remove_if([player](Unit* enemy) { return !player->IsValidAttackTarget(enemy); });
+        // Nearby() sorts by GUID; the target cap keeps the nearest enemies instead (T-26).
+        targets.sort([this](Unit* a, Unit* b) { return me->GetExactDist(a) < me->GetExactDist(b); });
         // Appele depuis DoAction(1) et JustDied(), donc sur un fil de carte en
         // plein combat : un des six ids disparu de Spell.dbc plantait ici. 1
         // cible par defaut, comme TinkerAbilities.cpp (801744).

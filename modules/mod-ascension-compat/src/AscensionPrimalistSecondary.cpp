@@ -220,8 +220,17 @@ public:
         // spell » (803299 Magma Fissure) : le DBC porte ProcCharges = 0, le mod valait donc
         // pour tous les sorts lances pendant la duree. Une charge est consommee par le mod
         // lui-meme (Player.cpp:10559-10593).
-        if ((info->Id == 805463 || info->Id == 803299) && !info->ProcCharges)
+        // 301086 Aftershock (revue du 23/10, avec C-07) : « Your next Geode Barrage or Earthquake within
+        // $301086d », meme defaut ; il n'etait jamais pose avant que Seismic Smash le donne.
+        if ((info->Id == 805463 || info->Id == 803299 || info->Id == 301086) && !info->ProcCharges)
             info->ProcCharges = 1;
+        // 301086, suite : son effet 1 est un +0 % de degats (108, MiscValue 0) sur le mot 0 0x1000, que
+        // Lithic Lance 681251 porte aussi. Player::ApplySpellMod consomme la charge meme pour un mod nul :
+        // une Lithic Lance apres Seismic Smash gachait l'Aftershock. L'effet nul est retire.
+        if (info->Id == 301086 && info->Effects[EFFECT_1].Effect == SPELL_EFFECT_APPLY_AURA &&
+            info->Effects[EFFECT_1].ApplyAuraName == SPELL_AURA_ADD_PCT_MODIFIER &&
+            info->Effects[EFFECT_1].MiscValue == 0 && info->Effects[EFFECT_1].CalcValue() == 0)
+            info->Effects[EFFECT_1].Effect = 0;
         // 800180 Sacred Grove : l'aura de zone (e1) nomme ses allies en TargetA ; DynObjAura
         // ne cherche les allies que depuis TargetB et retombait sur les ennemis (meme defaut
         // que Dawnfall 806118). Garde sur la forme exacte lue dans Spell.dbc.
