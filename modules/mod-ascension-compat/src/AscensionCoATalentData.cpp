@@ -29,8 +29,16 @@ constexpr uint32 CLASS_TAB = 87;
 // class ability. Infernus and Corrupting Whispers do not state Level 10 Passive and keep their authored gates.
 constexpr std::array<uint32, 2> IDENTITY_PASSIVE_EXCLUSIONS = { 4037, 4041 };
 
-// Barbarian's zero-cost grouped alternatives are choices the player makes, not automatic level grants.
-constexpr std::array<uint32, 8> BARBARIAN_FREE_CHOICES = { 9172, 9861, 11172, 11257, 12112, 13111, 30764, 34257 };
+// Zero-cost grouped alternatives that are choices the player makes, not automatic level grants: one node per
+// CharacterAdvancement.dbc Group, the other stays selectable. The client marks the same nodes
+// LocalSelectableFree in CoATalentNodeData.lua; both lists must change together.
+constexpr std::array<uint32, 16> SELECTABLE_FREE_CHOICES =
+{
+    // Barbarian, Ancestry (levels 15, 30, 40, 50).
+    9172, 9861, 11172, 11257, 12112, 13111, 30764, 34257,
+    // Guardian, Inspiration (levels 20, 30, 40, 50; groups 743521, 821425, 563213, 125733).
+    7836, 10836, 11214, 11836, 11837, 13616, 29214, 29216,
+};
 
 // CharacterAdvancement.dbc DWORDs; the record's byte fields start after these.
 enum AdvancementField : uint32
@@ -238,8 +246,17 @@ bool LoadCoATalentData()
     for (Node const& node : nodes)
     {
         CoATalentEntries.push_back(node.Entry);
-        if (Contains(BARBARIAN_FREE_CHOICES, node.Entry.EntryId))
-            CoASelectableFreeEntries.push_back({ node.Entry.EntryId, node.Group });
+        if (Contains(SELECTABLE_FREE_CHOICES, node.Entry.EntryId))
+        {
+            // A choice needs a free node and a group to resolve; anything else would be held by nobody.
+            if (node.Group && !node.Entry.AECost && !node.Entry.TECost)
+                CoASelectableFreeEntries.push_back({ node.Entry.EntryId, node.Group });
+            else
+                LOG_ERROR("module.ascension_compat",
+                    "CoA free choice entry {} is not a zero-cost grouped node (AE {}, TE {}, group {}): "
+                    "not a free choice", node.Entry.EntryId, uint32(node.Entry.AECost), uint32(node.Entry.TECost),
+                    node.Group);
+        }
 
         if (node.Entry.AECost || node.Entry.TECost || node.Required.empty())
             continue;
@@ -251,7 +268,7 @@ bool LoadCoATalentData()
             auto requiredNode = nodeById.find(requiredId);
             bool const paidClassNode = requiredNode != nodeById.end() && requiredNode->second->ClassTab &&
                 (requiredNode->second->Entry.AECost || requiredNode->second->Entry.TECost);
-            if (!(node.Entry.SpecId && !Contains(BARBARIAN_FREE_CHOICES, node.Entry.EntryId) && paidClassNode))
+            if (!(node.Entry.SpecId && !Contains(SELECTABLE_FREE_CHOICES, node.Entry.EntryId) && paidClassNode))
                 required.push_back(requiredId);
         }
 
@@ -269,6 +286,10 @@ bool LoadCoATalentData()
         std::copy(required.begin(), required.end(), dependency.RequiredEntryIds.begin());
         CoAAutomaticDependencies.push_back(dependency);
     }
+
+    if (CoASelectableFreeEntries.size() != SELECTABLE_FREE_CHOICES.size())
+        LOG_ERROR("module.ascension_compat", "Only {} of the {} listed CoA free choice entries were loaded",
+            CoASelectableFreeEntries.size(), SELECTABLE_FREE_CHOICES.size());
 
     LOG_INFO("module.ascension_compat",
         "Loaded {} CoA talent entries ({} selectable free, {} automatic dependencies, {} budget rows)",

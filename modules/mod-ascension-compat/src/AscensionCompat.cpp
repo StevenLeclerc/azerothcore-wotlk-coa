@@ -7277,6 +7277,23 @@ bool SetAscensionTalentRank(Player* player, uint32 entryId, uint32 rank)
     return true;
 }
 
+std::vector<AscensionFreeChoice> GetAscensionFreeChoices(uint8 classId)
+{
+    std::vector<AscensionFreeChoice> choices;
+    for (AscensionCompatData::CoASelectableFreeEntry const& free : AscensionCompatData::CoASelectableFreeEntries)
+    {
+        AscensionCompatData::CoATalentEntry const* entry = FindAscensionTalentEntry(free.EntryId);
+        if (entry && entry->ClassId == classId && entry->SpellCount)
+            choices.push_back({ entry->EntryId, free.GroupId, entry->SpecId, entry->RequiredLevel,
+                                entry->SpellCount });
+    }
+    std::sort(choices.begin(), choices.end(), [](AscensionFreeChoice const& a, AscensionFreeChoice const& b)
+    {
+        return a.GroupId != b.GroupId ? a.GroupId < b.GroupId : a.EntryId < b.EntryId;
+    });
+    return choices;
+}
+
 bool IsAscensionCustomClassId(uint8 classId)
 {
     return classId >= CLASS_BARBARIAN && classId <= CLASS_SPIRIT_MAGE;

@@ -55,7 +55,15 @@ struct go_ascension_guardian_drum : GameObjectAI
             if (player->IsAlive() && player->IsControlledByPlayer() && owner->IsFriendlyTo(player) &&
                 !placement->recipients.count(player->GetGUID()))
                 if (owner->CastSpell(player, 570759, true) == SPELL_CAST_OK)
+                {
                     placement->recipients.insert(player->GetGUID());
+                    // G-06: 803683 promises "critical strike chance, haste, damage, and healing done
+                    // increased by 10%". 570759 carries only crit and haste; its "[SLS]" twin 572060
+                    // carries the +10% damage (aura 79) and healing (aura 136). Added as an aura, not
+                    // cast: its targets and range are the caster's own (TargetA 1, range 1). Its
+                    // Sound of War trigger and its second stack are removed in ApplyContracts.
+                    owner->AddAura(572060, player);
+                }
         events.ScheduleEvent(1, Milliseconds(250));
     }
 };

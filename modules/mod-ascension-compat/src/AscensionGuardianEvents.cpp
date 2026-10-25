@@ -149,11 +149,20 @@ class aura_ascension_guardian_event : public AuraScript
                 break;
             case 804891:
             {
-                int64 amount = damage / 20;
+                // G-09 Shield Unit: "Each time you take damage, you gain $s1% of the damage taken as
+                // attack power for $572158d." Neither a running total nor a cap is in the tooltip, and
+                // 572158 does not stack (StackAmount 0). The old code summed every hit up to an
+                // invented 20% of max health. Now each hit grants its own $s1%, and a smaller hit
+                // never lowers a larger grant still running: a hit worth no more than the running
+                // grant is ignored, so that grant keeps its own duration and expires on time (recasting
+                // it would refresh the 60 s and keep the largest hit of the fight alive forever).
+                int64 amount = int64(damage) * std::max(0, effect ? effect->GetAmount() : 0) / 100;
+                amount = std::clamp<int64>(amount, 0, std::numeric_limits<int32>::max());
+                if (amount <= 0)
+                    break;
                 if (AuraEffect const* old = owner->GetAuraEffect(572158, EFFECT_0))
-                    amount += old->GetAmount();
-                amount = std::clamp<int64>(amount, 0, std::min<uint64>(owner->GetMaxHealth() / 5,
-                    std::numeric_limits<int32>::max()));
+                    if (old->GetAmount() >= amount)
+                        break;
                 owner->CastCustomSpell(572158, SPELLVALUE_BASE_POINT0, int32(amount), owner,
                     TRIGGERED_FULL_MASK, nullptr, effect);
                 break;
