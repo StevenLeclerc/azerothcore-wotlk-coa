@@ -1,6 +1,7 @@
 /* Copyright (C) 2016+ AzerothCore, GNU AGPL v3. */
 
 #include "AscensionGuardianCompletion.h"
+#include "AscensionContract.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "CellImpl.h"
@@ -19,6 +20,26 @@
 
 namespace
 {
+// G-28: a Guardian rewrite whose Spell.dbc layout moved is journalled once and counted against the
+// "Guardian" contract of AscensionContract::Report(), instead of being applied blind or skipped in silence.
+bool GuardianRefuse(SpellInfo const* info, uint8 slot, char const* check)
+{
+    if (AscensionContract::Detail::FirstFailure("Guardian",
+            AscensionContract::Detail::Key("Guardian", info->Id, slot, check)))
+        LOG_ERROR("module.ascension_compat",
+            "Ascension contract Guardian: spell {} slot {} is effect {} aura {} misc {} trigger {}; "
+            "its '{}' rewrite is not applied.", info->Id, slot, uint32(info->Effects[slot].Effect),
+            uint32(info->Effects[slot].ApplyAuraName), info->Effects[slot].MiscValue,
+            info->Effects[slot].TriggerSpell, check);
+    return false;
+}
+
+bool GuardianExpect(SpellInfo const* info, uint8 slot, uint32 effect, uint32 aura, char const* check)
+{
+    SpellEffectInfo const& current = info->Effects[slot];
+    return (current.Effect == effect && current.ApplyAuraName == aura) || GuardianRefuse(info, slot, check);
+}
+
 Player* GuardianPlayer(Unit* unit)
 {
     Player* player = unit ? unit->ToPlayer() : nullptr;
@@ -42,7 +63,10 @@ uint32 Nearby(Unit* unit, bool allies, float range)
     {
         if (target == unit || !target->IsAlive() || !unit->InSamePhase(target))
             return false;
-        return allies ? unit->IsFriendlyTo(target) && target->IsControlledByPlayer() :
+        // G-22 Strength in Unison (300860), the only caller with allies = true: "for each ally". Pets,
+        // totems and the Guardian's own standards are player-controlled units too, and each one used
+        // to add 1% haste. Only players (bots included) count.
+        return allies ? target->IsPlayer() && unit->IsFriendlyTo(target) && target->IsControlledByPlayer() :
             unit->IsValidAttackTarget(target);
     }));
 }
@@ -287,12 +311,73 @@ void AscensionGuardian::ApplyContracts(SpellInfo* info)
             // actually cast (802284, 573204-573211, all category 1096), so clear the category.
             info->Effects[EFFECT_0].MiscValueB = 1;
         else
-            // Guardian is not in the AscensionContract registry: without this line a DBC change
-            // would silently leave Guardbreaker resetting Ram rank 1 only.
-            LOG_ERROR("module.ascension_compat",
-                "Ascension contract Guardian: 802895 Pulverize Reset refused (effect {}, misc {}), Ram category not cleared",
-                uint32(info->Effects[EFFECT_0].Effect), info->Effects[EFFECT_0].MiscValue);
+            // Without this line a DBC change would silently leave Guardbreaker resetting Ram rank 1 only.
+            GuardianRefuse(info, EFFECT_0, "guardbreaker-ram-category");
     }
+    if (id == 803963)
+    {
+        // G-05 Liberation: "Instantly breaks an ally free of any stun, fear, or polymorph effects and
+        // grants immunity". Its three MECHANIC_IMMUNITY auras (12 stun, 5 fear, 17 polymorph) only
+        // prevented a NEW effect: without SPELL_ATTR1_IMMUNITY_PURGES_EFFECT the core
+        // (SpellInfo::ApplyAllSpellImmunitiesTo, HandleModMechanicImmunity) leaves the running one.
+        // Same attribute as Anti-Cloaking Device (AscensionTinkerContracts.cpp).
+        bool layout = true;
+        for (uint8 slot = 0; slot < 3; ++slot)
+            layout = GuardianExpect(info, slot, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MECHANIC_IMMUNITY,
+                "liberation-purge") && layout;
+        if (layout)
+            info->AttributesEx |= SPELL_ATTR1_IMMUNITY_PURGES_EFFECT;
+    }
+    if (id == 572060)
+    {
+        // G-06 Battle Drums "[SLS]": the +10% damage (aura 79) and healing (aura 136) half of 570759's
+        // tooltip, added to each drummed ally by go_ascension_guardian_drum. Its effect 0 triggers Sound
+        // of War, which 570759 already does with five charges: removed so it cannot fire twice. Its
+        // StackAmount 2 would let a second placement double the bonus: 570759 does not stack either.
+        if (GuardianExpect(info, EFFECT_0, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_PROC_TRIGGER_SPELL,
+                "battle-drums-sound-of-war"))
+        {
+            if (info->Effects[EFFECT_0].TriggerSpell == 572612)
+                info->Effects[EFFECT_0].Effect = 0;
+            else
+                GuardianRefuse(info, EFFECT_0, "battle-drums-sound-of-war");
+        }
+        GuardianExpect(info, EFFECT_1, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_DAMAGE_PERCENT_DONE,
+            "battle-drums-damage");
+        GuardianExpect(info, EFFECT_2, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_MOD_HEALING_DONE_PERCENT,
+            "battle-drums-healing");
+        info->StackAmount = 0;
+    }
+    if (id == 583027)
+        // G-23 Valiant Knight: "your next Pulverize ... free of cost and 25% increased damage". The mask
+        // (0, 16, 8388608) also selects Hammer of Kings (all nine ranks) and Hold the Line (803830,
+        // 803939), which took the single charge. C 8388608 is carried by the eight Pulverize ranks and
+        // by nothing else in family 24 (Spell.dbc, 2026-10-25).
+        for (uint8 slot = 0; slot < 2; ++slot)
+        {
+            if (GuardianExpect(info, slot, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_ADD_PCT_MODIFIER,
+                    "valiant-knight-mask") && info->Effects[slot].SpellClassMask == flag96(0, 16, 8388608))
+                info->Effects[slot].SpellClassMask = flag96(0, 0, 8388608);
+            else if (info->Effects[slot].SpellClassMask != flag96(0, 0, 8388608))
+                GuardianRefuse(info, slot, "valiant-knight-mask");
+        }
+    if (id == 92106)
+        // G-32 Glory: effects 1 and 2 re-apply the hidden Axe (542238) and Mace (542265) helpers every
+        // 10 s whatever the weapon. Both modify Centurion Strike only (mask C 2048), and
+        // PrepareAscensionClassMechanicsCast already removes both and applies the one that fits the
+        // main hand before each Centurion Strike. Effect 0 (Glory stacks, 802302) is kept.
+        for (uint8 slot = 1; slot < 3; ++slot)
+        {
+            uint32 helper = slot == 1 ? 542238 : 542265;
+            if (GuardianExpect(info, slot, SPELL_EFFECT_APPLY_AURA, SPELL_AURA_PERIODIC_TRIGGER_SPELL,
+                    "glory-weapon-helpers"))
+            {
+                if (info->Effects[slot].TriggerSpell == helper)
+                    info->Effects[slot].Effect = 0;
+                else
+                    GuardianRefuse(info, slot, "glory-weapon-helpers");
+            }
+        }
     if (id == 706636 && info->Effects[EFFECT_0].IsAura(SPELL_AURA_MOD_DEBUFF_RESISTANCE) &&
         info->Effects[EFFECT_0].MiscValue == DISPEL_DISEASE)
         // Little Drummer: "Allies within 20 yds of you now gain 20% chance to resist

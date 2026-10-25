@@ -14,7 +14,9 @@
 #include "SpellMgr.h"
 #include "SpellScript.h"
 #include "TemporarySummon.h"
+#include <algorithm>
 #include <cmath>
+#include <limits>
 #include <map>
 #include <mutex>
 
@@ -306,6 +308,16 @@ class aura_ascension_guardian_valiance : public AuraScript
             return;
         int32 amount = effect->GetSpellInfo()->Effects[EFFECT_2].CalcValue(owner) +
             int32(owner->GetTotalAttackPowerValue(BASE_ATTACK) * 0.04f);
+        // G-07 Bannerman 504144: "While affected by your Banner of Swiftness or Banner of Conquest, the
+        // initial damage dealt by your Standard of Valiance now deals $s1% more damage." Its DBC
+        // modifier targets effect 2 of the banner auras, a 190 effect that only reaches m_Controlled,
+        // and the standard is not controlled: nothing read it. "Initial" is read literally as the first
+        // damage tick of this standard (the field aura is applied once, at summon).
+        if (effect->GetTickNumber() == 1 &&
+            (owner->HasAura(500264, owner->GetGUID()) || owner->HasAura(800704, owner->GetGUID())))
+            if (AuraEffect const* bannerman = owner->GetAuraEffect(504144, EFFECT_0))
+                amount = int32(std::clamp<int64>(int64(amount) * (100 + std::max(0, bannerman->GetAmount())) / 100,
+                    0, std::numeric_limits<int32>::max()));
         GetCaster()->CastCustomSpell(GetCaster(), STANDARD_VALIANCE_DAMAGE, &amount, nullptr, nullptr,
             true, nullptr, effect, owner->GetGUID());
     }

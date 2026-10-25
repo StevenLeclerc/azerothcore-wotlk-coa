@@ -15,6 +15,7 @@
 #include "SpellScript.h"
 #include "ThreatManager.h"
 #include <algorithm>
+#include <limits>
 
 namespace
 {
@@ -152,7 +153,16 @@ class spell_ascension_guardian_ability : public SpellScript
         if (player->HasAura(805155) && IsBroadSweep(player, id))
             player->CastSpell(player, 806081, true);
         if (id == 803963)
-            player->CastSpell(player, 807140, true);
+        {
+            // G-05 Liberation: "Dispels $807140s3 harmful magic effects from the ALLY". 807140 effect 2
+            // (DISPEL, implicit target 21 TARGET_UNIT_TARGET_ALLY) used to be cast on the Guardian
+            // himself. The ally is the explicit target of 803963 (also target 21); the Guardian stays
+            // the fallback when the target is gone or no longer friendly.
+            Unit* ally = GetExplTargetUnit();
+            if (!ally || !ally->IsInWorld() || !ally->IsAlive() || !player->IsFriendlyTo(ally))
+                ally = player;
+            player->CastSpell(ally, 807140, true);
+        }
         if (_perilStacks)
         {
             uint32 remaining = player->GetSpellCooldownDelay(300983);
@@ -301,6 +311,71 @@ class aura_ascension_guardian_hold_the_line : public AuraScript
             EFFECT_2, SPELL_AURA_MECHANIC_IMMUNITY, AURA_EFFECT_HANDLE_REAL);
     }
 };
+
+constexpr uint8 GUARDIAN_CHAIN_WALK = 32;
+
+// Ascension's cooldown effects (165: MiscValue = spell, value = ms, 0 = reset; 195: reset) name ONE id,
+// the rank 1, while the cooldown sits under the id of the rank actually cast (Player::
+// AddSpellAndCategoryCooldowns). The core handlers (SpellEffects.cpp, ModifyAscensionCooldown and
+// ResetAscensionCooldown) only touch that id, so from rank 2 on nothing was shortened. Same walk as
+// ReduceCooldownOverChain (AscensionPrimalistTalents.cpp): every rank of the spell_ranks chain that has
+// a running cooldown; a cut at least equal to what remains clears the entry (and the category when
+// MiscValueB asks for it). A spell outside any chain is its own one-element chain: native behaviour.
+void ReduceGuardianCooldownOverChain(Player* player, uint32 spellId, bool resetCategory, uint64 cut)
+{
+    uint32 current = sSpellMgr->GetFirstSpellInChain(spellId);
+    for (uint8 step = 0; current && step < GUARDIAN_CHAIN_WALK; ++step)
+    {
+        if (uint32 remaining = player->GetSpellCooldownDelay(current))
+        {
+            if (cut >= remaining)
+            {
+                player->RemoveSpellCooldown(current, true);
+                if (resetCategory)
+                    if (SpellInfo const* rank = sSpellMgr->GetSpellInfo(current))
+                        if (uint32 category = rank->GetCategory())
+                            player->RemoveCategoryCooldown(category);
+            }
+            else if (cut)
+                player->ModifySpellCooldown(current, -int32(cut));
+        }
+        current = sSpellMgr->GetNextSpellInChain(current);
+    }
+}
+
+// G-01 No Escape 806544 (Battle Rush 802197, -10 s), G-02 Wreck Formation 803127 effect 0 (reset of
+// Hammer of the Law 704418), and the same defect on 520638 Battlemaster: Axes (Battle Rush, Advance),
+// 802893 Death Ram Reset and 705363 Iron Guardian (Ram), 712369 Colossal Reprise (Broad Sweep).
+class spell_ascension_guardian_cooldown_chain : public SpellScript
+{
+    PrepareSpellScript(spell_ascension_guardian_cooldown_chain);
+
+    void Handle(SpellEffIndex effIndex)
+    {
+        Unit* hit = GetHitUnit();
+        Player* player = hit ? hit->ToPlayer() : nullptr;
+        SpellEffectInfo const& effect = GetSpellInfo()->Effects[effIndex];
+        if (effect.Effect != SPELL_EFFECT_ASCENSION_MODIFY_COOLDOWN &&
+            effect.Effect != SPELL_EFFECT_ASCENSION_RESET_COOLDOWN)
+            return; // 803127 effects 1 and 2 (177, aura duration) stay native.
+        bool const reset = effect.Effect == SPELL_EFFECT_ASCENSION_RESET_COOLDOWN;
+        int32 const delta = reset ? 0 : GetEffectValue();
+        // Anything this script does not model (another class, a lengthening) keeps the core handler.
+        if (!player || player->getClass() != CLASS_GUARDIAN || effect.MiscValue <= 0 || delta > 0)
+            return;
+        PreventHitDefaultEffect(effIndex);
+        uint64 const cut = delta ? uint64(-int64(delta)) : std::numeric_limits<uint64>::max();
+        ReduceGuardianCooldownOverChain(player, uint32(effect.MiscValue), effect.MiscValueB != 0, cut);
+    }
+
+    void Register() override
+    {
+        // One hook on any effect: two hooks (165, 195) would each fail script validation, with an
+        // Errors.log line at startup, on the spells that carry only the other one.
+        OnEffectHitTarget += SpellEffectFn(spell_ascension_guardian_cooldown_chain::Handle, EFFECT_ALL,
+            SPELL_EFFECT_ANY);
+    }
+};
 }
 
 void AddAscensionGuardianAbilityScripts()
@@ -308,4 +383,5 @@ void AddAscensionGuardianAbilityScripts()
     RegisterSpellScript(spell_ascension_guardian_ability);
     RegisterSpellScript(aura_ascension_guardian_advance);
     RegisterSpellScript(aura_ascension_guardian_hold_the_line);
+    RegisterSpellScript(spell_ascension_guardian_cooldown_chain);
 }

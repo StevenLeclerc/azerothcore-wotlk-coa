@@ -26,6 +26,21 @@ uint32 GetAscensionTalentRank(Player const* player, uint32 entryId);
 // command, this does not count points.
 bool SetAscensionTalentRank(Player* player, uint32 entryId, uint32 rank);
 
+// A selectable free choice of a CoA class: a zero-cost node of a CharacterAdvancement group from which the
+// character holds one node, chosen with SetAscensionTalentRank (which clears the other nodes of the group).
+struct AscensionFreeChoice
+{
+    uint32 EntryId;
+    uint32 GroupId;
+    uint16 SpecId;       // specialization tree of the node, 0 for the class tree
+    uint8 RequiredLevel;
+    uint8 SpellCount;    // full rank of the node
+};
+
+// Every selectable free choice of a CoA class, sorted by GroupId then EntryId. Empty for a class that is not a
+// CoA class.
+std::vector<AscensionFreeChoice> GetAscensionFreeChoices(uint8 classId);
+
 // Whether a class id is one of the CoA custom classes.
 bool IsAscensionCustomClassId(uint8 classId);
 

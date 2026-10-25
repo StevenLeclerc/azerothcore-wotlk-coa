@@ -2,6 +2,7 @@
 
 #include "AscensionGuardianResources.h"
 #include "AscensionGuardianCompletion.h"
+#include "AscensionContract.h"
 #include "Player.h"
 #include "Spell.h"
 #include "SpellAuras.h"
@@ -32,7 +33,10 @@ void AddGuardianGlory(Player* player)
 
 void ApplyAscensionGuardianResourceContracts(SpellInfo* info)
 {
-    if (!info || info->SpellFamilyName != 24)
+    // G-28: the Guardian joins the AscensionContract registry. MatchesFamily registers "Guardian" on
+    // the first record of the store, so Report() prints a tally for it, and an error line when no
+    // record of family 24 reaches it any more (P-047).
+    if (!AscensionContract::MatchesFamily(info, 24, "Guardian"))
         return;
 
     AscensionGuardian::ApplyContracts(info);
@@ -82,6 +86,16 @@ void ApplyAscensionGuardianResourceContracts(SpellInfo* info)
         info->Effects[EFFECT_0].BasePoints == -4001 && info->Effects[EFFECT_0].DieSides == 1 &&
         info->Effects[EFFECT_0].SpellClassMask == flag96())
         info->Effects[EFFECT_0].SpellClassMask = flag96(256, 268435584, 0); // With Honor: -4s on Ram, all ranks.
+    else if (info->Id == 504383 && !(info->Effects[EFFECT_0].SpellClassMask[1] & 128) &&
+        AscensionContract::Detail::FirstFailure("Guardian",
+            AscensionContract::Detail::Key("Guardian", info->Id, EFFECT_0, "with-honor-ram-mask")))
+        // G-28: the branch above only fires on an empty mask. Spell.dbc carries (0, 128, 0), and B 128 is
+        // on every Ram rank (flags (256, 268435584, 0)), so the native mask already reaches Ram. Say so
+        // when an import takes that bit away.
+        LOG_ERROR("module.ascension_compat",
+            "Ascension contract Guardian: 504383 With Honor effect 0 mask ({}, {}, {}) no longer reaches Ram.",
+            info->Effects[EFFECT_0].SpellClassMask[0], info->Effects[EFFECT_0].SpellClassMask[1],
+            info->Effects[EFFECT_0].SpellClassMask[2]);
 
     if ((info->Id == 504730 || info->Id == 504883) &&
         info->Effects[EFFECT_0].IsAura(SPELL_AURA_ADD_PCT_MODIFIER) &&
