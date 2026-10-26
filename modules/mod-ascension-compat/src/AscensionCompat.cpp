@@ -34,6 +34,7 @@
 #include "AscensionCustomResourceData.h"
 #include "AscensionFreshCharacterCheck.h"
 #include "AscensionLiveBaselineData.h"
+#include "AscensionLevelScalingCorpse.h"
 #include "AscensionRacialAbilities.h"
 #include "AscensionPrimalistEarthquake.h"
 #include "AscensionPrimalistEarthshaping.h"
@@ -6462,12 +6463,49 @@ public:
     _states.erase(creature->GetGUID().GetRawValue());
   }
 
+  // Depecage (26/10) : le coeur lit le niveau ACTUEL de la creature pour le rang de Depecage exige
+  // (Spell::CheckCast, SPELL_EFFECT_SKINNING) et pour la montee (Spell::EffectSkinning), alors que le
+  // butin vient de skinning_loot_template, fixe par gabarit. Hisse au niveau du joueur - 3, un loup
+  // d'Elwynn exigeait 180 d'un depeceur de niveau 31 : rien n'etait depecable dans les premieres zones.
+  // A la mort (Unit::Kill appelle OnUnitDeath APRES le butin, l'XP et le credit de quete), le cadavre
+  // d'une creature a depecer (minage et herboristerie de creature compris) reprend son niveau d'origine.
+  // Le cadavre ne se remet jamais a l'echelle (OnAllCreatureUpdate exige une creature vivante) ; la
+  // reapparition repasse par SelectLevel, donc par OnBeforeCreatureSelectLevel.
+  void RestoreOriginalLevelOnDeath(Creature* creature)
+  {
+    CreatureTemplate const* creatureTemplate = creature->GetCreatureTemplate();
+    if (!creatureTemplate || !creatureTemplate->SkinLootId)
+      return;
+
+    uint8 original;
+    {
+      std::lock_guard<std::mutex> guard(_lock);
+      auto it = _states.find(creature->GetGUID().GetRawValue());
+      if (it == _states.end())
+        return;
+      original = it->second.Original;
+    }
+
+    uint8 const scaled = creature->GetLevel();
+    creature->CustomData.GetDefault<AscensionNiveauAuCombat>(CLE_NIVEAU_AU_COMBAT)->Niveau = scaled;
+    if (scaled == original)
+      return;
+
+    creature->SetLevel(original);
+    uint32 const restored = ++_restoredCorpses;
+    if (restored == 1 || restored % 1000 == 0)
+      LOG_INFO("module", "coa echelle: cadavre remis a son niveau d'origine creature={} niveau {} -> {} (total {})",
+          creature->GetEntry(), uint32(scaled), uint32(original), restored);
+  }
+
 private:
   struct State
   {
     uint8 Original;
     uint32 Timer;
   };
+
+  std::atomic<uint32> _restoredCorpses{0};
 
   // Monstres d'evenement du Directeur (coa-project/docs/EVENEMENTS-grimoire-directeur.md § 2.5, lot D) :
   // la plage 9100000-9109999 est reservee aux gabarits neufs des evenements. Le Directeur pose leur
@@ -6513,6 +6551,23 @@ private:
 
   std::mutex _lock;
   std::unordered_map<uint64, State> _states;
+};
+
+// Cadavre remis a son niveau d'origine pour le depecage : voir RestoreOriginalLevelOnDeath.
+class AscensionCompatLevelScalingDeathScript : public UnitScript
+{
+public:
+  explicit AscensionCompatLevelScalingDeathScript(AscensionCompatLevelScalingScript* scaling)
+      : UnitScript("AscensionCompatLevelScalingDeathScript", true, {UNITHOOK_ON_UNIT_DEATH}), _scaling(scaling) {}
+
+  void OnUnitDeath(Unit* unit, Unit* /*killer*/) override
+  {
+    if (unit && unit->IsCreature())
+      _scaling->RestoreOriginalLevelOnDeath(unit->ToCreature());
+  }
+
+private:
+  AscensionCompatLevelScalingScript* _scaling;
 };
 
 class AscensionCompatWorldScript : public WorldScript {
@@ -7414,7 +7469,7 @@ void AddAscensionCompatScripts() {
   new AscensionCompatAllSpellScript();
   new AscensionCompatUnitScript();
   new AscensionCompatChangelogScript();
-  new AscensionCompatLevelScalingScript();
+  new AscensionCompatLevelScalingDeathScript(new AscensionCompatLevelScalingScript());
   new AscensionCompatWorldScript();
   new AscensionCompatAllCreatureScript();
   new AscensionCompatBankVaultScript();
