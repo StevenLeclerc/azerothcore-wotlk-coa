@@ -246,24 +246,31 @@ constexpr uint32 SPEC_TINKER_APEX = 102;
 constexpr uint8 TINKER_APEX_EXCLUSION_LEVEL = 10;
 // Root spells (ClassSpells and AscensionLiveBaselineData.h rows of class 28); their ranks follow through
 // AscensionProgression::Ranks.FirstSpellId. Sorted for binary_search.
-constexpr std::array<uint32, 31> TINKER_APEX_EXCLUDED_SPELLS =
+// The last three (503571, 560784, 706699) are orphan Tinker talents: no node, no trigger and no character hold
+// them today, but their effect masks name the family-34 bits given to the Apex spells (mot 0 0x40000, mot 2
+// 0x200000, mot 0 0x800; sortie-apex/talents30/proposition.md § 1). Should one come back in a tree, an Apex
+// may not learn it (SetTalentRank, ApexMayNotHold) and loses it (ReconcileTinkerApex).
+constexpr std::array<uint32, 34> TINKER_APEX_EXCLUDED_SPELLS =
 {
     75,      // Auto Shot: the ranged slot holds the combistick, thrown by Combistick Throw, never auto-fired
     107,     // Block: no shield (9116 is closed below)
     500232,  // Sticky Bomb
     500239,  // Build: Sentry Turret
     500549,  // Scrap Shot (gun)
+    503571,  // Mechanical Mind (orphan): SPELLMOD_DURATION +1 s on mot 0 0x40000, the JET group (Combistick Throw)
     504060,  // Basic Intuition (Build spells, level 40)
     504519,  // Build: Battle Turret X-13 (level 40)
     510176,  // Strength Bionics (level 56)
     534480,  // Warning Shot (level 54)
     541493,  // Arcane Bionics (level 46)
     560750,  // Build: Replenishment Beacon
+    560784,  // Master Mind (orphan): SPELLMOD_DAMAGE +1500 on mot 2 0x200000, the CAMO group (Optical Camouflage)
     653130,  // Aether Augmentation (gun)
     653234,  // Piercing Augmentation (gun)
     653236,  // Explosive Augmentation (gun)
     653242,  // Magic Augmentation (gun)
     680315,  // Greater Power Module (level 60)
+    706699,  // Speedy Setup (orphan): SPELLMOD_COOLDOWN -15 s on mot 0 0x800, the BOND group (Rocket Pounce)
     706742,  // Power Module
     801707,  // Repair Shot
     801718,  // Deploy Blast Mine (Remote Detonation 801798 follows it, AscensionTinker.cpp)
@@ -288,6 +295,22 @@ constexpr std::array<uint32, 29> TINKER_APEX_EXCLUDED_CLASS_ENTRIES =
     4871, 4987, 5103, 5116, 5195, 5331, 5974, 5995, 5996, 5997, 5998, 5999, 6001, 6829, 6996, 6998, 7034, 8355,
     9987, 9995, 29201, 29203, 29209, 29440, 29813, 30583, 30839, 30869, 34987,
 };
+// CharacterAdvancement.dbc nodes of the Tinker class tab (87) that ONLY Apex may hold (AE cost, SpecId 0), laid
+// on the slots of excluded level-0-tier nodes (sortie-apex/talents30/proposition.md § 3): 138374 Optical
+// Camouflage, 138375 Marked Prey, 138376 Stalker's Cloak, 138377 Thermal Vision, 138378 Hardened Hide,
+// 138379 Smart Disc, 138380 Constricting Net, 138381 Medicomp. The other Tinker specializations (49, 50, 51) and
+// an Apex below level 10 may not buy them and lose them; the class-tab record keeps them for the next Apex visit
+// (StoreBuilds). Ids absent from the DBC are inert: FindTalentEntry finds nothing.
+constexpr std::array<uint32, 8> TINKER_APEX_ONLY_CLASS_ENTRIES =
+{
+    138374, 138375, 138376, 138377, 138378, 138379, 138380, 138381,
+};
+// Trophy Hunter (free Apex node 138349, level 20) and its stacking aura. v1 is data: 9300036 procs on every kill
+// that yields experience or honor. v2 (AscensionApexTrophyScript) grants a trophy only for a player, a bot, an
+// elite or a rare, and takes over by itself once the data hands it the trigger: 9300036 without ProcFlags and
+// without a spell_proc row. Both at once would give two trophies per kill, hence that test.
+constexpr uint32 SPELL_APEX_TROPHY_HUNTER = 9300036;
+constexpr uint32 SPELL_APEX_TROPHIES = 9300037;
 // Apex fights in melee only (decision of 26/10): polearms (200), fist weapons (15590, TalentProficiencies through
 // 9300000) and the combistick as a thrown weapon in the ranged slot (2567, same way). Closed from level 10:
 // 196 1H axes, 197 2H axes, 198 1H maces, 199 2H maces, 227 staves, 266 guns, 1180 daggers, 9116 shield
@@ -305,6 +328,7 @@ constexpr char TINKER_APEX_STARTER_SETTING[] = "core.apex_starter";
 constexpr uint32 TINKER_APEX_STARTER_REVISION = 1;
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_SPELLS.begin(), TINKER_APEX_EXCLUDED_SPELLS.end()));
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end()));
+static_assert(std::is_sorted(TINKER_APEX_ONLY_CLASS_ENTRIES.begin(), TINKER_APEX_ONLY_CLASS_ENTRIES.end()));
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_PROFICIENCIES.begin(), TINKER_APEX_EXCLUDED_PROFICIENCIES.end()));
 
 bool IsTinkerApex(Player const* player, uint32 specializationId)
@@ -322,6 +346,28 @@ bool IsTinkerApexExcludedClassEntry(uint32 entryId)
 {
   return std::binary_search(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end(),
                             entryId);
+}
+
+bool IsTinkerApexOnlyClassEntry(uint32 entryId)
+{
+  return std::binary_search(TINKER_APEX_ONLY_CLASS_ENTRIES.begin(), TINKER_APEX_ONLY_CLASS_ENTRIES.end(), entryId);
+}
+
+/// A talent entry an Apex (level 10 and up) may not hold: an excluded class-tab node, or any node one of whose
+/// rank spells is an excluded spell (the orphan guard: none today, measured on the PTR CharacterAdvancement.dbc).
+bool ApexMayNotHold(AscensionCompatData::CoATalentEntry const& entry)
+{
+  if (entry.SpecId == 0 && IsTinkerApexExcludedClassEntry(entry.EntryId))
+    return true;
+  return std::any_of(entry.SpellIds.begin(), entry.SpellIds.end(),
+                     [](uint32 spellId) { return spellId && IsTinkerApexExcludedSpell(spellId); });
+}
+
+/// A class-tab node reserved to Apex, held by a Tinker who is not an Apex of level 10 or more.
+bool OutsideApexMayNotHold(Player const* player, AscensionCompatData::CoATalentEntry const& entry,
+                           uint32 specializationId)
+{
+  return entry.SpecId == 0 && IsTinkerApexOnlyClassEntry(entry.EntryId) && !IsTinkerApex(player, specializationId);
 }
 
 bool IsTinkerApexExcludedProficiency(uint32 spellId)
@@ -766,6 +812,11 @@ public:
     reconcile(AscensionCompatData::ClassSpells);
     if (apex)
       removed += ReconcileTinkerApex(player);
+    else if (player->getClass() == CLASS_TINKER)
+      removed += ReconcileTinkerOutsideApex(player, activeSpec);
+    // Trophies outlive the node that grants them only until death; leaving Apex (or losing the node) ends them.
+    if (player->getClass() == CLASS_TINKER && !player->HasSpell(SPELL_APEX_TROPHY_HUNTER))
+      player->RemoveAurasDueToSpell(SPELL_APEX_TROPHIES);
     if (removed)
       LOG_INFO("module.ascension_compat", "Reconciled {} proven class grants for {} against live level {}",
           removed, player->GetName(), uint32(player->GetLevel()));
@@ -872,9 +923,10 @@ public:
       if (holdsExcluded)
         StoreBuild(player, 0, picks);
 
+      // Excluded class-tab nodes, and any node of either tree carrying an excluded spell (orphan guard).
       for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
       {
-        if (entry.ClassId != player->getClass() || entry.SpecId != 0 || !IsTinkerApexExcludedClassEntry(entry.EntryId))
+        if (entry.ClassId != player->getClass() || !ApexMayNotHold(entry))
           continue;
         for (uint32 spellId : entry.SpellIds)
           if (spellId && player->HasSpell(spellId))
@@ -883,6 +935,40 @@ public:
             ++removed;
           }
       }
+      return removed;
+    }
+
+    /// Mirror of ReconcileTinkerApex for the other Tinker specializations (and an Apex below level 10): takes
+    /// back the class-tab nodes reserved to Apex. A spec switch already removed them (every talent spell goes)
+    /// and SetTalentRank refuses them, so this only meets a character that holds one otherwise (level lowered,
+    /// GM learn). Its class-tab record is then written first, before those spells go, so Apex can restore them.
+    uint32 ReconcileTinkerOutsideApex(Player* player, uint32 specializationId)
+    {
+      // Destructive, so never on a guess: an empty specialization map (a call before OnPlayerLogin loaded it)
+      // falls back on the stored setting, and an Apex found there keeps its nodes.
+      if (!specializationId && IsTinkerApex(player, player->GetPlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0).value))
+        return 0;
+
+      // Eight lookups first: nearly every call holds none, and LivePicks walks the whole catalog.
+      std::vector<AscensionCompatData::CoATalentEntry const*> held;
+      for (uint32 const entryId : TINKER_APEX_ONLY_CLASS_ENTRIES)
+        if (AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(entryId))
+          if (entry->ClassId == player->getClass() && OutsideApexMayNotHold(player, *entry, specializationId) &&
+              std::any_of(entry->SpellIds.begin(), entry->SpellIds.end(),
+                          [player](uint32 spellId) { return spellId && player->HasSpell(spellId); }))
+            held.push_back(entry);
+      if (held.empty())
+        return 0;
+
+      StoreBuild(player, 0, LivePicks(player, 0));
+      uint32 removed = 0;
+      for (AscensionCompatData::CoATalentEntry const* entry : held)
+        for (uint32 spellId : entry->SpellIds)
+          if (spellId && player->HasSpell(spellId))
+          {
+            player->removeSpell(spellId, SPEC_MASK_ALL, false);
+            ++removed;
+          }
       return removed;
     }
 
@@ -1810,10 +1896,16 @@ public:
       return false;
     }
 
-    if (rank > 0 && entry.SpecId == 0 && IsTinkerApex(player, activeSpecialization) &&
-        IsTinkerApexExcludedClassEntry(entryId))
+    if (rank > 0 && IsTinkerApex(player, activeSpecialization) && ApexMayNotHold(entry))
     {
       error = Acore::StringFormat("Talent entry {} is not available to the Apex specialization.", entryId);
+      return false;
+    }
+
+    if (rank > 0 && OutsideApexMayNotHold(player, entry, activeSpecialization))
+    {
+      error = Acore::StringFormat("Talent entry {} is only available to the Apex specialization from level {}.",
+                                  entryId, uint32(TINKER_APEX_EXCLUSION_LEVEL));
       return false;
     }
 
@@ -2026,9 +2118,16 @@ public:
       }
       wanted[entry->EntryId] = item.Rank;
     }
-    if (IsTinkerApex(player, activeSpecialization ? activeSpecialization : uploadedSpecialization))
-      for (auto itr = wanted.begin(); itr != wanted.end();)
-        itr = IsTinkerApexExcludedClassEntry(itr->first) ? wanted.erase(itr) : std::next(itr);
+    // Nodes the specialization may not hold leave the set (so the set removes them) instead of refusing it all.
+    uint32 const uploadSpecialization = activeSpecialization ? activeSpecialization : uploadedSpecialization;
+    bool const uploadApex = IsTinkerApex(player, uploadSpecialization);
+    for (auto itr = wanted.begin(); itr != wanted.end();)
+    {
+      AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(itr->first);
+      bool const barred = entry && (uploadApex ? ApexMayNotHold(*entry)
+                                               : OutsideApexMayNotHold(player, *entry, uploadSpecialization));
+      itr = barred ? wanted.erase(itr) : std::next(itr);
+    }
 
     // Price the state the upload leads to: its own ranks, and for every other paid entry the rank the
     // progression pass hands back once the upload has removed it.
@@ -2229,12 +2328,15 @@ public:
     // From level 10 Apex holds only the kept part of the class tab. Its record keeps the excluded picks the
     // other specializations restore and takes every other pick from the spellbook, so a kept node bought or
     // dropped while in Apex is not lost on the way out. An empty record (never written) takes the spellbook.
+    // Symmetric for the other Tinker specializations: their record keeps the Apex-only picks (proposition § 3),
+    // which they never hold, so an Apex build survives a trip through another specialization.
     std::vector<uint32> classPicks = LivePicks(player, 0);
-    if (IsTinkerApex(player, specializationId))
+    bool const apex = IsTinkerApex(player, specializationId);
+    if (apex || player->getClass() == CLASS_TINKER)
     {
       std::vector<uint32> merged;
       for (uint32 const pick : StoredBuild(player, 0))
-        if (IsTinkerApexExcludedClassEntry(pick / 10) &&
+        if ((apex ? IsTinkerApexExcludedClassEntry(pick / 10) : IsTinkerApexOnlyClassEntry(pick / 10)) &&
             std::none_of(classPicks.begin(), classPicks.end(),
                          [pick](uint32 live) { return live / 10 == pick / 10; }))
           merged.push_back(pick);
@@ -6101,6 +6203,51 @@ static void RefreshApexWeaponVisual(Player* player)
     RestoreApexWeaponVisual(player);
 }
 
+// Trophy Hunter v2 (Apex, sortie-apex/talents30/proposition.md § 2.4): a trophy is worth taking only from a
+// player (bots included), an elite or a rare, never from grey or experience-less prey (isHonorOrXPTarget: grey
+// level, totem, critter, pet, CREATURE_FLAG_EXTRA_NO_XP). Same hooks as barbarian_kills: Unit::Kill calls them
+// for the player who dealt the killing blow (OnPlayerPVPKill, OnPlayerCreatureKill), also with killer == victim
+// for a fall. Inert while the data still drives v1 (ApexTrophyFilterActive) or before the spells exist.
+class AscensionApexTrophyScript : public PlayerScript
+{
+public:
+  AscensionApexTrophyScript() : PlayerScript("AscensionApexTrophyScript",
+      { PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_CREATURE_KILL }) { }
+
+  /// v2 takes over only once the data gives up the v1 proc: no ProcFlags on 9300036 and no spell_proc row.
+  /// Read at each kill: DBC and spell_proc are loaded once at startup, the cost is two lookups.
+  static bool ApexTrophyFilterActive()
+  {
+    SpellInfo const* hunter = sSpellMgr->GetSpellInfo(SPELL_APEX_TROPHY_HUNTER);
+    return hunter && !hunter->ProcFlags && !sSpellMgr->GetSpellProcEntry(SPELL_APEX_TROPHY_HUNTER) &&
+           sSpellMgr->GetSpellInfo(SPELL_APEX_TROPHIES);
+  }
+
+  static bool WorthyPrey(Unit* killed)
+  {
+    if (killed->IsPlayer())
+      return true;
+    Creature* creature = killed->ToCreature();
+    if (!creature || creature->IsPet() || creature->IsTotem() || creature->IsCritter())
+      return false;
+    return creature->isElite() || creature->GetCreatureTemplate()->rank == CREATURE_ELITE_RARE;
+  }
+
+  static void Reward(Player* killer, Unit* killed)
+  {
+    if (!killer || !killed || killed == killer || killer->getClass() != CLASS_TINKER || !killer->IsAlive() ||
+        !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) ||
+        !killer->HasSpell(SPELL_APEX_TROPHY_HUNTER) ||
+        killed->GetCharmerOrOwnerPlayerOrPlayerItself() == killer || !ApexTrophyFilterActive() ||
+        !WorthyPrey(killed) || !killer->isHonorOrXPTarget(killed))
+      return;
+    killer->CastSpell(killer, SPELL_APEX_TROPHIES, true);
+  }
+
+  void OnPlayerPVPKill(Player* killer, Player* killed) override { Reward(killer, killed); }
+  void OnPlayerCreatureKill(Player* killer, Creature* killed) override { Reward(killer, killed); }
+};
+
 class AscensionCompatPlayerScript : public PlayerScript {
     // One script instance serves every player, and players on different maps update on
     // different map threads: every access to the pending list goes through this lock.
@@ -7694,6 +7841,13 @@ bool SetAscensionTalentRank(Player* player, uint32 entryId, uint32 rank)
     if (rank > 0 && entry->SpecId != 0 && entry->SpecId != GetAscensionActiveSpecialization(player))
         return false;
 
+    // Same rules as SetTalentRank, both ways: an Apex bot does not learn what ReconcileTinkerApex would take
+    // back at once, and the Apex-only class-tab nodes stay out of the other Tinker builds.
+    uint32 const specialization = GetAscensionActiveSpecialization(player);
+    if (rank > 0 && ((IsTinkerApex(player, specialization) && ApexMayNotHold(*entry)) ||
+                     OutsideApexMayNotHold(player, *entry, specialization)))
+        return false;
+
     uint32 const selectedSpellId = rank > 0 ? entry->SpellIds[rank - 1] : 0;
     if (rank > 0 && (!selectedSpellId || !sSpellMgr->GetSpellInfo(selectedSpellId)))
         return false;
@@ -7852,6 +8006,7 @@ void AddAscensionCompatScripts() {
   new AscensionCompatServerScript();
   new AscensionCompatCommandScript();
   new AscensionCompatPlayerScript();
+  new AscensionApexTrophyScript();
   new AscensionCompatReplacementButtonScript();
   new AscensionCompatAllSpellScript();
   new AscensionCompatUnitScript();
