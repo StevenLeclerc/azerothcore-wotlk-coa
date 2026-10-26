@@ -238,6 +238,118 @@ constexpr ExtensionOpcodeIdentity EXTENSION_OPCODES[] = {
 
 // SkillLine.dbc row of the Tinker Apex specialization (102), added to the PTR DBC by outils/apex-spe-dbc.py.
 constexpr uint32 SKILL_TINKER_APEX = 11816;
+
+// Tinker Apex (ChrSpecs 102) is a melee hunter: from the level its identity passive is granted (10, the level
+// AscensionCoATalentData.cpp forces on identity nodes), it does not keep the shared Tinker kit of turrets, bombs,
+// guns, robots and support gadgets. docs/CONCEPTION-tinker-4e-spe.md; the other specializations are unchanged.
+constexpr uint32 SPEC_TINKER_APEX = 102;
+constexpr uint8 TINKER_APEX_EXCLUSION_LEVEL = 10;
+// Root spells (ClassSpells and AscensionLiveBaselineData.h rows of class 28); their ranks follow through
+// AscensionProgression::Ranks.FirstSpellId. Sorted for binary_search.
+constexpr std::array<uint32, 31> TINKER_APEX_EXCLUDED_SPELLS =
+{
+    75,      // Auto Shot: the ranged slot holds the combistick, thrown by Combistick Throw, never auto-fired
+    107,     // Block: no shield (9116 is closed below)
+    500232,  // Sticky Bomb
+    500239,  // Build: Sentry Turret
+    500549,  // Scrap Shot (gun)
+    504060,  // Basic Intuition (Build spells, level 40)
+    504519,  // Build: Battle Turret X-13 (level 40)
+    510176,  // Strength Bionics (level 56)
+    534480,  // Warning Shot (level 54)
+    541493,  // Arcane Bionics (level 46)
+    560750,  // Build: Replenishment Beacon
+    653130,  // Aether Augmentation (gun)
+    653234,  // Piercing Augmentation (gun)
+    653236,  // Explosive Augmentation (gun)
+    653242,  // Magic Augmentation (gun)
+    680315,  // Greater Power Module (level 60)
+    706742,  // Power Module
+    801707,  // Repair Shot
+    801718,  // Deploy Blast Mine (Remote Detonation 801798 follows it, AscensionTinker.cpp)
+    801799,  // Build: Shield Beacon
+    802684,  // Emergency Heal
+    803405,  // Build: Mechano-Bear
+    803436,  // Build: Clockwork Assistant
+    803437,  // Build: Rusthound
+    803552,  // Nanobot Recharger
+    803658,  // Mana Module
+    803665,  // Greater Mana Module (level 58)
+    805351,  // Spanner Smash
+    806157,  // Freeze Ray
+    807197,  // Discombobulate!
+    807846,  // Control Mechanical
+};
+// CharacterAdvancement.dbc nodes of the Tinker class tab (87) Apex may not hold. Kept: 6551 Flexible Thinking,
+// 6890 Mechanical Enhancements, 6992 Backup Fuel, 8354 Ventilation, 29777 Scrapshielding, 31113 Rocket Boots,
+// 31235 Efficiency.
+constexpr std::array<uint32, 29> TINKER_APEX_EXCLUDED_CLASS_ENTRIES =
+{
+    4871, 4987, 5103, 5116, 5195, 5331, 5974, 5995, 5996, 5997, 5998, 5999, 6001, 6829, 6996, 6998, 7034, 8355,
+    9987, 9995, 29201, 29203, 29209, 29440, 29813, 30583, 30839, 30869, 34987,
+};
+// Apex fights in melee only (decision of 26/10): polearms (200), fist weapons (15590, TalentProficiencies through
+// 9300000) and the combistick as a thrown weapon in the ranged slot (2567, same way). Closed from level 10:
+// 196 1H axes, 197 2H axes, 198 1H maces, 199 2H maces, 227 staves, 266 guns, 1180 daggers, 9116 shield
+// (Block 107 is in TINKER_APEX_EXCLUDED_SPELLS). A weapon left unusable is unequipped to the bags, else mailed.
+// Armor proficiencies (mail 8737, leather, cloth) are unchanged. Dual Wield 674 stays (its own node).
+constexpr std::array<uint32, 8> TINKER_APEX_EXCLUDED_PROFICIENCIES = { 196, 197, 198, 199, 227, 266, 1180, 9116 };
+// Block: in TINKER_APEX_EXCLUDED_SPELLS, and also a Defense skill-line reward the core teaches back on SetSkill.
+constexpr uint32 SPELL_TINKER_BLOCK = 107;
+static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_SPELLS.begin(), TINKER_APEX_EXCLUDED_SPELLS.end()));
+static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end()));
+static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_PROFICIENCIES.begin(), TINKER_APEX_EXCLUDED_PROFICIENCIES.end()));
+
+bool IsTinkerApex(Player const* player, uint32 specializationId)
+{
+  return player->getClass() == CLASS_TINKER && specializationId == SPEC_TINKER_APEX &&
+         player->GetLevel() >= TINKER_APEX_EXCLUSION_LEVEL;
+}
+
+bool IsTinkerApexExcludedSpell(uint32 spellId)
+{
+  return std::binary_search(TINKER_APEX_EXCLUDED_SPELLS.begin(), TINKER_APEX_EXCLUDED_SPELLS.end(), spellId);
+}
+
+bool IsTinkerApexExcludedClassEntry(uint32 entryId)
+{
+  return std::binary_search(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end(),
+                            entryId);
+}
+
+bool IsTinkerApexExcludedProficiency(uint32 spellId)
+{
+  return std::binary_search(TINKER_APEX_EXCLUDED_PROFICIENCIES.begin(), TINKER_APEX_EXCLUDED_PROFICIENCIES.end(),
+                            spellId);
+}
+
+// A weapon whose proficiency was just taken back leaves its slot: to the bags, else by mail, the way
+// Player::AutoUnequipOffhandIfNeed moves an offhand. Shields included (offhand, armor).
+void UnequipWeaponsWithoutProficiency(Player* player)
+{
+  for (uint8 const slot : { uint8(EQUIPMENT_SLOT_MAINHAND), uint8(EQUIPMENT_SLOT_OFFHAND), uint8(EQUIPMENT_SLOT_RANGED) })
+  {
+    Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+    if (!item || player->CanUseItem(item, false) != EQUIP_ERR_NO_REQUIRED_PROFICIENCY)
+      continue;
+
+    ItemPosCountVec destinations;
+    if (player->CanStoreItem(NULL_BAG, NULL_SLOT, destinations, item, false) == EQUIP_ERR_OK)
+    {
+      player->RemoveItem(INVENTORY_SLOT_BAG_0, slot, true);
+      player->StoreItem(destinations, item, true);
+      continue;
+    }
+
+    player->MoveItemFromInventory(INVENTORY_SLOT_BAG_0, slot, true);
+    CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+    item->DeleteFromInventoryDB(trans);
+    item->SaveToDB(trans);
+    MailDraft("Weapon unequipped", "Your specialization can no longer use this weapon.").AddItem(item)
+        .SendMailTo(trans, player, MailSender(player, MAIL_STATIONERY_GM), MAIL_CHECK_MASK_COPIED);
+    CharacterDatabase.CommitTransaction(trans);
+  }
+}
 constexpr uint32 SPELL_PYROMANCER_HEAT = 807389;
 constexpr uint32 SPELL_PYROMANCER_EMBER = 807533;
 constexpr uint32 SPELL_PRIMALIST_EARTHSHAPING = 680441;
@@ -587,6 +699,7 @@ public:
     // grants. Do not scan arbitrary quest, collection or purchased spells for
     // absence from a level-one snapshot. Valid selected talents are independent.
     uint32 const activeSpec = GetActiveSpecialization(player);
+    bool const apex = IsTinkerApex(player, activeSpec);
     AscensionClassTuning::Synchronize(player, activeSpec, true);
     auto const racialSpells = GetAscensionRacialSpells(player);
     auto selectedTalentOwns = [player, activeSpec](uint32 spellId)
@@ -602,9 +715,9 @@ public:
                 [spellId, root](uint32 id) { return id && (id == spellId || id == root); });
           });
     };
-    auto currentGrantAllows = [player, activeSpec, &selectedTalentOwns, &racialSpells](uint32 spellId)
+    auto currentGrantAllows = [player, activeSpec, apex, &selectedTalentOwns, &racialSpells](uint32 spellId)
     {
-      if (!CanGrantAscensionRacialSpell(player, spellId))
+      if (!CanGrantAscensionRacialSpell(player, spellId) || (apex && IsTinkerApexExcludedSpell(spellId)))
         return false;
       // Older local talent choices were persisted only as learned spell IDs.
       // A colliding paid talent therefore remains protected until the client
@@ -644,6 +757,8 @@ public:
     };
     reconcile(AscensionCompatData::LegacyGeneratedClassSpells);
     reconcile(AscensionCompatData::ClassSpells);
+    if (apex)
+      removed += ReconcileTinkerApex(player);
     if (removed)
       LOG_INFO("module.ascension_compat", "Reconciled {} proven class grants for {} against live level {}",
           removed, player->GetName(), uint32(player->GetLevel()));
@@ -657,7 +772,7 @@ public:
         }
     for (auto const& entry : AscensionLiveBaseline::Spells)
       if (entry.ClassId == player->getClass() && (!entry.RaceId || entry.RaceId == player->getRace()) &&
-          CanGrantAscensionRacialSpell(player, entry.SpellId) &&
+          CanGrantAscensionRacialSpell(player, entry.SpellId) && !(apex && IsTinkerApexExcludedSpell(entry.SpellId)) &&
           !player->HasSpell(entry.SpellId) && sSpellMgr->GetSpellInfo(entry.SpellId))
       {
         player->learnSpell(entry.SpellId, false);
@@ -668,6 +783,7 @@ public:
       if (progressionSpell.ClassId != player->getClass() ||
           progressionSpell.RequiredLevel > player->GetLevel() ||
           !CanGrantAscensionRacialSpell(player, progressionSpell.SpellId) ||
+          (apex && IsTinkerApexExcludedSpell(progressionSpell.SpellId)) ||
           player->HasSpell(progressionSpell.SpellId))
         continue;
 
@@ -698,7 +814,8 @@ public:
     for (AscensionProgression::Rank const& rank : AscensionProgression::Ranks)
     {
         if (rank.ClassId != player->getClass() || rank.RequiredLevel > player->GetLevel() ||
-            !player->HasSpell(rank.FirstSpellId) || player->HasSpell(rank.SpellId))
+            !player->HasSpell(rank.FirstSpellId) || player->HasSpell(rank.SpellId) ||
+            (apex && IsTinkerApexExcludedSpell(rank.FirstSpellId)))
             continue;
 
         if (sSpellMgr->GetSpellInfo(rank.SpellId))
@@ -725,6 +842,42 @@ public:
 
     return learned;
   }
+
+    /// Tinker Apex: takes back the ranks of the excluded roots (removeSpell follows a server rank chain only
+    /// when sSpellMgr knows it) and the excluded class-tab picks. The class-tab record (tree 0) is what the
+    /// other specializations restore: while the spellbook still holds excluded picks (a character that entered
+    /// Apex before this rule, or bought them below level 10) it is newer than any record, so it is written,
+    /// before those spells go. Once they are gone this never writes again.
+    uint32 ReconcileTinkerApex(Player* player)
+    {
+      uint32 removed = 0;
+      for (AscensionProgression::Rank const& rank : AscensionProgression::Ranks)
+        if (rank.ClassId == player->getClass() && IsTinkerApexExcludedSpell(rank.FirstSpellId) &&
+            player->HasSpell(rank.SpellId))
+        {
+          player->removeSpell(rank.SpellId, SPEC_MASK_ALL, false);
+          ++removed;
+        }
+
+      std::vector<uint32> const picks = LivePicks(player, 0);
+      bool const holdsExcluded = std::any_of(picks.begin(), picks.end(),
+          [](uint32 pick) { return IsTinkerApexExcludedClassEntry(pick / 10); });
+      if (holdsExcluded)
+        StoreBuild(player, 0, picks);
+
+      for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+      {
+        if (entry.ClassId != player->getClass() || entry.SpecId != 0 || !IsTinkerApexExcludedClassEntry(entry.EntryId))
+          continue;
+        for (uint32 spellId : entry.SpellIds)
+          if (spellId && player->HasSpell(spellId))
+          {
+            player->removeSpell(spellId, SPEC_MASK_ALL, false);
+            ++removed;
+          }
+      }
+      return removed;
+    }
 
     bool AffectsTaughtAbilities(uint32 spellId) const
     {
@@ -923,7 +1076,10 @@ public:
         return;
     }
 
-    auto isAllowed = [player](uint32 proficiencySpellId) {
+    bool const apex = IsTinkerApex(player, GetActiveSpecialization(player));
+    auto isAllowed = [player, apex](uint32 proficiencySpellId) {
+      if (apex && IsTinkerApexExcludedProficiency(proficiencySpellId))
+        return false;
       bool const isObserved = std::any_of(
           AscensionLiveBaseline::Proficiencies.begin(), AscensionLiveBaseline::Proficiencies.end(),
           [player, proficiencySpellId](AscensionLiveBaseline::Proficiency const& entry)
@@ -986,16 +1142,32 @@ public:
         player->SetSkill(definition.SkillId, 0, 0, 0);
     }
 
+    // Apex loses guns, maces, shields...; a Tinker leaving Apex loses Thrown (2567, opened only by 9300000), so
+    // the combistick leaves the ranged slot too (removed > 0 on that pass). Only Tinkers, and only in world (the
+    // login pass runs after AddPlayerToMap): other classes and other Tinker passes keep their behaviour.
+    if (player->getClass() == CLASS_TINKER && player->IsInWorld() && (apex || removed))
+      UnequipWeaponsWithoutProficiency(player);
+
     // Defense and Unarmed are intrinsic combat skills, absent from the equipment proficiency catalog.
     // Keep their current value and cap in step with the weapon skills on login and every level change.
     for (uint16 skill : std::array<uint16, 2>{SKILL_DEFENSE, SKILL_UNARMED})
       if (player->HasSkill(skill))
       {
         uint16 const maximum = player->GetMaxSkillValueForLevel();
-        player->SetSkill(skill, player->GetSkillStep(skill), maximum, maximum);
+        // Player::SetSkill teaches the skill line's rewards again, and Block (107) is one of Defense's
+        // (SkillLineAbility 782, learned on skill learn, no class mask). For Apex, leave a Defense already at
+        // its cap alone, so a plain synchronization does not hand Block back after SynchronizeProgression
+        // took it.
+        bool const unchanged = player->GetPureSkillValue(skill) == maximum &&
+                               player->GetPureMaxSkillValue(skill) == maximum;
+        if (!(apex && skill == SKILL_DEFENSE && unchanged))
+          player->SetSkill(skill, player->GetSkillStep(skill), maximum, maximum);
         if (skill == SKILL_DEFENSE)
           player->UpdateDefenseBonusesMod();
       }
+    // A level-up raises Defense, and SetSkill taught Block back above: Apex holds no shield (9116 closed).
+    if (apex && player->HasSpell(SPELL_TINKER_BLOCK))
+      player->removeSpell(SPELL_TINKER_BLOCK, SPEC_MASK_ALL, false);
 
     {
       std::lock_guard<std::mutex> lock(_stateLock);
@@ -1550,6 +1722,13 @@ public:
       return false;
     }
 
+    if (rank > 0 && entry.SpecId == 0 && IsTinkerApex(player, activeSpecialization) &&
+        IsTinkerApexExcludedClassEntry(entryId))
+    {
+      error = Acore::StringFormat("Talent entry {} is not available to the Apex specialization.", entryId);
+      return false;
+    }
+
     uint32 const freeChoiceGroup = GetSelectableFreeGroup(entryId);
     bool const automaticallyGranted = entry.AECost == 0 && entry.TECost == 0 && !freeChoiceGroup;
     if (automaticallyGranted && rank != 0 && rank != entry.SpellCount)
@@ -1759,6 +1938,9 @@ public:
       }
       wanted[entry->EntryId] = item.Rank;
     }
+    if (IsTinkerApex(player, activeSpecialization ? activeSpecialization : uploadedSpecialization))
+      for (auto itr = wanted.begin(); itr != wanted.end();)
+        itr = IsTinkerApexExcludedClassEntry(itr->first) ? wanted.erase(itr) : std::next(itr);
 
     // Price the state the upload leads to: its own ranks, and for every other paid entry the rank the
     // progression pass hands back once the upload has removed it.
@@ -1956,7 +2138,22 @@ public:
   /// Writes down the class tree and the tree of the specialization being left.
   void StoreBuilds(Player* player, uint32 specializationId)
   {
-    StoreBuild(player, 0, LivePicks(player, 0));
+    // From level 10 Apex holds only the kept part of the class tab. Its record keeps the excluded picks the
+    // other specializations restore and takes every other pick from the spellbook, so a kept node bought or
+    // dropped while in Apex is not lost on the way out. An empty record (never written) takes the spellbook.
+    std::vector<uint32> classPicks = LivePicks(player, 0);
+    if (IsTinkerApex(player, specializationId))
+    {
+      std::vector<uint32> merged;
+      for (uint32 const pick : StoredBuild(player, 0))
+        if (IsTinkerApexExcludedClassEntry(pick / 10) &&
+            std::none_of(classPicks.begin(), classPicks.end(),
+                         [pick](uint32 live) { return live / 10 == pick / 10; }))
+          merged.push_back(pick);
+      merged.insert(merged.end(), classPicks.begin(), classPicks.end());
+      classPicks = std::move(merged);
+    }
+    StoreBuild(player, 0, classPicks);
     StoreBuild(player, specializationId, LivePicks(player, specializationId));
   }
 
@@ -2012,6 +2209,7 @@ public:
 
       uint32 const restored = previousSpecialization ? 0 : RestoreBuilds(player, specializationId);
       uint32 granted = SynchronizeProgression(player);
+      SynchronizeProficiencies(player);
       LOG_INFO("module.ascension_compat",
                "Synchronized {} (class {}) with local specialization {}, restored {} stored rank(s) and "
                "granted {} missing automatic spells",
@@ -2051,6 +2249,7 @@ public:
 
     uint32 const restored = RestoreBuilds(player, specializationId);
     uint32 granted = SynchronizeProgression(player);
+    SynchronizeProficiencies(player);
     ChatHandler(player->GetSession())
         .PSendSysMessage(
             "Activated specialization {}. Stored the build of specialization {}, removed {} old talent "
@@ -5750,6 +5949,70 @@ public:
   }
 };
 
+// Tinker Apex (specialization 102), Combistick Stance (9300002): the combistick of the ranged slot is SHOWN in
+// the right hand and nothing in the left one; Wristblade Stance (or no stance) shows the claws actually held.
+// Equipment does not move: only the public visible-item fields change, as the appearance service does
+// (AscensionCollectionService::OnVisibleItemSet). Restoring never goes through Player::SetVisibleItemSlot: its
+// hook calls RefreshApexWeaponVisual, which would call the restore again.
+constexpr uint32 SPELL_APEX_COMBISTICK_STANCE = 9300002;
+constexpr uint32 ITEM_APEX_COMBISTICK_APPEARANCE = 9120002; // display 202102, appearance entry only
+constexpr uint32 SPELL_APEX_COMBISTICK_OFFHAND_DISARM = 9300017; // hidden aura 254 (off-hand disarm), held with the stance
+
+static Item* GetApexCombistick(Player* player)
+{
+  Item* lance = player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_RANGED);
+  if (!lance || !lance->GetTemplate() || lance->GetTemplate()->Class != ITEM_CLASS_WEAPON ||
+      lance->GetTemplate()->SubClass != ITEM_SUBCLASS_WEAPON_THROWN)
+    return nullptr;
+  return lance;
+}
+
+static void ApplyApexWeaponVisual(Player* player, Item const* lance)
+{
+  uint16 const mainHand = EQUIPMENT_SLOT_MAINHAND * 2;
+  uint16 const offHand = EQUIPMENT_SLOT_OFFHAND * 2;
+  player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + mainHand, ITEM_APEX_COMBISTICK_APPEARANCE);
+  player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + mainHand, 0, lance->GetEnchantmentId(PERM_ENCHANTMENT_SLOT));
+  player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + mainHand, 1, lance->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT));
+  player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + offHand, 0);
+  player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + offHand, 0);
+}
+
+// Both hands as the native SetVisibleItemSlot writes them, then the appearance service on top.
+static void RestoreApexWeaponVisual(Player* player)
+{
+  for (uint8 const slot : { uint8(EQUIPMENT_SLOT_MAINHAND), uint8(EQUIPMENT_SLOT_OFFHAND) })
+  {
+    Item* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+    uint16 const offset = slot * 2;
+    player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + offset, item ? item->GetEntry() : 0);
+    player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + offset, 0);
+    if (item)
+    {
+      player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + offset, 0, item->GetEnchantmentId(PERM_ENCHANTMENT_SLOT));
+      player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + offset, 1, item->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT));
+    }
+    AscensionCollectionService::Instance().OnVisibleItemSet(player, slot, item);
+  }
+}
+
+// Shows the combistick when the stance is up AND a thrown weapon fills the ranged slot. Otherwise, if the right
+// hand still shows the combistick appearance (stance gone, combistick unequipped), gives the claws back.
+// OnAuraRemove runs after the aura left the applied list (Unit::_UnapplyAura), so HasAura is already false there.
+// At login the aura is loaded before the inventory: nothing to show yet, the visible-item hook calls back once
+// the ranged slot is filled.
+static void RefreshApexWeaponVisual(Player* player)
+{
+  if (!player || player->getClass() != CLASS_TINKER)
+    return;
+  Item* lance = GetApexCombistick(player);
+  if (lance && player->HasAura(SPELL_APEX_COMBISTICK_STANCE))
+    ApplyApexWeaponVisual(player, lance);
+  else if (player->GetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + EQUIPMENT_SLOT_MAINHAND * 2) ==
+           ITEM_APEX_COMBISTICK_APPEARANCE)
+    RestoreApexWeaponVisual(player);
+}
+
 class AscensionCompatPlayerScript : public PlayerScript {
     // One script instance serves every player, and players on different maps update on
     // different map threads: every access to the pending list goes through this lock.
@@ -6048,6 +6311,10 @@ public:
   void OnPlayerAfterSetVisibleItemSlot(Player *player, uint8 slot,
                                        Item *item) override {
     AscensionCollectionService::Instance().OnVisibleItemSet(player, slot, item);
+    // After the appearance service, so the combistick wins in Combistick Stance. Any rewrite of a hand or of the
+    // ranged slot (equip, unequip, login, enchant) re-applies or undoes it.
+    if (slot == EQUIPMENT_SLOT_MAINHAND || slot == EQUIPMENT_SLOT_OFFHAND || slot == EQUIPMENT_SLOT_RANGED)
+      RefreshApexWeaponVisual(player);
   }
 
   void OnPlayerEquip(Player *player, Item *item, uint8 /*bag*/, uint8 /*slot*/,
@@ -6248,6 +6515,12 @@ public:
       return;
 
     HandleAscensionClassMechanicsAuraApply(unit->ToPlayer(), aura->GetId());
+    if (aura->GetId() == SPELL_APEX_COMBISTICK_STANCE)
+    {
+      if (!unit->HasAura(SPELL_APEX_COMBISTICK_OFFHAND_DISARM))
+        unit->AddAura(SPELL_APEX_COMBISTICK_OFFHAND_DISARM, unit);
+      RefreshApexWeaponVisual(unit->ToPlayer());
+    }
   }
 
   void OnAuraRemove(Unit* unit, AuraApplication* aurApp,
@@ -6259,6 +6532,11 @@ public:
 
     HandleAscensionClassMechanicsAuraRemove(unit->ToPlayer(),
         aurApp->GetBase()->GetId(), mode == AURA_REMOVE_BY_DEATH);
+    if (aurApp->GetBase()->GetId() == SPELL_APEX_COMBISTICK_STANCE)
+    {
+      unit->RemoveAurasDueToSpell(SPELL_APEX_COMBISTICK_OFFHAND_DISARM);
+      RefreshApexWeaponVisual(unit->ToPlayer());
+    }
   }
 };
 

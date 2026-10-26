@@ -1513,7 +1513,7 @@ struct TalentProficiency
     std::uint32_t ProficiencySpellId;
 };
 
-inline constexpr std::array<TalentProficiency, 15> TalentProficiencies =
+inline constexpr std::array<TalentProficiency, 16> TalentProficiencies =
 {{
     {12, 800132, 9116},
     {12, 803798, 199},
@@ -1531,6 +1531,9 @@ inline constexpr std::array<TalentProficiency, 15> TalentProficiencies =
     {27, 707072, 202},
     // Tinker Apex (specialization 102): its identity passive, Apex Exoframe, opens the fist weapons of its wristblades.
     {28, 9300000, 15590},
+    // ... and Thrown, for the Apex Combistick carried in the ranged slot (the server SkillRaceClassInfo row 233,
+    // skill 176, must list class 28, or Player::_LoadSkills drops the skill at login and the core mails the lance).
+    {28, 9300000, 2567},
 }};
 
 struct StarterKit
