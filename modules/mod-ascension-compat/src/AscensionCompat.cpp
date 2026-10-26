@@ -236,6 +236,8 @@ constexpr ExtensionOpcodeIdentity EXTENSION_OPCODES[] = {
   return description;
 }
 
+// SkillLine.dbc row of the Tinker Apex specialization (102), added to the PTR DBC by outils/apex-spe-dbc.py.
+constexpr uint32 SKILL_TINKER_APEX = 11816;
 constexpr uint32 SPELL_PYROMANCER_HEAT = 807389;
 constexpr uint32 SPELL_PYROMANCER_EMBER = 807533;
 constexpr uint32 SPELL_PRIMALIST_EARTHSHAPING = 680441;
@@ -777,6 +779,25 @@ public:
                 player->SetCanDualWield(dualWield);
                 if (!dualWield)
                     player->AutoUnequipOffhandIfNeed();
+            }
+        }
+        if (!beforeMap && player->getClass() == CLASS_TINKER)
+        {
+            // Apex (spe 102, docs/CONCEPTION-tinker-4e-spe.md) gives 674 through a free node; leaving it removes
+            // the spell but nothing clears the flag, as for the Son of Arugal above.
+            bool const dualWield = player->HasSpell(674);
+            if (player->CanDualWield() != dualWield)
+            {
+                player->SetCanDualWield(dualWield);
+                if (!dualWield)
+                    player->AutoUnequipOffhandIfNeed();
+            }
+            // Its skill line holds the Apex spells, like 99, 100 and 102 for the other Tinker specializations,
+            // which only the creation baseline grants: characters made before Apex never got 11816.
+            if (!player->HasSkill(SKILL_TINKER_APEX) && sSkillLineStore.LookupEntry(SKILL_TINKER_APEX))
+            {
+                uint16 const maximum = player->GetMaxSkillValueForLevel();
+                player->SetSkill(SKILL_TINKER_APEX, 0, maximum, maximum);
             }
         }
         return learned;
