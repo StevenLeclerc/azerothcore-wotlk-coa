@@ -98,6 +98,7 @@ enum StormbringerTalentSpells : uint32
     SPELL_INVOKING_STORMS_1 = 705667,
     SPELL_INVOKING_STORMS_2 = 707793,
     SPELL_UNBOUND_ELEMENTALIST_1 = 705702,
+    SPELL_UNBOUND_ELEMENTALIST_2 = 705703,
     SPELL_AETHERMANCY_1 = 705690,
     SPELL_AETHERMANCY_2 = 705691,
     SPELL_IONIC_AURA = 707652
@@ -633,6 +634,31 @@ public:
                 own.BasePoints = pet.BasePoints;
             else
                 Skipped(info, "effects 0/1 pct modifiers on all effects");
+        }
+
+        // Both Unbound Elementalist ranks aim effects 1 and 2 at TARGET_UNIT_PET. Spell::CheckCast
+        // refuses the WHOLE spell when an effect targets the pet and none is out (SPELL_FAILED_NO_PET,
+        // checked for triggered casts too), and a passive is cast once, at learn or login, usually
+        // with no elemental: effect 0, the player's own modifier, was then never applied. Those two
+        // effects become SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS on the caster, as 300945 and
+        // 501968 already are (AscensionNecromancerContracts.cpp): the player's aura no longer
+        // depends on the pet, and the summons still get theirs.
+        if (info->Id == SPELL_UNBOUND_ELEMENTALIST_1 || info->Id == SPELL_UNBOUND_ELEMENTALIST_2)
+        {
+            bool shaped = info->Effects[EFFECT_0].Effect == SPELL_EFFECT_APPLY_AURA &&
+                info->Effects[EFFECT_0].TargetA.GetTarget() == TARGET_UNIT_CASTER;
+            for (uint8 index = EFFECT_1; index <= EFFECT_2; ++index)
+                shaped = shaped && info->Effects[index].Effect == SPELL_EFFECT_APPLY_AURA &&
+                    info->Effects[index].TargetA.GetTarget() == TARGET_UNIT_PET;
+            if (shaped)
+                for (uint8 index = EFFECT_1; index <= EFFECT_2; ++index)
+                {
+                    info->Effects[index].Effect = SPELL_EFFECT_ASCENSION_APPLY_AURA_TO_SUMMONS;
+                    info->Effects[index].TargetA = SpellImplicitTargetInfo(TARGET_UNIT_CASTER);
+                    info->Effects[index].TargetB = SpellImplicitTargetInfo();
+                }
+            else
+                Skipped(info, "effect 0 on the caster, effects 1/2 auras on the pet");
         }
 
         // 705691 Aethermancy rank 2: a PERCENT critical-chance modifier (ignored or multiplying,
