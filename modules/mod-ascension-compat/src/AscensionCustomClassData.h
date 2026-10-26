@@ -1513,7 +1513,7 @@ struct TalentProficiency
     std::uint32_t ProficiencySpellId;
 };
 
-inline constexpr std::array<TalentProficiency, 14> TalentProficiencies =
+inline constexpr std::array<TalentProficiency, 15> TalentProficiencies =
 {{
     {12, 800132, 9116},
     {12, 803798, 199},
@@ -1529,6 +1529,8 @@ inline constexpr std::array<TalentProficiency, 14> TalentProficiencies =
     {18, 807892, 200},
     {27, 707072, 200},
     {27, 707072, 202},
+    // Tinker Apex (specialization 102): its identity passive, Apex Exoframe, opens the fist weapons of its wristblades.
+    {28, 9300000, 15590},
 }};
 
 struct StarterKit
