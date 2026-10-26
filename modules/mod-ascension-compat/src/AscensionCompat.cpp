@@ -294,6 +294,13 @@ constexpr std::array<uint32, 29> TINKER_APEX_EXCLUDED_CLASS_ENTRIES =
 constexpr std::array<uint32, 8> TINKER_APEX_EXCLUDED_PROFICIENCIES = { 196, 197, 198, 199, 227, 266, 1180, 9116 };
 // Block: in TINKER_APEX_EXCLUDED_SPELLS, and also a Defense skill-line reward the core teaches back on SetSkill.
 constexpr uint32 SPELL_TINKER_BLOCK = 107;
+// Apex starter weapons (26/10, PTR): from level 10 an Apex may only use polearms, fist and thrown weapons (its
+// starting mace and gun become unusable) and the Apex set asks level 20. Uncommon, level 10, Tinker only:
+// 9120004 Apex Initiate Wristblade, 9120005 Apex Initiate Offhand Wristblade, 9120006 Apex Initiate Combistick.
+// Given once per character, marker "core.apex_starter" (same model as "core.ascension_starter").
+constexpr std::array<uint32, 3> TINKER_APEX_STARTER_ITEMS = { 9120004, 9120005, 9120006 };
+constexpr char TINKER_APEX_STARTER_SETTING[] = "core.apex_starter";
+constexpr uint32 TINKER_APEX_STARTER_REVISION = 1;
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_SPELLS.begin(), TINKER_APEX_EXCLUDED_SPELLS.end()));
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end()));
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_PROFICIENCIES.begin(), TINKER_APEX_EXCLUDED_PROFICIENCIES.end()));
@@ -1045,6 +1052,82 @@ public:
         return learned;
     }
 
+  // Apex starter weapons, once per character. Never to a bot (they never play spec 102 either:
+  // mod-playerbots IsExcludedSpecialization), only in world (a mail needs it; the login pass runs after
+  // AddPlayerToMap), nothing the character already holds (equipped, bags, bank). Bags first, else one mail.
+  // The marker is set once the gift is made, even partly, so a weapon sold or destroyed never comes back.
+  void GrantTinkerApexStarterWeapons(Player* player)
+  {
+    if (!player->IsInWorld() || !player->GetSession() || player->GetSession()->IsBot() ||
+        !IsTinkerApex(player, GetActiveSpecialization(player)) ||
+        player->GetPlayerSetting(TINKER_APEX_STARTER_SETTING, 0).value >= TINKER_APEX_STARTER_REVISION)
+      return;
+
+    // Templates not loaded (item_template not applied yet): give nothing and keep the marker unset, so the
+    // gift happens on the first pass after the data is there.
+    for (uint32 itemId : TINKER_APEX_STARTER_ITEMS)
+      if (!sObjectMgr->GetItemTemplate(itemId))
+      {
+        LOG_ERROR("module.ascension_compat", "Missing Apex starter item template {}: nothing given to {}",
+                  itemId, player->GetName());
+        return;
+      }
+
+    uint32 stored = 0;
+    std::vector<uint32> toMail;
+    for (uint32 itemId : TINKER_APEX_STARTER_ITEMS)
+    {
+      if (player->HasItemCount(itemId, 1, true))
+        continue;
+
+      ItemPosCountVec destinations;
+      if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destinations, itemId, 1) == EQUIP_ERR_OK)
+        if (Item* item = player->StoreNewItem(destinations, itemId, true))
+        {
+          player->SendNewItem(item, 1, true, false);
+          ++stored;
+          continue;
+        }
+      toMail.push_back(itemId);
+    }
+
+    // Marker first, in memory: the bag items and the marker both reach the base at the next character save.
+    player->UpdatePlayerSetting(TINKER_APEX_STARTER_SETTING, 0, TINKER_APEX_STARTER_REVISION);
+
+    uint32 mailed = 0;
+    if (!toMail.empty())
+    {
+      CharacterDatabaseTransaction trans = CharacterDatabase.BeginTransaction();
+      // The mail is written now, not at the next save: write the marker in the same transaction, so a crash
+      // before the next save cannot send the mail a second time at the next login.
+      if (PlayerSettingVector const* settings = player->FindPlayerSettings(TINKER_APEX_STARTER_SETTING))
+        trans->Append(PlayerSettingsStore::PrepareReplaceStatement(player->GetGUID().GetCounter(),
+                                                                   TINKER_APEX_STARTER_SETTING, *settings));
+      MailDraft draft("Apex starter weapons", "Your bags were full: here are the weapons of the Apex initiate.");
+      for (uint32 itemId : toMail)
+        if (Item* item = Item::CreateItem(itemId, 1, player))
+        {
+          item->SaveToDB(trans);
+          draft.AddItem(item);
+          ++mailed;
+        }
+      if (mailed)
+        draft.SendMailTo(trans, MailReceiver(player), MailSender(player, MAIL_STATIONERY_GM), MAIL_CHECK_MASK_COPIED);
+      CharacterDatabase.CommitTransaction(trans);
+      if (mailed != toMail.size())
+        LOG_ERROR("module.ascension_compat", "Apex starter weapons for {}: {} of {} mail item(s) not created",
+                  player->GetName(), uint32(toMail.size() - mailed), uint32(toMail.size()));
+    }
+
+    if (stored || mailed)
+    {
+      ChatHandler(player->GetSession()).PSendSysMessage(
+          "Apex starter weapons: {} placed in your bags, {} sent to your mailbox.", stored, mailed);
+      LOG_INFO("module.ascension_compat", "Gave Apex starter weapons to {} (level {}): {} in bags, {} by mail",
+               player->GetName(), uint32(player->GetLevel()), stored, mailed);
+    }
+  }
+
   bool AffectsProficiencies(uint32 spellId) const {
     bool const isProficiency = std::any_of(
         AscensionCompatData::ProficiencyDefinitions.begin(),
@@ -1145,6 +1228,11 @@ public:
     // login pass runs after AddPlayerToMap): other classes and other Tinker passes keep their behaviour.
     if (player->getClass() == CLASS_TINKER && player->IsInWorld() && (apex || removed))
       UnequipWeaponsWithoutProficiency(player);
+
+    // Every pass where a character is (or just became) Apex: spec entry, level 10, login of an existing Apex.
+    // After the unequip above, so the starting weapons leaving their slots take the bag space first.
+    if (apex)
+      GrantTinkerApexStarterWeapons(player);
 
     // Defense and Unarmed are intrinsic combat skills, absent from the equipment proficiency catalog.
     // Keep their current value and cap in step with the weapon skills on login and every level change.
