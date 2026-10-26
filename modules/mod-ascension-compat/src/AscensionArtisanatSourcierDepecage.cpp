@@ -45,6 +45,7 @@
 
 #include "AscensionArtisanatIds.h"
 #include "AscensionArtisanatSourcierSocle.h"
+#include "AscensionLevelScalingCorpse.h"
 #include "CharacterCache.h"
 #include "Chat.h"
 #include "CommandScript.h"
@@ -1003,7 +1004,8 @@ namespace
             return "ordinaire";
         if (c->GetMap()->Instanceable() && rang != CREATURE_ELITE_RARE)
             return "elite_instance";
-        if (c->GetLevel() <= Acore::XP::GetGrayLevel(j->GetLevel()))
+        // Niveau du combat, pas celui du cadavre remis a son origine pour le depecage (AscensionLevelScalingCorpse.h)
+        if (NiveauAuCombat(c) <= Acore::XP::GetGrayLevel(j->GetLevel()))
             return "grise";
         return "";
     }
