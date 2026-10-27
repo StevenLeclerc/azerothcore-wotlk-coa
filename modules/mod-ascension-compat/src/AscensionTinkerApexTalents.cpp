@@ -12,14 +12,16 @@
 //   9300036 aura_apex_trophy_hunter           Trophy Hunter v1, through GrantApexTrophies (cap of Trophy Rack)
 //   9300055 spell_apex_mimicked_voice         creatures walk to the voice
 //   9300062 spell_apex_grapple_snatch         the pack stays silent 3 s
-//   9300046 spell_apex_smart_disc             the slow disc that cuts through everything on its line (27/10 16:00)
-//   9300090 spell_apex_razor_disc             same disc, interrupt, return to the hand, Disc Overcharge
+//   9300046 spell_apex_smart_disc             the slow disc that cuts through everything on its line, out and back to
+//                                             the hand (27/10 16:00; return since 27/10 evening)
+//   9300090 spell_apex_razor_disc             same disc, plus the interrupt and Disc Overcharge
 //   9300102 aura_apex_patient_ambush          charges the cannon while still under camouflage
 //   9300106 aura_apex_plasma_splash           50% of the real damage around the target
 //   9300107 spell_apex_plasma_splash_damage   ADDED to the plan's contract: leaves the main target out
 //   9300116 aura_apex_plasma_frenzy           Plasma Frenzy (node 138407, replaces Plasma Barrage): random shots
 //   9300117-9300119 spell_apex_plasma_frenzy_shot   caps of Plasma Frenzy (5 enemies a blast, 8 blasts an enemy)
-//   creature 9300000 npc_apex_hunting_drone   Falconer's Eye, COAAPEX messages to the addon, circling flight
+//   creature 9300000 npc_apex_hunting_drone   Falconer's Eye, COAAPEX messages to the addon, circling flight 45-100 m
+//                                             from the Apex, reveals hidden enemies around it (9300132, 27/10 evening)
 // Without a spell_script_names row: AscensionApexDiscSpellInfoScript (GlobalScript, OnLoadSpellCustomAttr) gives the
 // disc cuts 9300091, 9300092 and 9300130 their armor and absorption piercing (no Spell.dbc field carries those).
 // Without a script name (hooks of this file): Arc Discharge, Never Saw It Coming, Blood Frenzy, Danger Seeker,
@@ -66,6 +68,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -115,7 +118,10 @@ enum ApexSpells : uint32
     SPELL_SELF_DESTRUCT = 9300083,
     SPELL_SELF_DESTRUCT_BLAST = 9300084,
     SPELL_CANNON_OFFLINE = 9300085,
-    SPELL_SMART_DISC_CUT = 9300130,      // 27/10 16:00: a cut of Smart Disc (one per enemy the disc crosses)
+    SPELL_SMART_DISC_CUT = 9300130,      // 27/10 16:00: a cut of Smart Disc (one per enemy the disc crosses, per leg)
+    SPELL_DISC_RETURN_MISSILE = 9300131, // 27/10 evening: the disc seen flying back to the hand (DUMMY, no effect)
+    SPELL_DRONE_REVEAL = 9300132,        // 27/10 evening: Falconer's Eye spotted a hidden enemy (MOD_STALKED, 3 s)
+    SPELL_CAMOUFLAGE_MEND = 9300133,     // 27/10 evening: Optical Camouflage mends the Apex (HEAL_PCT, set here)
     SPELL_RAZOR_DISC_PASS = 9300091,
     SPELL_RAZOR_DISC_RETURN = 9300092,
     SPELL_DISC_OVERCHARGE = 9300093,
@@ -151,8 +157,15 @@ constexpr float CANOPY_MIN_HEIGHT = 8.0f;
 constexpr int32 RED_DOTS_MS = 1500;
 constexpr uint32 PLASMA_SPLASH_PCT = 50;
 constexpr int32 SELF_DESTRUCT_PCT_PER_TROPHY = 25;
+constexpr int32 SELF_DESTRUCT_MAX_HEALTH_PCT = 50;   // 27/10 evening (sponsor): the blast is 50% of the Apex's max health
 constexpr int32 SELF_DESTRUCT_HEALTH_PCT = 10;
 constexpr uint32 WORTHY_PREY_PCT = 108;
+// Optical Camouflage mends (27/10 evening, sponsor): under the camouflage, below 30% of maximum health, 5% of it every
+// second until 80%, then nothing until the Apex falls below 30% again (still or newly camouflaged).
+constexpr uint32 CAMO_MEND_START_PCT = 30;
+constexpr uint32 CAMO_MEND_STOP_PCT = 80;
+constexpr uint32 CAMO_MEND_TICK_PCT = 5;
+constexpr uint32 CAMO_MEND_PERIOD_MS = 1000;
 // Plasma Frenzy: 21 ticks (250 ms over 5 s, one at the start). Damage bounds: 5 enemies a blast, 8 blasts an enemy
 // (8 x 105 = 840 at level 60, Plasma Barrage dealt 3 x 288 = 864 to its single target).
 constexpr float FRENZY_RANGE = 25.0f;
@@ -166,15 +179,16 @@ constexpr uint8 FRENZY_STRAY_TRIES = 4;            // each probe is a collision 
 constexpr float FRENZY_SHOT_RANGE = 29.0f;         // SpellRange 4 = 30 m, checked in 3D on the target's CENTRE even when triggered
 // Smart Disc and Razor Disc (27/10 16:00, sponsor): one slow disc on a straight line that cuts every enemy it
 // crosses, once per leg, through armor, absorption shields and invulnerabilities (Spell.dbc COUPE_PERCANTE and
-// AscensionApexDiscSpellInfoScript below).
+// AscensionApexDiscSpellInfoScript below). 27/10 evening (sponsor): BOTH discs come back to the hand, wherever the
+// Apex stands, and cut each enemy again on the way back.
 constexpr float DISC_RANGE = 35.0f;
 constexpr float DISC_HALF_WIDTH = 1.5f;              // 3 m blade path, plus the combat reach of the unit
 constexpr float DISC_DEFAULT_SPEED = 14.0f;          // Speed of 9300046 / 9300090 (VITESSE_DISQUE), read from the spell
 constexpr float DISC_HEIGHT = 1.2f;                  // above the feet of the Apex at the throw
 constexpr float DISC_VERTICAL_REACH = 5.0f;          // feet of a unit at most 5 m above or below the disc
 constexpr uint32 DISC_TICK_MS = 100;
-constexpr float DISC_CATCH_DISTANCE = 2.0f;          // Razor Disc: back in the hand
-constexpr uint32 DISC_RETURN_GRACE_MS = 4000;        // Razor Disc: a fleeing Apex is not chased for ever
+constexpr float DISC_CATCH_DISTANCE = 2.0f;          // back in the hand
+constexpr uint32 DISC_RETURN_GRACE_MS = 4000;        // a fleeing Apex is not chased for ever: the disc is then lost
 constexpr float VOICE_STOP_DISTANCE = 3.0f;
 constexpr Milliseconds VOICE_HOLD = 4s;
 constexpr Milliseconds GRAPPLE_SILENCE = 3s;
@@ -198,6 +212,8 @@ struct ApexTalentState : public DataMap::Base
     std::unordered_map<ObjectGuid, uint32> sentryLock;      // Sentry Protocol: last shot per target
     std::unordered_map<ObjectGuid, uint32> sentrySeen;      // Sentry Protocol: first hit of a player
     std::unordered_map<ObjectGuid, uint8> frenzyHits;       // Plasma Frenzy: blasts per enemy, emptied at each start
+    bool camoMending = false;                               // Optical Camouflage: mending, until 80%
+    uint32 camoMendTimer = 0;                               // ms until the next 5%
 };
 
 ApexTalentState& State(Player* player)
@@ -309,18 +325,66 @@ void SelfDestruct(Player* apex)
     if (!blast)
         return;
     uint32 const trophies = apex->GetAuraCount(SPELL_TROPHIES);
-    int32 const base = blast->Effects[EFFECT_0].CalcValue(apex);
-    int32 const damage = base * (100 + SELF_DESTRUCT_PCT_PER_TROPHY * int32(trophies)) / 100;
-    // CalcValue adds the per-level part (RealPointsPerLevel) again on top of a custom base point: pass the amount
-    // without it, or the blast deals 140 instead of 80 at level 20 (review of 27/10).
-    int32 const levelPart = base - blast->Effects[EFFECT_0].CalcValue(nullptr);
-    apex->CastCustomSpell(SPELL_SELF_DESTRUCT_BLAST, SPELLVALUE_BASE_POINT0, damage - levelPart, apex, true);
+    // 27/10 evening (sponsor: « 20 Fire is ridiculous »): 50% of the Apex's MAXIMUM health, read now (buffs included),
+    // then the Trophy bonus of the talent on top (+25% per Trophy consumed, kept). 64-bit until the clamp.
+    int64 const base = int64(apex->CountPctFromMaxHealth(SELF_DESTRUCT_MAX_HEALTH_PCT));
+    int64 const damage = base * (100 + SELF_DESTRUCT_PCT_PER_TROPHY * int64(trophies)) / 100;
+    // Spell.dbc gives the blast no die and no per-level part (outils/apex-spe-dbc.py, « explosion »): CalcValue applies
+    // the amount as passed. The per-level part, if a later DBC brought one back, is still taken off (CalcValue adds it
+    // again on top of a custom base point, review of 27/10).
+    int64 const levelPart = int64(blast->Effects[EFFECT_0].CalcValue(apex)) - blast->Effects[EFFECT_0].CalcValue(nullptr);
+    int32 const amount = int32(std::clamp<int64>(damage - levelPart, 1, std::numeric_limits<int32>::max()));
+    apex->CastCustomSpell(SPELL_SELF_DESTRUCT_BLAST, SPELLVALUE_BASE_POINT0, amount, apex, true);
     apex->RemoveAurasDueToSpell(SPELL_TROPHIES);
     // Decision D-5 of the plan, left to the sponsor: the health is SET to 10% (a 3% Apex is healed to 10%).
     if (apex->IsAlive())
         apex->SetHealth(std::max<uint32>(1, apex->CountPctFromMaxHealth(SELF_DESTRUCT_HEALTH_PCT)));
     if (sSpellMgr->GetSpellInfo(SPELL_CANNON_OFFLINE))
         apex->AddAura(SPELL_CANNON_OFFLINE, apex);
+}
+
+// ---- Optical Camouflage mends the Apex ----
+
+/// Once per player update while the camouflage holds (OnPlayerUpdate). Starts below CAMO_MEND_START_PCT, then heals
+/// CAMO_MEND_TICK_PCT of the maximum health every second (the first at once) until CAMO_MEND_STOP_PCT; the last tick
+/// only tops up to it. The heal is a triggered cast of 9300133 (HEAL_PCT): healing taken modifiers apply (Mortal
+/// Strike and the like reduce it, a unit that cannot be healed is not), it shows in the combat log, it breaks no
+/// stealth (triggered: Spell::prepare skips the CAST interrupt flags; ATTR1 0x20 too) and gives no threat (ATTR1
+/// 0x400). Nothing outside the camouflage: OnAuraRemove of the camouflage stops it (broken, cancelled, death).
+void CamouflageMend(Player* apex, uint32 diff)
+{
+    if (!apex->IsAlive() || !apex->HasAura(SPELL_CAMOUFLAGE))
+        return;
+    ApexTalentState& state = State(apex);
+    uint32 const maxHealth = apex->GetMaxHealth();
+    if (!maxHealth)
+        return;
+    uint64 const health = apex->GetHealth();
+    if (!state.camoMending)
+    {
+        if (health * 100 >= uint64(maxHealth) * CAMO_MEND_START_PCT)
+            return;
+        state.camoMending = true;
+        state.camoMendTimer = 0;
+    }
+    uint64 const stop = uint64(maxHealth) * CAMO_MEND_STOP_PCT / 100;
+    if (health >= stop)
+    {
+        state.camoMending = false;
+        return;
+    }
+    if (state.camoMendTimer > diff)
+    {
+        state.camoMendTimer -= diff;
+        return;
+    }
+    state.camoMendTimer = CAMO_MEND_PERIOD_MS;
+    if (!sSpellMgr->GetSpellInfo(SPELL_CAMOUFLAGE_MEND))
+        return;
+    // Percent left to 80%, rounded up, between 1 and 5.
+    uint64 const missingPct = ((stop - health) * 100 + maxHealth - 1) / maxHealth;
+    int32 const pct = int32(std::clamp<uint64>(missingPct, 1, CAMO_MEND_TICK_PCT));
+    apex->CastCustomSpell(SPELL_CAMOUFLAGE_MEND, SPELLVALUE_BASE_POINT0, pct, apex, true);
 }
 
 // ---- Plasma Frenzy: the cannon fires wildly, at enemies and at the ground ----
@@ -422,9 +486,9 @@ struct ApexDiscFlight
     float Speed = DISC_DEFAULT_SPEED;
     ObjectGuid Aim;                         // the enemy aimed at: never spared
     uint32 CutSpell = 0;
-    uint32 ReturnSpell = 0;                 // Razor Disc: the disc flies back to the hand, cutting again
+    uint32 ReturnSpell = 0;                 // the disc flies back to the hand, cutting again (0: it stops at the end)
     bool Returning = false;
-    float X = 0.0f, Y = 0.0f, Z = 0.0f;     // where the disc was at the last sweep
+    float X = 0.0f, Y = 0.0f, Z = 0.0f;     // where the disc was at the last sweep (Z: kept on the way back only)
     uint32 LaunchMs = 0;
     uint32 LastMs = 0;
     uint32 MaxMs = 0;
@@ -557,8 +621,31 @@ void SweepDisc(Player* apex, ApexDiscFlight const& flight, float fromX, float fr
 
 void ScheduleDiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> flight);
 
+constexpr Milliseconds DISC_RETURN_MISSILE_DELAY = 100ms;   // the client must have the trigger before its missile
+
+/// The disc seen flying back (27/10 evening): an invisible trigger (WORLD_TRIGGER, the Apex's faction) left where the
+/// disc turned sends the disc's missile (9300131: DUMMY, no effect, the throw's visual and speed) at the Apex. The
+/// client follows a missile aimed at a unit, as the server's return follows the Apex. Visual only: the cuts of the
+/// return are SweepDisc's. The trigger lives as long as the longest return (MaxMs), plus a second.
+void ShowDiscReturn(Player* apex, ApexDiscFlight const& flight, float z, uint32 lifeMs)
+{
+    if (!sSpellMgr->GetSpellInfo(SPELL_DISC_RETURN_MISSILE))
+        return;
+    Creature* trigger = apex->SummonTrigger(flight.X, flight.Y, z, 0.0f, lifeMs + 1000, true);
+    if (!trigger)
+        return;
+    ObjectGuid const apexGuid = apex->GetGUID();
+    trigger->m_Events.AddEventAtOffset([trigger, apexGuid]()
+    {
+        Player* target = ObjectAccessor::GetPlayer(*trigger, apexGuid);
+        if (target && target->IsAlive())
+            trigger->CastSpell(target, SPELL_DISC_RETURN_MISSILE, true);
+    }, DISC_RETURN_MISSILE_DELAY);
+}
+
 /// One step of a disc: out along its line at its speed (time measured from the throw, so the cuts follow the
-/// missile the client draws), then for Razor Disc back to the hand, wherever the Apex is.
+/// missile the client draws), then back to the hand at the same speed, wherever the Apex is (Smart Disc and Razor
+/// Disc alike since 27/10 evening).
 void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
 {
     if (!apex->IsInWorld() || !apex->IsAlive() || apex->GetMapId() != flight->MapId ||
@@ -586,8 +673,10 @@ void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
         if (!flight->ReturnSpell || !sSpellMgr->GetSpellInfo(flight->ReturnSpell))
             return;
         flight->Returning = true;
-        flight->MaxMs = getMSTimeDiff(flight->LaunchMs, now) + uint32(flight->Length / flight->Speed * 1000.0f) +
-            DISC_RETURN_GRACE_MS;
+        flight->Z = DiscHeightAt(*flight, flight->Length);   // the return starts at the height the disc turned
+        uint32 const returnMs = uint32(flight->Length / flight->Speed * 1000.0f) + DISC_RETURN_GRACE_MS;
+        flight->MaxMs = getMSTimeDiff(flight->LaunchMs, now) + returnMs;
+        ShowDiscReturn(apex, *flight, DiscHeightAt(*flight, flight->Length), returnMs);
         ScheduleDiscTick(apex, flight);
         return;
     }
@@ -598,10 +687,14 @@ void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
     bool const caught = distance <= step + DISC_CATCH_DISTANCE;
     float const x = caught ? apex->GetPositionX() : flight->X + dx / distance * step;
     float const y = caught ? apex->GetPositionY() : flight->Y + dy / distance * step;
-    SweepDisc(apex, *flight, flight->X, flight->Y, x, y, apex->GetPositionZ() + DISC_HEIGHT, flight->HitBack,
-              flight->ReturnSpell);
+    // The height goes from where the disc turned to the Apex's hand in proportion to the flat way flown (review of
+    // 27/10 evening: swept at the hand's height all along, a return from a ledge or a slope missed what it crossed).
+    float const hand = apex->GetPositionZ() + DISC_HEIGHT;
+    float const z = caught ? hand : flight->Z + (hand - flight->Z) * std::min(1.0f, step / distance);
+    SweepDisc(apex, *flight, flight->X, flight->Y, x, y, z, flight->HitBack, flight->ReturnSpell);
     flight->X = x;
     flight->Y = y;
+    flight->Z = z;
     flight->LastMs = now;
     if (!caught && getMSTimeDiff(flight->LaunchMs, now) < flight->MaxMs)
         ScheduleDiscTick(apex, flight);
@@ -882,7 +975,8 @@ class spell_apex_grapple_snatch : public SpellScript
 
 // Smart Disc (138379, 27/10 16:00): the throw only aims. Effect 0 (DUMMY on TARGET_DEST_TARGET_ENEMY) is moved to the
 // end of the line (PlanDiscFlight), where the client sends the spinning disc at the spell's Speed; once cast, the
-// disc cuts (9300130) every enemy it crosses, one sweep every 100 ms, each enemy once.
+// disc cuts (9300130) every enemy it crosses, one sweep every 100 ms, each enemy once per leg: once on the way out,
+// once more on the way back to the hand (27/10 evening, sponsor: « the Apex gets his disc back »).
 class spell_apex_smart_disc : public SpellScript
 {
     PrepareSpellScript(spell_apex_smart_disc);
@@ -906,7 +1000,7 @@ class spell_apex_smart_disc : public SpellScript
             return;
         if (!_planned)
             PlanDiscFlight(player, GetExplTargetUnit(), _flight);
-        LaunchDisc(player, _flight, GetSpellInfo()->Speed, SPELL_SMART_DISC_CUT, 0);
+        LaunchDisc(player, _flight, GetSpellInfo()->Speed, SPELL_SMART_DISC_CUT, SPELL_SMART_DISC_CUT);
     }
 
     void Register() override
@@ -917,9 +1011,9 @@ class spell_apex_smart_disc : public SpellScript
     }
 };
 
-// Razor Disc (138399, replaces Smart Disc on its button): the same slow disc (cuts 9300091), which interrupts the
-// aimed enemy when it reaches it (effect 1 of the spell), then flies back to the hand cutting again (9300092, each
-// enemy once more). Disc Overcharge (138400): the throw also frees the Apex (9300094).
+// Razor Disc (138399, replaces Smart Disc on its button): the same slow disc, out and back (cuts 9300091 out, 9300092
+// back, each as strong as a cut of Smart Disc since 27/10 evening), which also interrupts the aimed enemy when it
+// reaches it (effect 1 of the spell). Disc Overcharge (138400): the throw also frees the Apex (9300094).
 class spell_apex_razor_disc : public SpellScript
 {
     PrepareSpellScript(spell_apex_razor_disc);
@@ -1109,23 +1203,48 @@ class spell_apex_plasma_frenzy_shot : public SpellScript
 //        the zone has no map (instance: no T line then); width_yd = |LocLeft - LocRight| of WorldMapArea (the
 //        map's horizontal axis), height_yd = |LocTop - LocBottom| (vertical axis); dx dy = drone on the zone map,
 //        in 1/10000 (0 = left / top edge), as Map2ZoneCoordinates puts it.
-//   T|id|x|y|level|hp|kind|rank|hostile
+//   T|id|x|y|level|hp|kind|rank|hostile|hidden
 //        id opaque 1-255, stable for the drone's life (never a guid); x y in 1/10000 of the zone map; level -1 when
 //        10 or more above the player ("??"); hp % rounded to 5; kind P (character: player or bot, never told
-//        apart) or C (creature); rank 0 normal, 1 elite, 2 rare, 3 rare elite, 4 boss; hostile 1, neutral 0.
+//        apart) or C (creature); rank 0 normal, 1 elite, 2 rare, 3 rare elite, 4 boss; hostile 1, neutral 0;
+//        hidden (27/10 evening, appended: an addon that reads 9 fields ignores it) 1 = stealthed or invisible, seen
+//        only because the drone spotted it (RevealHidden), 0 otherwise.
 //   F                                       end of the salvo
 //   X                                       the drone is gone: fade the marks out (10 s)
 // One salvo per second while the drone lives. Never a name, a class, a guid, nor a unit outside the player's zone
 // or that the player cannot see (CanSeeOrDetect). At most 20 units, the nearest to the drone, within 40 m of it.
+//
+// 27/10 evening (sponsor: « it stays too close; it is a scout, the player already sees what is around him »):
+// the round circles a centre 60 to 85 m from the Apex (DRONE_CENTRE_MIN/MAX, radius 15 m), so the drone flies
+// 45 to 100 m away and its 40 m scan covers 5 to 140 m. 100 m = Visibility.Distance.Continents of the PTR: the drone,
+// and the hidden enemies it reveals, stay within the distance at which the client draws units. The centre follows
+// the Apex (leash): beyond 85 m, or once the Apex is within 25 m of it, it is placed again 60 m from him.
+// It also spots the hidden (27/10 evening): an enemy within 40 m of the drone under stealth or invisibility gets
+// 9300132 from the Apex (SPELL_AURA_MOD_STALKED, 3 s, renewed every salvo): Unit::IsAlwaysDetectableFor then lets the
+// Apex (and his pets, CanDetect uses the master's sight) see and target it, at the usual visibility distance, as
+// Hunter's Mark does; the stalked flag also tracks it on his minimap. Only the Apex: neither his group nor anyone
+// else. GMs and spectators stay hidden (checked before detection in CanSeeOrDetect).
 
 constexpr char APEX_ADDON_PREFIX[] = "COAAPEX\t";
 constexpr std::size_t APEX_ADDON_MAX = 200;
 constexpr float DRONE_SCAN_RADIUS = 40.0f;
 constexpr std::size_t DRONE_MAX_TARGETS = 20;
 constexpr uint32 DRONE_PERIOD_MS = 1000;
-constexpr float DRONE_HOVER = 5.0f;                  // 27/10 16:00: inspection round 5 m above the summon point
-constexpr float DRONE_ORBIT_RADIUS = 8.0f;           // around the point chosen with Falconer's Eye (its centre)
-constexpr float DRONE_ORBIT_SPEED = 4.0f;            // m/s: a round of 50 m in about 12.5 s, readable
+constexpr float DRONE_HOVER = 5.0f;                  // 27/10 16:00: inspection round 5 m above its centre
+constexpr float DRONE_ORBIT_RADIUS = 15.0f;          // 27/10 evening (8 before): around its centre
+constexpr float DRONE_ORBIT_SPEED = 6.0f;            // m/s: a round of 94 m in about 16 s, two rounds in 30 s
+constexpr float DRONE_CENTRE_MIN = 60.0f;            // 27/10 evening: centre of the round 60-85 m from the Apex
+constexpr float DRONE_CENTRE_MAX = 85.0f;            //   (+ radius 15 = 100 m, the continents' visibility distance)
+constexpr float DRONE_CENTRE_NEAR = 25.0f;           // the Apex walked onto the round: the scout goes ahead again
+constexpr float DRONE_EYE_HEIGHT = 2.0f;             // line of sight from the Apex's head to the centre
+constexpr float DRONE_CENTRE_MOVE = 10.0f;           // the leash moves the centre only by more than this
+constexpr float DRONE_LEASH_STEP = 10.0f;            // ... and is worked out again only after the Apex moved this much
+constexpr float DRONE_GROUND_SEARCH_UP = 50.0f;      // ground under the round looked for from 50 m above it (hills)
+constexpr float DRONE_GROUND_SEARCH = 150.0f;        //   down to 100 m below it
+constexpr float DRONE_HEADING_MIN = 3.0f;            // the Apex moved this much since the last salvo: his heading
+constexpr float DRONE_CATCH_UP_S = 4.0f;             // a distanced drone flies fast enough to reach its round in 4 s
+constexpr float DRONE_MAX_SPEED = 50.0f;             //   up to 50 m/s (a flying mount runs at 38 at most)
+constexpr float DRONE_TELEPORT_DISTANCE = 200.0f;    //   beyond 200 m (a teleport of the Apex), it is moved there
 constexpr uint8 DRONE_ORBIT_POINTS = 24;             // 15 degrees a vertex
 constexpr float DRONE_GROUND_CLEARANCE = 2.5f;       // a vertex over a slope rises to stay 2.5 m above the ground
 
@@ -1182,6 +1301,45 @@ uint32 PreyRank(Unit const* unit)
     }
 }
 
+/// True when the creature is invisible for good (an aura of SPELL_AURA_MOD_INVISIBILITY without end: spirits seen
+/// only with a quest item, invisible event creatures): the drone leaves those to their design. Same test as the core
+/// (WorldObject::CanDetectInvisibilityOf, isPermInvisibleCreature).
+bool PermanentlyInvisible(Unit const* unit)
+{
+    for (AuraEffect const* effect : unit->GetAuraEffectsByType(SPELL_AURA_MOD_INVISIBILITY))
+        if (effect->GetSpellInfo() && effect->GetSpellInfo()->GetMaxDuration() == -1)
+            return true;
+    return false;
+}
+
+/// Falconer's Eye spots a hidden enemy (27/10 evening): `unit` is under stealth or invisibility and within the drone's
+/// scan. It gets (or keeps for 3 more seconds) 9300132 from the Apex, and true is returned while it carries it.
+/// Spotted: characters and what they control (players, bots, their pets), always; a creature of the world only when
+/// it could be fought (not a trigger, not unselectable nor unattackable, not immune to players) and is not invisible
+/// for good (PermanentlyInvisible). Not Unit::IsValidAttackTarget: it refuses a unit the Apex cannot see or detect
+/// (Unit::_IsValidAttackTarget), that is every hidden one (review of 27/10 evening). The scan already left out
+/// friends (AnyUnfriendlyUnitInObjectRangeCheck) and the dead.
+bool RevealHidden(Player* apex, Unit* unit)
+{
+    if (!unit->m_stealth.GetFlags() && !unit->m_invisibility.GetFlags())
+        return false;
+    if (!unit->IsCharmedOwnedByPlayerOrPlayer())
+    {
+        Creature const* creature = unit->ToCreature();
+        if (!creature || creature->IsTrigger() || creature->IsImmuneToPC() || PermanentlyInvisible(creature) ||
+            creature->HasUnitFlag(UNIT_FLAG_NOT_SELECTABLE) || creature->HasUnitFlag(UNIT_FLAG_NON_ATTACKABLE))
+            return false;
+    }
+    if (Aura* mark = unit->GetAura(SPELL_DRONE_REVEAL, apex->GetGUID()))
+    {
+        mark->RefreshDuration();
+        return true;
+    }
+    if (!sSpellMgr->GetSpellInfo(SPELL_DRONE_REVEAL))
+        return false;
+    return apex->AddAura(SPELL_DRONE_REVEAL, unit) != nullptr;
+}
+
 class npc_apex_hunting_drone : public CreatureAI
 {
 public:
@@ -1200,12 +1358,23 @@ public:
             return;
         _owner = summoner->GetGUID();
         me->SetDisableGravity(true);
-        // 27/10 16:00 (sponsor): no longer static. The drone climbs to the first vertex of its round, then circles the
-        // point of the summon for good (UpdateAI starts the cyclic spline once the climb is over). Not steerable.
-        PlanOrbit();
-        G3D::Vector3 const& first = _orbit.front();
-        me->GetMotionMaster()->MovePoint(POINT_DRONE_HOVER, first.x, first.y, first.z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
-                                         false);
+        // 27/10 16:00 (sponsor): no longer static. The drone climbs to the first vertex of its round, then circles its
+        // centre for good (UpdateAI starts the cyclic spline once the climb is over). Not steerable.
+        // 27/10 evening: the centre is the point aimed with Falconer's Eye when it lies 60 to 85 m from the Apex;
+        // otherwise the point on the same line at 60 m (aimed closer) or 85 m (aimed farther), short of the first wall.
+        Player* apex = summoner->ToPlayer();
+        float const aimed = apex->GetExactDist2d(me);
+        _lastOwner = apex->GetPosition();
+        if (aimed >= DRONE_CENTRE_MIN && aimed <= DRONE_CENTRE_MAX)
+        {
+            float const ground = GroundUnder(me->GetPositionX(), me->GetPositionY(),
+                                             std::max(me->GetPositionZ(), apex->GetPositionZ()));
+            _centre.Relocate(me->GetPositionX(), me->GetPositionY(), ground > INVALID_HEIGHT ? ground : me->GetPositionZ());
+        }
+        else
+            _centre = ScoutCentre(apex, aimed > 1.0f ? apex->GetAngle(me) : apex->GetOrientation(),
+                                  std::clamp(aimed, DRONE_CENTRE_MIN, DRONE_CENTRE_MAX), me->GetPositionZ());
+        FlyToOrbit();
         _timer = 0;   // first salvo at once
     }
 
@@ -1245,25 +1414,122 @@ public:
             return;
         }
         _timer = DRONE_PERIOD_MS;
+        if (Player* owner = Owner(); owner && owner->IsAlive())
+            KeepLeash(owner);
         SendSalvo(left);
     }
 
 private:
-    /// The round: DRONE_ORBIT_POINTS vertices on a circle of DRONE_ORBIT_RADIUS around the summon point, DRONE_HOVER
-    /// above it, each raised to keep DRONE_GROUND_CLEARANCE over the ground below it (map height, vmaps included).
+    /// Ground under (x, y), looked for from DRONE_GROUND_SEARCH_UP metres above `from` (Map::GetHeight ignores the
+    /// terrain above its search point: a hill between the Apex and the round would hide under it, review of 27/10
+    /// evening) and down to DRONE_GROUND_SEARCH below that. INVALID_HEIGHT when there is none (void, edge of the map).
+    /// Indoors, the first floor found from above may be a roof: the centre is then under the roof line of sight test
+    /// (ScoutCentre) and the round rises over the building.
+    float GroundUnder(float x, float y, float from) const
+    {
+        return me->GetMapHeight(x, y, from + DRONE_GROUND_SEARCH_UP, true, DRONE_GROUND_SEARCH);
+    }
+
+    /// The point `distance` metres from the Apex towards `angle`, brought back short of the first wall, building or
+    /// gameobject between the Apex's head and the round's height (vmaps; trees and other M2 doodads are ignored), on
+    /// the ground found there (GroundUnder, from the higher of `z` and the Apex), or at `z` without ground.
+    Position ScoutCentre(Player* apex, float angle, float distance, float z) const
+    {
+        float const ax = apex->GetPositionX();
+        float const ay = apex->GetPositionY();
+        float const az = apex->GetPositionZ() + DRONE_EYE_HEIGHT;
+        float const dx = std::cos(angle);
+        float const dy = std::sin(angle);
+        Map* map = apex->GetMap();
+        auto const clear = [&](float length)
+        {
+            return map->isInLineOfSight(ax, ay, az, ax + dx * length, ay + dy * length, z + DRONE_HOVER,
+                                        apex->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::M2);
+        };
+        float length = distance;
+        if (!clear(length))
+        {
+            float open = 0.0f, blocked = length;       // 7 halvings: the wall is found to 0.7 m at most
+            for (uint8 i = 0; i < 7; ++i)
+            {
+                float const middle = (open + blocked) * 0.5f;
+                (clear(middle) ? open : blocked) = middle;
+            }
+            length = open;
+        }
+        float const cx = ax + dx * length;
+        float const cy = ay + dy * length;
+        float const ground = GroundUnder(cx, cy, std::max(z, apex->GetPositionZ()));
+        return Position(cx, cy, ground > INVALID_HEIGHT ? ground : z, angle);
+    }
+
+    /// The leash, once a salvo: the centre is placed again DRONE_CENTRE_MIN metres AHEAD of the Apex (his heading over
+    /// the last salvo when he moved, where he faces otherwise: the scout precedes him, review of 27/10 evening) when he
+    /// is farther than DRONE_CENTRE_MAX from it or within DRONE_CENTRE_NEAR of it. Worked out again only once the Apex
+    /// moved DRONE_LEASH_STEP since the last try (each try costs up to 8 line of sight tests). Same map only (Owner).
+    void KeepLeash(Player* owner)
+    {
+        Position const here = owner->GetPosition();
+        float const moved = here.GetExactDist2d(&_lastOwner);
+        float const heading = moved >= DRONE_HEADING_MIN ? _lastOwner.GetAngle(&here) : owner->GetOrientation();
+        _lastOwner = here;
+        float const distance = owner->GetExactDist2d(_centre.GetPositionX(), _centre.GetPositionY());
+        if (distance <= DRONE_CENTRE_MAX && distance >= DRONE_CENTRE_NEAR)
+            return;
+        if (_leashTried && here.GetExactDist2d(&_leashFrom) < DRONE_LEASH_STEP)
+            return;
+        _leashTried = true;
+        _leashFrom = here;
+        Position const centre = ScoutCentre(owner, heading, DRONE_CENTRE_MIN, owner->GetPositionZ());
+        // A wall close ahead brings the centre back within 25 m of the Apex: placed again on the same spot every
+        // second, the drone would never start its round (review of 27/10 evening). Kept when it would barely move.
+        if (centre.GetExactDist2d(&_centre) < DRONE_CENTRE_MOVE)
+            return;
+        _centre = centre;
+        FlyToOrbit();
+    }
+
+    /// Plans the round around _centre and flies to its first vertex (the one nearest the drone); the cyclic round
+    /// starts on arrival (MovementInform, UpdateOrbit).
+    void FlyToOrbit()
+    {
+        _orbiting = false;
+        _orbitPending = false;
+        _start = 0;
+        PlanOrbit();
+        G3D::Vector3 const& first = _orbit.front();
+        // Outrun by a mounted Apex: the drone flies fast enough to reach its round in DRONE_CATCH_UP_S (its own speed
+        // when that is enough, at most DRONE_MAX_SPEED), so it stays a scout ahead instead of trailing behind; across
+        // a teleport of the Apex within the map, it is moved straight there (review of 27/10 evening).
+        float const away = me->GetExactDist(first.x, first.y, first.z);
+        if (away > DRONE_TELEPORT_DISTANCE)
+        {
+            me->NearTeleportTo(first.x, first.y, first.z, me->GetOrientation());
+            _orbitPending = true;
+            return;
+        }
+        float const cruise = me->GetSpeed(MOVE_RUN);
+        float const speed = std::min(away / DRONE_CATCH_UP_S, DRONE_MAX_SPEED);
+        me->GetMotionMaster()->MovePoint(POINT_DRONE_HOVER, first.x, first.y, first.z, FORCED_MOVEMENT_NONE,
+                                         speed > cruise ? speed : 0.0f, 0.0f, false);
+    }
+
+    /// The round: DRONE_ORBIT_POINTS vertices on a circle of DRONE_ORBIT_RADIUS around _centre, DRONE_HOVER above
+    /// it, each raised to keep DRONE_GROUND_CLEARANCE over the ground below it (map height, vmaps included). The
+    /// first vertex is the one on the drone's side.
     void PlanOrbit()
     {
         _orbit.clear();
-        float const cx = me->GetPositionX();
-        float const cy = me->GetPositionY();
-        float const cz = me->GetPositionZ() + DRONE_HOVER;
-        float const start = me->GetOrientation();
+        float const cx = _centre.GetPositionX();
+        float const cy = _centre.GetPositionY();
+        float const cz = _centre.GetPositionZ() + DRONE_HOVER;
+        float const start = std::atan2(me->GetPositionY() - cy, me->GetPositionX() - cx);
         for (uint8 i = 0; i < DRONE_ORBIT_POINTS; ++i)
         {
             float const angle = start + 2.0f * float(M_PI) * float(i) / float(DRONE_ORBIT_POINTS);
             float const x = cx + DRONE_ORBIT_RADIUS * std::cos(angle);
             float const y = cy + DRONE_ORBIT_RADIUS * std::sin(angle);
-            float const ground = me->GetMapHeight(x, y, cz + 2.0f);   // from just above: never the floor upstairs
+            float const ground = GroundUnder(x, y, cz);   // from well above: a slope rising over the round is found
             float const z = ground > INVALID_HEIGHT ? std::max(cz, ground + DRONE_GROUND_CLEARANCE) : cz;
             _orbit.emplace_back(x, y, z);
         }
@@ -1350,13 +1616,20 @@ private:
             mapped ? zone : 0, mapped ? uint32(std::lround(std::fabs(map->y1 - map->y2))) : 0,
             mapped ? uint32(std::lround(std::fabs(map->x1 - map->x2))) : 0, drone.first, drone.second));
 
+        // The scan and the spotting of the hidden run on every map (an instance has no zone map, so no T line).
+        std::list<Unit*> around;
+        Acore::AnyUnfriendlyUnitInObjectRangeCheck check(me, owner, DRONE_SCAN_RADIUS);
+        Acore::UnitListSearcher<Acore::AnyUnfriendlyUnitInObjectRangeCheck> searcher(me, around, check);
+        Cell::VisitObjects(me, searcher, DRONE_SCAN_RADIUS);
+        // A dead Apex (ghost) spots nothing: the ghost would otherwise see stealthed enemies around the drone.
+        std::unordered_set<ObjectGuid> spotted;
+        if (owner->IsAlive())
+            for (Unit* unit : around)
+                if (unit != owner && unit != me && !unit->IsTotem() && RevealHidden(owner, unit))
+                    spotted.insert(unit->GetGUID());
+
         if (mapped)
         {
-            std::list<Unit*> around;
-            Acore::AnyUnfriendlyUnitInObjectRangeCheck check(me, owner, DRONE_SCAN_RADIUS);
-            Acore::UnitListSearcher<Acore::AnyUnfriendlyUnitInObjectRangeCheck> searcher(me, around, check);
-            Cell::VisitObjects(me, searcher, DRONE_SCAN_RADIUS);
-
             std::vector<Unit*> seen;
             for (Unit* unit : around)
                 if (unit != owner && unit != me && !unit->IsTotem() && unit->GetZoneId() == zone &&
@@ -1378,8 +1651,9 @@ private:
                 int32 const level = unit->GetLevel() >= owner->GetLevel() + 10 ? -1 : int32(unit->GetLevel());
                 uint32 const health = std::min<uint32>(100, uint32(std::lround(unit->GetHealthPct() / 5.0f)) * 5);
                 bool const character = unit->IsPlayer();
-                lines.push_back(Acore::StringFormat("T|{}|{}|{}|{}|{}|{}|{}|{}", id, position.first, position.second,
-                    level, health, character ? "P" : "C", PreyRank(unit), unit->IsHostileTo(owner) ? 1 : 0));
+                lines.push_back(Acore::StringFormat("T|{}|{}|{}|{}|{}|{}|{}|{}|{}", id, position.first,
+                    position.second, level, health, character ? "P" : "C", PreyRank(unit), unit->IsHostileTo(owner) ? 1 : 0,
+                    spotted.count(unit->GetGUID()) ? 1 : 0));
             }
         }
         lines.emplace_back("F");
@@ -1394,6 +1668,10 @@ private:
     bool _timed = false;
     std::unordered_map<ObjectGuid, uint32> _ids;
     std::vector<G3D::Vector3> _orbit;
+    Position _centre;                       // centre of the round (27/10 evening: 60-85 m from the Apex, leashed)
+    Position _lastOwner;                    // the Apex at the last salvo (his heading)
+    Position _leashFrom;                    // the Apex at the last leash try
+    bool _leashTried = false;
     std::size_t _start = 0;                 // vertex the round starts from (the one the drone climbed or came back to)
     bool _orbitPending = false;
     bool _orbiting = false;
@@ -1594,6 +1872,8 @@ public:
                 SynchronizeApexStanceAttacks(player);
                 break;
             case SPELL_CAMOUFLAGE:
+                // Optical Camouflage mends only under it: the next camouflage starts over (below 30% again).
+                State(player).camoMending = false;
                 if (mode == AURA_REMOVE_BY_DEATH || !player->IsAlive())
                     break;
                 // Never Saw It Coming: 10 s of ambush once out of the camouflage, whatever ended it.
@@ -1652,11 +1932,13 @@ public:
         }
     }
 
-    // Danger Seeker: once a second, the crit buff follows the enemies at melee contact that attack the Apex.
+    // Optical Camouflage mends (CamouflageMend). Danger Seeker: once a second, the crit buff follows the enemies at
+    // melee contact that attack the Apex.
     void OnPlayerUpdate(Player* player, uint32 diff) override
     {
         if (!player || player->getClass() != CLASS_TINKER)
             return;
+        CamouflageMend(player, diff);
         bool const talent = player->HasAura(SPELL_DANGER_SEEKER);
         if (!talent && !player->HasAura(SPELL_DANGER_SEEKER_BUFF))
             return;
