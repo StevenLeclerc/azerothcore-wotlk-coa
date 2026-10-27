@@ -124,6 +124,7 @@ void AddAscensionTinkerAugmentationScripts();
 void AddAscensionTinkerAugmentationTalentScripts();
 void AddAscensionTinkerHackingScripts();
 void AddAscensionTinkerApexTalentScripts();   // Tinker Apex (PTR) : boutons par posture, talents 31-60
+void AddAscensionTinkerApexCourierScripts();  // Tinker Apex (PTR) : livreur d'equipement Kesh'vaar
 void AddSC_AscensionPrimalistEarthshaping();
 void AddSC_AscensionVenomancerCatalyst();
 void AddSC_AscensionPrimalistSpiritBeast();
@@ -293,6 +294,7 @@ void Addmod_ascension_compatScripts()
     AddAscensionTinkerAugmentationTalentScripts();
     AddAscensionTinkerHackingScripts();
     AddAscensionTinkerApexTalentScripts();
+    AddAscensionTinkerApexCourierScripts();
     AddSC_AscensionPrimalistEarthshaping();
     AddAscensionRunemasterGlyphScripts();
     AddSC_AscensionVenomancerCatalyst();

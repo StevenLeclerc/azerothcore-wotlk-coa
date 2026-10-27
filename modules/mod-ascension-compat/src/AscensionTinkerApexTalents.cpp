@@ -6,37 +6,50 @@
 //
 // Script names (contract C-SCRIPTS, written to spell_script_names by exploitation/apex/apex-talents60-ptr.sql):
 //   9300011 spell_apex_rocket_pounce          Canopy Drop
-//   9300012, 9300108 spell_apex_cannon_gate   Cannon Offline refuses the cannon
+//   9300012, 9300108, 9300116 spell_apex_cannon_gate   Cannon Offline refuses the cannon (and Plasma Frenzy holds it)
 //   9300013 spell_apex_plasma_bolt            Patient Ambush: the shot spends Charged Caster
-//   9300018 spell_apex_skull_and_spine        Claim the Skull
+//   9300018 spell_apex_skull_and_spine        Claim the Skull; the killed one's skeleton rises (27/10 16:00)
 //   9300036 aura_apex_trophy_hunter           Trophy Hunter v1, through GrantApexTrophies (cap of Trophy Rack)
 //   9300055 spell_apex_mimicked_voice         creatures walk to the voice
 //   9300062 spell_apex_grapple_snatch         the pack stays silent 3 s
-//   9300090 spell_apex_razor_disc             line, return, Disc Overcharge
+//   9300046 spell_apex_smart_disc             the slow disc that cuts through everything on its line (27/10 16:00)
+//   9300090 spell_apex_razor_disc             same disc, interrupt, return to the hand, Disc Overcharge
 //   9300102 aura_apex_patient_ambush          charges the cannon while still under camouflage
 //   9300106 aura_apex_plasma_splash           50% of the real damage around the target
 //   9300107 spell_apex_plasma_splash_damage   ADDED to the plan's contract: leaves the main target out
-//   creature 9300000 npc_apex_hunting_drone   Falconer's Eye, COAAPEX messages to the addon
+//   9300116 aura_apex_plasma_frenzy           Plasma Frenzy (node 138407, replaces Plasma Barrage): random shots
+//   9300117-9300119 spell_apex_plasma_frenzy_shot   caps of Plasma Frenzy (5 enemies a blast, 8 blasts an enemy)
+//   creature 9300000 npc_apex_hunting_drone   Falconer's Eye, COAAPEX messages to the addon, circling flight
+// Without a spell_script_names row: AscensionApexDiscSpellInfoScript (GlobalScript, OnLoadSpellCustomAttr) gives the
+// disc cuts 9300091, 9300092 and 9300130 their armor and absorption piercing (no Spell.dbc field carries those).
 // Without a script name (hooks of this file): Arc Discharge, Never Saw It Coming, Blood Frenzy, Danger Seeker,
-// Sentry Protocol, Worthy Prey, Self-Destruct Protocol, Three Red Dots, and the stance buttons.
+// Sentry Protocol, Worthy Prey, Self-Destruct Protocol, Three Red Dots, the stance buttons, and the login clean-up of
+// a node ultimate no node grants any more (Plasma Barrage since Plasma Frenzy took node 138407).
 
 #include "AscensionTinkerApex.h"
 
 #include "AllSpellScript.h"
+#include "AscensionCoATalentData.h"
 #include "AscensionSpecialization.h"
 #include "CellImpl.h"
 #include "Chat.h"
+#include "Containers.h"
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "CreatureScript.h"
 #include "DBCStores.h"
 #include "DataMap.h"
+#include "GlobalScript.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
+#include "Log.h"
 #include "MotionMaster.h"
+#include "MoveSpline.h"
+#include "MoveSplineInit.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "PlayerScript.h"
+#include "Random.h"
 #include "ScriptMgr.h"
 #include "Spell.h"
 #include "SpellAuraEffects.h"
@@ -53,6 +66,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -101,6 +115,7 @@ enum ApexSpells : uint32
     SPELL_SELF_DESTRUCT = 9300083,
     SPELL_SELF_DESTRUCT_BLAST = 9300084,
     SPELL_CANNON_OFFLINE = 9300085,
+    SPELL_SMART_DISC_CUT = 9300130,      // 27/10 16:00: a cut of Smart Disc (one per enemy the disc crosses)
     SPELL_RAZOR_DISC_PASS = 9300091,
     SPELL_RAZOR_DISC_RETURN = 9300092,
     SPELL_DISC_OVERCHARGE = 9300093,
@@ -110,9 +125,15 @@ enum ApexSpells : uint32
     SPELL_RED_DOTS_MARK = 9300101,
     SPELL_CHARGED_CASTER = 9300103,
     SPELL_PLASMA_SPLASH_DAMAGE = 9300107,
+    SPELL_PLASMA_BARRAGE = 9300108,      // node 138407 until 27/10, no node since: taken back at login
     SPELL_SENTRY_PROTOCOL = 9300110,
     SPELL_SENTRY_SHOT = 9300111,
     SPELL_WORTHY_PREY = 9300114,
+    // Plasma Frenzy (docs/CONCEPTION-apex-frenesie-canon.md): node 138407 since 27/10, in place of Plasma Barrage
+    SPELL_PLASMA_FRENZY = 9300116,
+    SPELL_FRENZY_SHOT_ORB = 9300117,     // three shots, same damage, three explosions (orb, ring, mushroom)
+    SPELL_FRENZY_SHOT_RING = 9300118,
+    SPELL_FRENZY_SHOT_MUSHROOM = 9300119,
 };
 
 // Numbers of the plan (docs/PLAN-apex-talents-31-60.md § 4.2).
@@ -132,9 +153,28 @@ constexpr uint32 PLASMA_SPLASH_PCT = 50;
 constexpr int32 SELF_DESTRUCT_PCT_PER_TROPHY = 25;
 constexpr int32 SELF_DESTRUCT_HEALTH_PCT = 10;
 constexpr uint32 WORTHY_PREY_PCT = 108;
-constexpr float RAZOR_DISC_RANGE = 30.0f;
-constexpr float RAZOR_DISC_HALF_WIDTH = 1.5f;        // 3 m corridor
-constexpr float RAZOR_DISC_DEFAULT_SPEED = 60.0f;
+// Plasma Frenzy: 21 ticks (250 ms over 5 s, one at the start). Damage bounds: 5 enemies a blast, 8 blasts an enemy
+// (8 x 105 = 840 at level 60, Plasma Barrage dealt 3 x 288 = 864 to its single target).
+constexpr float FRENZY_RANGE = 25.0f;
+constexpr float FRENZY_STRAY_MIN = 6.0f;
+constexpr float FRENZY_BLAST_RADIUS = 5.0f;             // radius index 8 of the shots
+constexpr int32 FRENZY_AIMED_PCT = 70;                  // with an enemy in reach; the rest are stray shots
+constexpr int32 FRENZY_MUSHROOM_PCT = 35;               // of the stray shots: the big one lands where nobody stands
+constexpr uint8 FRENZY_HITS_PER_ENEMY = 8;
+constexpr std::size_t FRENZY_ENEMIES_PER_BLAST = 5;
+constexpr uint8 FRENZY_STRAY_TRIES = 4;            // each probe is a collision check (Map::CheckCollisionAndGetValidCoords)
+constexpr float FRENZY_SHOT_RANGE = 29.0f;         // SpellRange 4 = 30 m, checked in 3D on the target's CENTRE even when triggered
+// Smart Disc and Razor Disc (27/10 16:00, sponsor): one slow disc on a straight line that cuts every enemy it
+// crosses, once per leg, through armor, absorption shields and invulnerabilities (Spell.dbc COUPE_PERCANTE and
+// AscensionApexDiscSpellInfoScript below).
+constexpr float DISC_RANGE = 35.0f;
+constexpr float DISC_HALF_WIDTH = 1.5f;              // 3 m blade path, plus the combat reach of the unit
+constexpr float DISC_DEFAULT_SPEED = 14.0f;          // Speed of 9300046 / 9300090 (VITESSE_DISQUE), read from the spell
+constexpr float DISC_HEIGHT = 1.2f;                  // above the feet of the Apex at the throw
+constexpr float DISC_VERTICAL_REACH = 5.0f;          // feet of a unit at most 5 m above or below the disc
+constexpr uint32 DISC_TICK_MS = 100;
+constexpr float DISC_CATCH_DISTANCE = 2.0f;          // Razor Disc: back in the hand
+constexpr uint32 DISC_RETURN_GRACE_MS = 4000;        // Razor Disc: a fleeing Apex is not chased for ever
 constexpr float VOICE_STOP_DISTANCE = 3.0f;
 constexpr Milliseconds VOICE_HOLD = 4s;
 constexpr Milliseconds GRAPPLE_SILENCE = 3s;
@@ -157,6 +197,7 @@ struct ApexTalentState : public DataMap::Base
     std::unordered_set<ObjectGuid> ripostes;                // Never Saw It Coming: who hit the Apex in the window
     std::unordered_map<ObjectGuid, uint32> sentryLock;      // Sentry Protocol: last shot per target
     std::unordered_map<ObjectGuid, uint32> sentrySeen;      // Sentry Protocol: first hit of a player
+    std::unordered_map<ObjectGuid, uint8> frenzyHits;       // Plasma Frenzy: blasts per enemy, emptied at each start
 };
 
 ApexTalentState& State(Player* player)
@@ -282,38 +323,355 @@ void SelfDestruct(Player* apex)
         apex->AddAura(SPELL_CANNON_OFFLINE, apex);
 }
 
-// ---- Razor Disc: everything in a 3 m corridor along the throw ----
+// ---- Plasma Frenzy: the cannon fires wildly, at enemies and at the ground ----
 
-struct Corridor
+/// True when `unit` already fights the Apex or a member of its group/raid (a neutral the group is killing counts).
+bool FightsApexSide(Player* apex, Unit* unit)
 {
-    float X, Y, Z;      // start
-    float DirX, DirY;   // unit vector
-    float Length;
-};
+    if (unit->IsInCombatWith(apex))
+        return true;
+    Unit* victim = unit->GetVictim();
+    Player* side = victim ? victim->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+    return side && apex->IsInSameRaidWith(side) && unit->IsInCombatWith(side);
+}
 
-std::vector<Unit*> UnitsInCorridor(Player* apex, Corridor const& line, ObjectGuid excluded)
+/// One tick of Plasma Frenzy: a shot at a random prey in reach (FRENZY_AIMED_PCT of the time when one is there),
+/// otherwise a stray shot at a random point of the ground between 6 and 25 m. Prey = attackable, seen, in line of
+/// sight, under its cap of blasts, and either a player (PvP rules: IsValidAttackTarget) or a creature that already
+/// fights the Apex's side (review 27/10: a hostile pack at rest is NOT shot at, the frenzy pulls nothing in a
+/// dungeon). Every other attackable unit around (a creature at rest, hostile or neutral) is spared: no shot, aimed or
+/// stray, lands within blast reach of it (the blasts hit like Plasma Splash, TARGET_UNIT_DEST_AREA_ENEMY, so only the
+/// choice of the point spares them). Critters are neither (AnyUnfriendlyUnitInObjectRangeCheck leaves them out): a
+/// stray blast may hit one. Triggered casts (TRIGGERED_FULL_MASK): no cost, no cooldown, no proc of Plasma Splash
+/// (the shots carry no family flag).
+void FirePlasmaFrenzyShot(Player* apex)
 {
+    float const scan = FRENZY_RANGE + FRENZY_BLAST_RADIUS + 2.0f;
     std::list<Unit*> around;
-    Acore::AnyUnfriendlyUnitInObjectRangeCheck check(apex, apex, line.Length + 2.0f);
+    Acore::AnyUnfriendlyUnitInObjectRangeCheck check(apex, apex, scan);
     Acore::UnitListSearcher<Acore::AnyUnfriendlyUnitInObjectRangeCheck> searcher(apex, around, check);
-    Cell::VisitObjects(apex, searcher, line.Length + 2.0f);
+    Cell::VisitObjects(apex, searcher, scan);
 
-    std::vector<Unit*> hit;
+    ApexTalentState& state = State(apex);
+    std::vector<Unit*> prey;
+    std::vector<Unit*> spared;
     for (Unit* unit : around)
     {
-        if (unit == apex || unit->GetGUID() == excluded || !unit->IsAlive() || !apex->IsValidAttackTarget(unit) ||
-            !apex->CanSeeOrDetect(unit))
+        if (unit == apex || !unit->IsAlive() || !apex->IsValidAttackTarget(unit))
             continue;
-        float const rx = unit->GetPositionX() - line.X;
-        float const ry = unit->GetPositionY() - line.Y;
-        float const along = rx * line.DirX + ry * line.DirY;
-        float const across = std::fabs(rx * line.DirY - ry * line.DirX);
-        if (along < 0.0f || along > line.Length || across > RAZOR_DISC_HALF_WIDTH + unit->GetCombatReach() ||
-            std::fabs(unit->GetPositionZ() - line.Z) > 6.0f || !apex->IsWithinLOSInMap(unit))
+        if (!unit->IsPlayer() && !FightsApexSide(apex, unit))
+        {
+            spared.push_back(unit);
             continue;
-        hit.push_back(unit);
+        }
+        if (!apex->IsWithinDist(unit, FRENZY_RANGE) || apex->GetExactDist(unit) > FRENZY_SHOT_RANGE ||
+            !apex->CanSeeOrDetect(unit) || !apex->IsWithinLOSInMap(unit))
+            continue;
+        auto const hits = state.frenzyHits.find(unit->GetGUID());
+        if (hits != state.frenzyHits.end() && hits->second >= FRENZY_HITS_PER_ENEMY)
+            continue;
+        prey.push_back(unit);
     }
-    return hit;
+    auto const nearBystander = [&spared](Position const& point)
+    {
+        return std::any_of(spared.begin(), spared.end(), [&point](Unit const* unit)
+        {
+            return unit->GetExactDist(&point) < FRENZY_BLAST_RADIUS + unit->GetCombatReach() + 1.0f;
+        });
+    };
+    prey.erase(std::remove_if(prey.begin(), prey.end(), [&nearBystander](Unit const* unit)
+    {
+        return nearBystander(unit->GetPosition());
+    }), prey.end());
+
+    uint32 const blast = urand(0, 1) ? SPELL_FRENZY_SHOT_ORB : SPELL_FRENZY_SHOT_RING;
+    if (!prey.empty() && roll_chance_i(FRENZY_AIMED_PCT))
+    {
+        Unit* target = Acore::Containers::SelectRandomContainerElement(prey);
+        apex->CastSpell(target->GetPositionX(), target->GetPositionY(), target->GetPositionZ(), blast, true);
+        return;
+    }
+    for (uint8 i = 0; i < FRENZY_STRAY_TRIES; ++i)
+    {
+        Position point = apex->GetPosition();
+        // First collision on the way (walls, slopes), ground height included; a failed probe leaves the point on the
+        // Apex, refused below.
+        apex->MovePositionToFirstCollision(point, frand(FRENZY_STRAY_MIN, FRENZY_RANGE), frand(0.0f, 2.0f * float(M_PI)));
+        if (apex->GetExactDist2d(&point) < FRENZY_STRAY_MIN * 0.5f)
+            continue;
+        if (nearBystander(point))
+            continue;
+        apex->CastSpell(point.GetPositionX(), point.GetPositionY(), point.GetPositionZ(),
+                        roll_chance_i(FRENZY_MUSHROOM_PCT) ? SPELL_FRENZY_SHOT_MUSHROOM : blast, true);
+        return;
+    }
+}
+
+// ---- Smart Disc and Razor Disc: one slow disc that cuts through everything on its line ----
+
+/// A disc in flight. Owned by the events of its Apex (Player::m_Events, run on the Apex's map thread): it dies with
+/// the player and stops on a change of map or instance, a death or a logout (the last sweep is simply not done).
+struct ApexDiscFlight
+{
+    uint32 MapId = 0;
+    uint32 InstanceId = 0;
+    float StartX = 0.0f, StartY = 0.0f, StartZ = 0.0f;
+    float DirX = 1.0f, DirY = 0.0f;
+    float Slope = 0.0f;                     // height gained per metre: the line goes through the aimed unit's chest
+    float Length = 0.0f;                    // 2D, from the hand to the end of the line (or the first wall)
+    float Speed = DISC_DEFAULT_SPEED;
+    ObjectGuid Aim;                         // the enemy aimed at: never spared
+    uint32 CutSpell = 0;
+    uint32 ReturnSpell = 0;                 // Razor Disc: the disc flies back to the hand, cutting again
+    bool Returning = false;
+    float X = 0.0f, Y = 0.0f, Z = 0.0f;     // where the disc was at the last sweep
+    uint32 LaunchMs = 0;
+    uint32 LastMs = 0;
+    uint32 MaxMs = 0;
+    std::unordered_set<ObjectGuid> HitOut;  // once per leg: an enemy is cut once on the way out, once on the way back
+    std::unordered_set<ObjectGuid> HitBack;
+};
+
+/// Height of the disc's line `along` metres from the hand.
+float DiscHeightAt(ApexDiscFlight const& flight, float along)
+{
+    return flight.StartZ + flight.Slope * along;
+}
+
+/// Plans the line of a throw: from the hand towards the aimed unit (the facing without one), through its chest
+/// height (slope bounded to 45 degrees: a target on a ledge or below a bridge is reached), DISC_RANGE long and cut
+/// short by the first wall, building or gameobject (vmaps, LOS checks of spells: trees and other M2 doodads are
+/// ignored; the terrain is not tested, the disc flies over a ridge). Returns the end of the line, where the client
+/// sends the disc.
+Position PlanDiscFlight(Player* apex, Unit* aim, ApexDiscFlight& flight)
+{
+    float const angle = aim && aim != apex ? apex->GetAngle(aim) : apex->GetOrientation();
+    flight.MapId = apex->GetMapId();
+    flight.InstanceId = apex->GetInstanceId();
+    flight.StartX = apex->GetPositionX();
+    flight.StartY = apex->GetPositionY();
+    flight.StartZ = apex->GetPositionZ() + DISC_HEIGHT;
+    flight.DirX = std::cos(angle);
+    flight.DirY = std::sin(angle);
+    flight.Aim = aim ? aim->GetGUID() : ObjectGuid::Empty;
+    flight.Slope = 0.0f;
+    if (aim && aim != apex)
+        if (float const flat = apex->GetExactDist2d(aim); flat > 1.0f)
+            flight.Slope = std::clamp((aim->GetPositionZ() + aim->GetCollisionHeight() * 0.5f - flight.StartZ) / flat,
+                                      -1.0f, 1.0f);
+    Map* map = apex->GetMap();
+    auto const clear = [&](float length)
+    {
+        return map->isInLineOfSight(flight.StartX, flight.StartY, flight.StartZ, flight.StartX + flight.DirX * length,
+                                    flight.StartY + flight.DirY * length, DiscHeightAt(flight, length),
+                                    apex->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::M2);
+    };
+    // Spell::CheckRange accepts the aimed unit a little beyond 35 m (combat reaches, leeway): the line reaches it.
+    float const reach = aim && aim != apex ? apex->GetExactDist2d(aim) + aim->GetCombatReach() : 0.0f;
+    float length = std::max(DISC_RANGE, reach);
+    if (!clear(length))
+    {
+        float open = 0.0f, blocked = length;       // 6 halvings: the wall is found to 0.7 m at most
+        for (uint8 i = 0; i < 6; ++i)
+        {
+            float const middle = (open + blocked) * 0.5f;
+            (clear(middle) ? open : blocked) = middle;
+        }
+        length = open;
+    }
+    flight.Length = std::max(length, 0.5f);
+    flight.X = flight.StartX;
+    flight.Y = flight.StartY;
+    flight.Z = flight.StartZ;
+    return Position(flight.StartX + flight.DirX * flight.Length, flight.StartY + flight.DirY * flight.Length,
+                    DiscHeightAt(flight, flight.Length), angle);
+}
+
+/// Body of a unit across the disc's path from (AX, AY) to (AX + DX, AY + DY), feet within DISC_VERTICAL_REACH of Z (the
+/// ground under the disc at the throw: disc height minus DISC_HEIGHT). Geometry only; the rules of the hit are in
+/// SweepDisc.
+struct DiscPathCheck
+{
+    float AX, AY, DX, DY, LengthSq, Z;
+
+    bool operator()(Unit* unit) const
+    {
+        if (!unit || !unit->IsAlive() || std::fabs(unit->GetPositionZ() - Z) > DISC_VERTICAL_REACH)
+            return false;
+        float const ux = unit->GetPositionX() - AX;
+        float const uy = unit->GetPositionY() - AY;
+        // Behind the start of the segment: already tested by the previous one, or behind the hand at the throw.
+        float const projected = LengthSq > 0.0f ? (ux * DX + uy * DY) / LengthSq : 0.0f;
+        if (projected < 0.0f)
+            return false;
+        float const along = std::min(projected, 1.0f);
+        float const ox = ux - DX * along;
+        float const oy = uy - DY * along;
+        float const reach = DISC_HALF_WIDTH + unit->GetCombatReach();
+        return ox * ox + oy * oy <= reach * reach;
+    }
+};
+
+/// Cuts every enemy whose body the disc crossed from (fromX, fromY) to (toX, toY), at height z, once per leg.
+/// An enemy: a unit the Apex may attack (IsValidAttackTarget: friends, neutral guards of a sanctuary, own pets,
+/// players outside PvP rules never), that it sees or detects, in line of sight of the DISC (not of the Apex). Spared:
+/// a creature at rest that is not hostile (a neutral critter or a yellow beast on the way is not pulled), unless it
+/// is the aimed unit; and a creature that no player controls under a damage immunity (scripted invulnerable phases,
+/// raid adds, event creatures stay invulnerable: the piercing is meant for players and their pets, Divine Shield,
+/// Ice Block...; review of 27/10).
+void SweepDisc(Player* apex, ApexDiscFlight const& flight, float fromX, float fromY, float toX, float toY, float z,
+               std::unordered_set<ObjectGuid>& hit, uint32 spellId)
+{
+    DiscPathCheck const check{ fromX, fromY, toX - fromX, toY - fromY,
+                               (toX - fromX) * (toX - fromX) + (toY - fromY) * (toY - fromY), z - DISC_HEIGHT };
+    float const radius = std::sqrt(check.LengthSq) * 0.5f + DISC_HALF_WIDTH + 10.0f;   // 10: widest combat reach searched
+    std::list<Unit*> around;
+    Acore::UnitListSearcher<DiscPathCheck const> searcher(apex, around, check);
+    Cell::VisitObjects((fromX + toX) * 0.5f, (fromY + toY) * 0.5f, apex->GetMap(), searcher, radius);
+
+    std::vector<ObjectGuid> cuts;
+    for (Unit* unit : around)
+    {
+        if (unit == apex || hit.count(unit->GetGUID()) || !apex->IsValidAttackTarget(unit) || !apex->CanSeeOrDetect(unit))
+            continue;
+        if (Creature* creature = unit->ToCreature())
+        {
+            if (unit->GetGUID() != flight.Aim && !creature->IsInCombat() && !creature->IsHostileTo(apex))
+                continue;
+            if (!creature->IsCharmedOwnedByPlayerOrPlayer() &&
+                creature->IsImmunedToDamageOrSchool(SPELL_SCHOOL_MASK_NORMAL))
+                continue;
+        }
+        if (!apex->GetMap()->isInLineOfSight(toX, toY, z, unit->GetPositionX(), unit->GetPositionY(),
+                                             unit->GetPositionZ() + unit->GetCollisionHeight() * 0.5f,
+                                             apex->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::M2))
+            continue;
+        hit.insert(unit->GetGUID());
+        cuts.push_back(unit->GetGUID());
+    }
+    // Cast after the walk over the grid: a cut may kill (Unit::Kill) and the next one find its target gone.
+    for (ObjectGuid const& guid : cuts)
+        if (Unit* unit = ObjectAccessor::GetUnit(*apex, guid); unit && unit->IsAlive())
+            apex->CastSpell(unit, spellId, true);
+}
+
+void ScheduleDiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> flight);
+
+/// One step of a disc: out along its line at its speed (time measured from the throw, so the cuts follow the
+/// missile the client draws), then for Razor Disc back to the hand, wherever the Apex is.
+void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
+{
+    if (!apex->IsInWorld() || !apex->IsAlive() || apex->GetMapId() != flight->MapId ||
+        apex->GetInstanceId() != flight->InstanceId)
+        return;
+    uint32 const now = getMSTime();
+    if (!flight->Returning)
+    {
+        // The client flies the missile in 3D to the destination (Spell::CalculateDelayMomentForDst): on a slope the
+        // flat progress is the flown distance divided by sqrt(1 + slope^2).
+        float const along = std::min(flight->Length, flight->Speed * float(getMSTimeDiff(flight->LaunchMs, now)) /
+                                                         1000.0f / std::sqrt(1.0f + flight->Slope * flight->Slope));
+        float const x = flight->StartX + flight->DirX * along;
+        float const y = flight->StartY + flight->DirY * along;
+        SweepDisc(apex, *flight, flight->X, flight->Y, x, y, DiscHeightAt(*flight, along), flight->HitOut,
+                  flight->CutSpell);
+        flight->X = x;
+        flight->Y = y;
+        flight->LastMs = now;
+        if (along < flight->Length)
+        {
+            ScheduleDiscTick(apex, flight);
+            return;
+        }
+        if (!flight->ReturnSpell || !sSpellMgr->GetSpellInfo(flight->ReturnSpell))
+            return;
+        flight->Returning = true;
+        flight->MaxMs = getMSTimeDiff(flight->LaunchMs, now) + uint32(flight->Length / flight->Speed * 1000.0f) +
+            DISC_RETURN_GRACE_MS;
+        ScheduleDiscTick(apex, flight);
+        return;
+    }
+    float const step = flight->Speed * float(getMSTimeDiff(flight->LastMs, now)) / 1000.0f;
+    float const dx = apex->GetPositionX() - flight->X;
+    float const dy = apex->GetPositionY() - flight->Y;
+    float const distance = std::sqrt(dx * dx + dy * dy);
+    bool const caught = distance <= step + DISC_CATCH_DISTANCE;
+    float const x = caught ? apex->GetPositionX() : flight->X + dx / distance * step;
+    float const y = caught ? apex->GetPositionY() : flight->Y + dy / distance * step;
+    SweepDisc(apex, *flight, flight->X, flight->Y, x, y, apex->GetPositionZ() + DISC_HEIGHT, flight->HitBack,
+              flight->ReturnSpell);
+    flight->X = x;
+    flight->Y = y;
+    flight->LastMs = now;
+    if (!caught && getMSTimeDiff(flight->LaunchMs, now) < flight->MaxMs)
+        ScheduleDiscTick(apex, flight);
+}
+
+void ScheduleDiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> flight)
+{
+    apex->m_Events.AddEventAtOffset([apex, flight]() { DiscTick(apex, flight); }, Milliseconds(DISC_TICK_MS));
+}
+
+/// Throws the planned disc: the first sweep runs one tick after the throw.
+void LaunchDisc(Player* apex, ApexDiscFlight const& planned, float speed, uint32 cutSpell, uint32 returnSpell)
+{
+    if (!sSpellMgr->GetSpellInfo(cutSpell))
+        return;
+    auto flight = std::make_shared<ApexDiscFlight>(planned);
+    flight->Speed = speed > 0.0f ? speed : DISC_DEFAULT_SPEED;
+    flight->CutSpell = cutSpell;
+    flight->ReturnSpell = returnSpell;
+    flight->LaunchMs = flight->LastMs = getMSTime();
+    flight->MaxMs = uint32(flight->Length * std::sqrt(1.0f + flight->Slope * flight->Slope) / flight->Speed * 1000.0f) +
+        DISC_TICK_MS;
+    ScheduleDiscTick(apex, flight);
+}
+
+// ---- Skull and Spine (27/10 16:00, sponsor: « when the creature dies, the skeleton must rise; the body is gone, only
+// the skeleton is seen ») ----
+// Creature 9300001 (exploitation/apex/apex-retours-1600-ptr.sql): display 63424 (brown), creature\orcskeleton\orcskeleton.m2,
+// the only skeleton of the client with Submerged (202) and Emerge (224, 3.7 s) sequences (measured on the extracted
+// M2; Skeleton.m2 and its variants have neither). Passive (NullCreatureAI), not selectable, immune, faction 35.
+constexpr uint32 NPC_APEX_TORN_SKELETON = 9300001;
+constexpr uint32 DISPLAY_BONE_PILE = 25537;            // SPELLS\DeathKnight_DestroyCorpse_Bones_01 (creature 28590)
+constexpr uint32 KIT_BONE_BURST = 10414;               // DeathKnight_Ghoul_Explode (effect 4282) posed in the world
+constexpr uint32 TORN_SKELETON_LIFE_MS = 45000;
+constexpr Milliseconds TORN_SKELETON_EMERGE_DELAY = 250ms;   // the client must have the creature before the emote
+constexpr Milliseconds BODY_HIDE_DELAY = 300ms;               // the burst covers the body as it goes
+
+/// A killing blow of Skull and Spine: the body bursts (bones and blood), a skeleton rises out of the ground where it
+/// lay and stands 45 s, and the body is gone. The loot is never lost: a corpse that still holds loot (or skins) stays
+/// where it is, as a pile of bones (same object, same loot rights, same decay); only a corpse with nothing left to
+/// take is removed. Kept as they are: a player's body (where the ghost comes back, what a resurrection targets), a pet
+/// or guardian (its owner's), and a dungeon or world boss (encounter scripts may still use the corpse). No skeleton for
+/// a totem or a critter.
+void TearOutSkeleton(Player* apex, Unit* victim)
+{
+    if (!victim || !victim->IsInWorld() || victim->IsAlive())
+        return;
+    Creature* body = victim->ToCreature();
+    if (body && (body->IsTotem() || body->IsCritter()))
+        return;
+    victim->SendPlaySpellVisual(KIT_BONE_BURST);
+    if (TempSummon* skeleton = apex->SummonCreature(NPC_APEX_TORN_SKELETON, victim->GetPositionX(),
+            victim->GetPositionY(), victim->GetPositionZ(), victim->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN,
+            TORN_SKELETON_LIFE_MS))
+    {
+        // Under the ground (also the template's addon emote 429, sent with the creation), then the rise (anim 224).
+        skeleton->SetEmoteState(EMOTE_STATE_SUBMERGED_NEW);
+        skeleton->m_Events.AddEventAtOffset([skeleton]()
+        {
+            skeleton->SetEmoteState(EMOTE_ONESHOT_NONE);
+            skeleton->HandleEmoteCommand(EMOTE_ONESHOT_EMERGE);
+        }, TORN_SKELETON_EMERGE_DELAY);
+    }
+    if (!body || body->IsPet() || body->IsGuardian() || body->IsCharmedOwnedByPlayerOrPlayer() ||
+        body->IsDungeonBoss() || body->isWorldBoss())
+        return;
+    if (body->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) || body->HasUnitFlag(UNIT_FLAG_SKINNABLE))
+        body->SetDisplayId(DISPLAY_BONE_PILE, body->GetObjectScale());   // Creature::Respawn gives the native model back
+    else
+        body->DespawnOrUnsummon(BODY_HIDE_DELAY);
 }
 
 // ==================================================================================================
@@ -364,7 +722,8 @@ class spell_apex_rocket_pounce : public SpellScript
     }
 };
 
-// Plasma Caster (9300012) and Plasma Barrage (9300108): no shot while the cannon is offline (Self-Destruct).
+// Plasma Caster (9300012), Plasma Barrage (9300108) and Plasma Frenzy (9300116): no shot while the cannon is offline
+// (Self-Destruct), and no Plasma Caster while Plasma Frenzy fires.
 // EXCLUDE_CASTER_AURA already holds Unmasked, and a spell has only one.
 class spell_apex_cannon_gate : public SpellScript
 {
@@ -373,7 +732,14 @@ class spell_apex_cannon_gate : public SpellScript
     SpellCastResult CheckCast()
     {
         Unit* caster = GetCaster();
-        return caster && caster->HasAura(SPELL_CANNON_OFFLINE) ? SPELL_FAILED_CASTER_AURASTATE : SPELL_CAST_OK;
+        if (!caster)
+            return SPELL_CAST_OK;
+        if (caster->HasAura(SPELL_CANNON_OFFLINE))
+            return SPELL_FAILED_CASTER_AURASTATE;
+        // Plasma Frenzy holds the cannon for its 5 s: no aimed shot meanwhile.
+        if (GetSpellInfo()->Id == SPELL_PLASMA_CASTER && caster->HasAura(SPELL_PLASMA_FRENZY))
+            return SPELL_FAILED_CASTER_AURASTATE;
+        return SPELL_CAST_OK;
     }
 
     void Register() override
@@ -400,7 +766,8 @@ class spell_apex_plasma_bolt : public SpellScript
     }
 };
 
-// Claim the Skull (138396): a killing blow of Skull and Spine gives one more Trophy and resets Rocket Pounce.
+// A killing blow of Skull and Spine tears the skeleton out (TearOutSkeleton, 27/10 16:00). Claim the Skull (138396):
+// it also gives one more Trophy and resets Rocket Pounce.
 class spell_apex_skull_and_spine : public SpellScript
 {
     PrepareSpellScript(spell_apex_skull_and_spine);
@@ -409,7 +776,10 @@ class spell_apex_skull_and_spine : public SpellScript
     {
         Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
         Unit* target = GetHitUnit();
-        if (!player || !target || target->IsAlive() || !player->HasAura(SPELL_CLAIM_THE_SKULL))
+        if (!player || !target || target->IsAlive())
+            return;
+        TearOutSkeleton(player, target);
+        if (!player->HasAura(SPELL_CLAIM_THE_SKULL))
             return;
         GrantApexTrophies(player, 1);
         player->RemoveSpellCooldown(SPELL_ROCKET_POUNCE, true);
@@ -510,13 +880,61 @@ class spell_apex_grapple_snatch : public SpellScript
     }
 };
 
-// Razor Disc (138399, replaces Smart Disc on its button): the spell itself hits and interrupts the main target.
-// The script cuts through everything else in a 3 m corridor up to 30 m along the throw (9300091, each one when
-// the disc reaches it), then brings the disc back, hitting everything in the corridor again (9300092, main target
-// included). Disc Overcharge (138400): the throw also frees the Apex (9300094).
+// Smart Disc (138379, 27/10 16:00): the throw only aims. Effect 0 (DUMMY on TARGET_DEST_TARGET_ENEMY) is moved to the
+// end of the line (PlanDiscFlight), where the client sends the spinning disc at the spell's Speed; once cast, the
+// disc cuts (9300130) every enemy it crosses, one sweep every 100 ms, each enemy once.
+class spell_apex_smart_disc : public SpellScript
+{
+    PrepareSpellScript(spell_apex_smart_disc);
+
+    ApexDiscFlight _flight;
+    bool _planned = false;
+
+    void HandleDestination(SpellDestination& dest)
+    {
+        if (Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr)
+        {
+            dest.Relocate(PlanDiscFlight(player, GetExplTargetUnit(), _flight));
+            _planned = true;
+        }
+    }
+
+    void HandleAfterCast()
+    {
+        Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        if (!player)
+            return;
+        if (!_planned)
+            PlanDiscFlight(player, GetExplTargetUnit(), _flight);
+        LaunchDisc(player, _flight, GetSpellInfo()->Speed, SPELL_SMART_DISC_CUT, 0);
+    }
+
+    void Register() override
+    {
+        OnDestinationTargetSelect += SpellDestinationTargetSelectFn(spell_apex_smart_disc::HandleDestination, EFFECT_0,
+                                                                    TARGET_DEST_TARGET_ENEMY);
+        AfterCast += SpellCastFn(spell_apex_smart_disc::HandleAfterCast);
+    }
+};
+
+// Razor Disc (138399, replaces Smart Disc on its button): the same slow disc (cuts 9300091), which interrupts the
+// aimed enemy when it reaches it (effect 1 of the spell), then flies back to the hand cutting again (9300092, each
+// enemy once more). Disc Overcharge (138400): the throw also frees the Apex (9300094).
 class spell_apex_razor_disc : public SpellScript
 {
     PrepareSpellScript(spell_apex_razor_disc);
+
+    ApexDiscFlight _flight;
+    bool _planned = false;
+
+    void HandleDestination(SpellDestination& dest)
+    {
+        if (Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr)
+        {
+            dest.Relocate(PlanDiscFlight(player, GetExplTargetUnit(), _flight));
+            _planned = true;
+        }
+    }
 
     void HandleAfterCast()
     {
@@ -525,59 +943,15 @@ class spell_apex_razor_disc : public SpellScript
             return;
         if (player->HasAura(SPELL_DISC_OVERCHARGE) && sSpellMgr->GetSpellInfo(SPELL_DISC_RELEASE))
             player->CastSpell(player, SPELL_DISC_RELEASE, true);
-
-        Unit* primary = GetExplTargetUnit();
-        float const angle = primary && primary != player ? player->GetAngle(primary) : player->GetOrientation();
-        float const speed = GetSpellInfo()->Speed > 0.0f ? GetSpellInfo()->Speed : RAZOR_DISC_DEFAULT_SPEED;
-        Corridor const line{ player->GetPositionX(), player->GetPositionY(), player->GetPositionZ(),
-                             std::cos(angle), std::sin(angle), RAZOR_DISC_RANGE };
-        ObjectGuid const primaryGuid = primary ? primary->GetGUID() : ObjectGuid::Empty;
-
-        if (sSpellMgr->GetSpellInfo(SPELL_RAZOR_DISC_PASS))
-            for (Unit* unit : UnitsInCorridor(player, line, primaryGuid))
-            {
-                float const along = (unit->GetPositionX() - line.X) * line.DirX + (unit->GetPositionY() - line.Y) * line.DirY;
-                CastAfter(player, unit->GetGUID(), SPELL_RAZOR_DISC_PASS,
-                          Milliseconds(std::max<int64>(1, int64(along / speed * 1000.0f))));
-            }
-
-        if (!sSpellMgr->GetSpellInfo(SPELL_RAZOR_DISC_RETURN))
-            return;
-        float const farX = line.X + line.DirX * line.Length;
-        float const farY = line.Y + line.DirY * line.Length;
-        float const farZ = line.Z;
-        // The disc turns at the end of its line and flies back to the hand, wherever the Apex is by then.
-        player->m_Events.AddEventAtOffset([player, farX, farY, farZ]()
-        {
-            if (!player->IsInWorld() || !player->IsAlive())
-                return;
-            float const dx = player->GetPositionX() - farX;
-            float const dy = player->GetPositionY() - farY;
-            float const length = std::sqrt(dx * dx + dy * dy);
-            if (length < 0.5f || length > RAZOR_DISC_RANGE * 2.0f)
-                return;
-            // The corridor from the far point to the hand, read from the Apex's side.
-            Corridor const back{ player->GetPositionX(), player->GetPositionY(), farZ, -dx / length, -dy / length,
-                                 length };
-            for (Unit* unit : UnitsInCorridor(player, back, ObjectGuid::Empty))
-                player->CastSpell(unit, SPELL_RAZOR_DISC_RETURN, true);
-        }, Milliseconds(int64(2.0f * RAZOR_DISC_RANGE / speed * 1000.0f)));
-    }
-
-    static void CastAfter(Player* player, ObjectGuid targetGuid, uint32 spellId, Milliseconds delay)
-    {
-        player->m_Events.AddEventAtOffset([player, targetGuid, spellId]()
-        {
-            if (!player->IsInWorld() || !player->IsAlive())
-                return;
-            Unit* target = ObjectAccessor::GetUnit(*player, targetGuid);
-            if (target && target->IsAlive() && player->IsValidAttackTarget(target))
-                player->CastSpell(target, spellId, true);
-        }, delay);
+        if (!_planned)
+            PlanDiscFlight(player, GetExplTargetUnit(), _flight);
+        LaunchDisc(player, _flight, GetSpellInfo()->Speed, SPELL_RAZOR_DISC_PASS, SPELL_RAZOR_DISC_RETURN);
     }
 
     void Register() override
     {
+        OnDestinationTargetSelect += SpellDestinationTargetSelectFn(spell_apex_razor_disc::HandleDestination, EFFECT_0,
+                                                                    TARGET_DEST_TARGET_ENEMY);
         AfterCast += SpellCastFn(spell_apex_razor_disc::HandleAfterCast);
     }
 };
@@ -647,6 +1021,81 @@ class spell_apex_plasma_splash_damage : public SpellScript
     }
 };
 
+// Plasma Frenzy (node 138407, 9300116): an aura on the Apex, PERIODIC_DUMMY every 250 ms for 5 s (one tick at the
+// start, ATTR5 0x200). Each tick fires one shot (FirePlasmaFrenzyShot). No shot while the Apex is dead, out of the
+// world, controlled, mounted, on a taxi, in a vehicle, silenced or pacified; the frenzy ends when the cannon becomes unavailable (Unmasked,
+// Cannon Offline).
+class aura_apex_plasma_frenzy : public AuraScript
+{
+    PrepareAuraScript(aura_apex_plasma_frenzy);
+
+    void HandleApply(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+    {
+        if (Player* player = GetTarget()->ToPlayer())
+            State(player).frenzyHits.clear();
+    }
+
+    void HandlePeriodic(AuraEffect const* /*aurEff*/)
+    {
+        Player* apex = GetTarget()->ToPlayer();
+        if (!apex || !apex->IsInWorld() || !apex->IsAlive())
+            return;
+        if (apex->HasAura(SPELL_UNMASKED) || apex->HasAura(SPELL_CANNON_OFFLINE))
+        {
+            // Not from inside the aura's own tick: at the Apex's next update.
+            Defer(apex, [](Player* player) { player->RemoveAurasDueToSpell(SPELL_PLASMA_FRENZY); });
+            return;
+        }
+        // A triggered cast skips these checks: the cannon holds fire while the Apex is controlled, mounted, on a taxi,
+        // in a vehicle, silenced or pacified (review 27/10).
+        if (apex->HasUnitState(UNIT_STATE_CONTROLLED) || apex->IsCharmed() || apex->IsMounted() || apex->IsInFlight() ||
+            apex->GetVehicle() || apex->HasUnitFlag(UnitFlags(UNIT_FLAG_SILENCED | UNIT_FLAG_PACIFIED)))
+            return;
+        FirePlasmaFrenzyShot(apex);
+    }
+
+    void Register() override
+    {
+        AfterEffectApply += AuraEffectApplyFn(aura_apex_plasma_frenzy::HandleApply, EFFECT_0,
+                                              SPELL_AURA_PERIODIC_DUMMY, AURA_EFFECT_HANDLE_REAL);
+        OnEffectPeriodic += AuraEffectPeriodicFn(aura_apex_plasma_frenzy::HandlePeriodic, EFFECT_0,
+                                                 SPELL_AURA_PERIODIC_DUMMY);
+    }
+};
+
+// The three shots of Plasma Frenzy (9300117-9300119): a blast hits at most 5 enemies (random ones beyond), and an enemy
+// at most 8 blasts per frenzy (counted at launch, in the caster's state). The core cuts MaxAffectedTargets AFTER this
+// hook (Spell::SelectImplicitAreaTargets), hence the data says 0 and the cut is made here, before the count.
+class spell_apex_plasma_frenzy_shot : public SpellScript
+{
+    PrepareSpellScript(spell_apex_plasma_frenzy_shot);
+
+    void FilterTargets(std::list<WorldObject*>& targets)
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        if (!apex)
+        {
+            Acore::Containers::RandomResize(targets, FRENZY_ENEMIES_PER_BLAST);
+            return;
+        }
+        ApexTalentState& state = State(apex);
+        targets.remove_if([&state](WorldObject* object)
+        {
+            auto const hits = state.frenzyHits.find(object->GetGUID());
+            return hits != state.frenzyHits.end() && hits->second >= FRENZY_HITS_PER_ENEMY;
+        });
+        Acore::Containers::RandomResize(targets, FRENZY_ENEMIES_PER_BLAST);
+        for (WorldObject* object : targets)
+            ++state.frenzyHits[object->GetGUID()];
+    }
+
+    void Register() override
+    {
+        OnObjectAreaTargetSelect += SpellObjectAreaTargetSelectFn(spell_apex_plasma_frenzy_shot::FilterTargets,
+                                                                  EFFECT_0, TARGET_UNIT_DEST_AREA_ENEMY);
+    }
+};
+
 // ==================================================================================================
 // Falconer's Eye: the hunting drone and the COAAPEX messages (contract C-ADDON of the plan)
 // ==================================================================================================
@@ -674,7 +1123,11 @@ constexpr std::size_t APEX_ADDON_MAX = 200;
 constexpr float DRONE_SCAN_RADIUS = 40.0f;
 constexpr std::size_t DRONE_MAX_TARGETS = 20;
 constexpr uint32 DRONE_PERIOD_MS = 1000;
-constexpr float DRONE_HOVER = 6.0f;
+constexpr float DRONE_HOVER = 5.0f;                  // 27/10 16:00: inspection round 5 m above the summon point
+constexpr float DRONE_ORBIT_RADIUS = 8.0f;           // around the point chosen with Falconer's Eye (its centre)
+constexpr float DRONE_ORBIT_SPEED = 4.0f;            // m/s: a round of 50 m in about 12.5 s, readable
+constexpr uint8 DRONE_ORBIT_POINTS = 24;             // 15 degrees a vertex
+constexpr float DRONE_GROUND_CLEARANCE = 2.5f;       // a vertex over a slope rises to stay 2.5 m above the ground
 
 void SendApexLines(Player* player, std::vector<std::string> const& lines)
 {
@@ -747,9 +1200,21 @@ public:
             return;
         _owner = summoner->GetGUID();
         me->SetDisableGravity(true);
-        me->GetMotionMaster()->MovePoint(POINT_DRONE_HOVER, me->GetPositionX(), me->GetPositionY(),
-                                         me->GetPositionZ() + DRONE_HOVER, FORCED_MOVEMENT_NONE, 0.0f, 0.0f, false);
+        // 27/10 16:00 (sponsor): no longer static. The drone climbs to the first vertex of its round, then circles the
+        // point of the summon for good (UpdateAI starts the cyclic spline once the climb is over). Not steerable.
+        PlanOrbit();
+        G3D::Vector3 const& first = _orbit.front();
+        me->GetMotionMaster()->MovePoint(POINT_DRONE_HOVER, first.x, first.y, first.z, FORCED_MOVEMENT_NONE, 0.0f, 0.0f,
+                                         false);
         _timer = 0;   // first salvo at once
+    }
+
+    // Starting the spline here would be undone at once: the point generator is finalized after this call and the
+    // idle generator that follows stops the unit (IdleMovementGenerator::Reset -> StopMoving). UpdateAI starts it.
+    void MovementInform(uint32 type, uint32 id) override
+    {
+        if (type == POINT_MOTION_TYPE && id == POINT_DRONE_HOVER)
+            _orbitPending = true;
     }
 
     void MoveInLineOfSight(Unit* /*who*/) override { }
@@ -762,6 +1227,7 @@ public:
     {
         if (_ended || !_owner)
             return;
+        UpdateOrbit();
         TempSummon* summon = me->ToTempSummon();
         uint32 const left = summon ? summon->GetTimer() : 0;
         if (left > diff + 100)
@@ -783,6 +1249,64 @@ public:
     }
 
 private:
+    /// The round: DRONE_ORBIT_POINTS vertices on a circle of DRONE_ORBIT_RADIUS around the summon point, DRONE_HOVER
+    /// above it, each raised to keep DRONE_GROUND_CLEARANCE over the ground below it (map height, vmaps included).
+    void PlanOrbit()
+    {
+        _orbit.clear();
+        float const cx = me->GetPositionX();
+        float const cy = me->GetPositionY();
+        float const cz = me->GetPositionZ() + DRONE_HOVER;
+        float const start = me->GetOrientation();
+        for (uint8 i = 0; i < DRONE_ORBIT_POINTS; ++i)
+        {
+            float const angle = start + 2.0f * float(M_PI) * float(i) / float(DRONE_ORBIT_POINTS);
+            float const x = cx + DRONE_ORBIT_RADIUS * std::cos(angle);
+            float const y = cy + DRONE_ORBIT_RADIUS * std::sin(angle);
+            float const ground = me->GetMapHeight(x, y, cz + 2.0f);   // from just above: never the floor upstairs
+            float const z = ground > INVALID_HEIGHT ? std::max(cz, ground + DRONE_GROUND_CLEARANCE) : cz;
+            _orbit.emplace_back(x, y, z);
+        }
+    }
+
+    /// Starts the cyclic round once the climb is over, and starts it again if anything stopped it (a knockback, a
+    /// movement generator reset): the spline is then finalized while the round should run.
+    void UpdateOrbit()
+    {
+        if (_orbit.empty())
+            return;
+        if (_orbiting && !_orbitPending && me->movespline->Finalized())
+        {
+            // Stopped (a knockback, a reset): back to the nearest vertex first, the round starts again from there.
+            // Launching the cycle from elsewhere would put that point in the server's loop for good, while the client
+            // drops the first vertex of a flying cyclic spline after one round (MovementPacketBuilder).
+            _orbiting = false;
+            _start = 0;
+            for (std::size_t i = 1; i < _orbit.size(); ++i)
+                if (me->GetExactDistSq(_orbit[i].x, _orbit[i].y, _orbit[i].z) <
+                    me->GetExactDistSq(_orbit[_start].x, _orbit[_start].y, _orbit[_start].z))
+                    _start = i;
+            G3D::Vector3 const& back = _orbit[_start];
+            me->GetMotionMaster()->MovePoint(POINT_DRONE_HOVER, back.x, back.y, back.z, FORCED_MOVEMENT_NONE, 0.0f,
+                                             0.0f, false);
+            return;
+        }
+        if (!_orbitPending)
+            return;
+        _orbitPending = false;
+        // The drone stands on vertex _start: path[0] (replaced by the current position in Launch) is that vertex.
+        Movement::PointsArray path;
+        path.reserve(_orbit.size());
+        for (std::size_t i = 0; i < _orbit.size(); ++i)
+            path.push_back(_orbit[(_start + i) % _orbit.size()]);
+        Movement::MoveSplineInit init(me);
+        init.MovebyPath(path);
+        init.SetFly();
+        init.SetCyclic();
+        init.SetVelocity(DRONE_ORBIT_SPEED);
+        _orbiting = init.Launch() > 0;
+    }
+
     Player* Owner() const
     {
         Player* owner = ObjectAccessor::GetPlayer(*me, _owner);
@@ -869,6 +1393,10 @@ private:
     bool _ended = false;
     bool _timed = false;
     std::unordered_map<ObjectGuid, uint32> _ids;
+    std::vector<G3D::Vector3> _orbit;
+    std::size_t _start = 0;                 // vertex the round starts from (the one the drone climbed or came back to)
+    bool _orbitPending = false;
+    bool _orbiting = false;
 };
 
 // ==================================================================================================
@@ -905,6 +1433,29 @@ public:
                 dots->SetMaxDuration(RED_DOTS_MS);
                 dots->SetDuration(RED_DOTS_MS);
             }
+    }
+};
+
+// Smart Disc and Razor Disc cuts (27/10 16:00): « ignores armor and every kind of shield ». Spell.dbc carries the
+// immunity piercing (ATTR0 NO_IMMUNITIES, ATTR2 NO_SCHOOL_IMMUNITIES) and the sure hit (ATTR3 ALWAYS_HIT); no DBC field
+// carries the two others, set here once the spell store is loaded (SpellMgr::LoadSpellInfoCustomAttributes calls the
+// hook for every spell, after the core's own corrections):
+//   SPELL_ATTR0_CU_IGNORE_ARMOR: Unit::IsDamageReducedByArmor returns false (CalculateSpellDamageTaken skips armor);
+//   AscensionIgnoreAbsorbAndResistance: Unit::CalcAbsorbResist returns at once (no absorb, no split, no resist), as
+//   for the Templar's Norgannon's Wrath and the Pyromancer's 802173.
+class AscensionApexDiscSpellInfoScript : public GlobalScript
+{
+public:
+    AscensionApexDiscSpellInfoScript() : GlobalScript("AscensionApexDiscSpellInfoScript",
+        { GLOBALHOOK_ON_LOAD_SPELL_CUSTOM_ATTR }) { }
+
+    void OnLoadSpellCustomAttr(SpellInfo* spellInfo) override
+    {
+        if (!spellInfo || (spellInfo->Id != SPELL_SMART_DISC_CUT && spellInfo->Id != SPELL_RAZOR_DISC_PASS &&
+                           spellInfo->Id != SPELL_RAZOR_DISC_RETURN))
+            return;
+        spellInfo->AttributesCu |= SPELL_ATTR0_CU_IGNORE_ARMOR;
+        spellInfo->AscensionIgnoreAbsorbAndResistance = true;
     }
 };
 
@@ -1071,8 +1622,35 @@ class AscensionApexTalentPlayerScript : public PlayerScript
 {
 public:
     AscensionApexTalentPlayerScript() : PlayerScript("AscensionApexTalentPlayerScript",
-        { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_CREATURE_KILL,
+        { PLAYERHOOK_ON_LOGIN, PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_PVP_KILL, PLAYERHOOK_ON_CREATURE_KILL,
           PLAYERHOOK_CAN_PLAYER_USE_PRIVATE_CHAT }) { }
+
+    // A node ultimate held for good that no node of the loaded CharacterAdvancement.dbc grants any more goes: Plasma
+    // Barrage since Plasma Frenzy took node 138407 (27/10), and Plasma Frenzy itself if a later DBC drops it. The
+    // talent state is read from the spellbook (AscensionCoATalentState::KnownRank): an orphan would stay castable
+    // and cost nothing. Never on an empty catalog (a DBC that failed to load would take everything back).
+    void OnPlayerLogin(Player* player) override
+    {
+        if (!player || player->getClass() != CLASS_TINKER || AscensionCompatData::CoATalentEntries.empty())
+            return;
+        for (uint32 const spellId : { uint32(SPELL_PLASMA_BARRAGE), uint32(SPELL_PLASMA_FRENZY) })
+        {
+            auto const owned = player->GetSpellMap().find(spellId);
+            if (owned == player->GetSpellMap().end() || !owned->second ||
+                owned->second->State == PLAYERSPELL_REMOVED || owned->second->State == PLAYERSPELL_TEMPORARY)
+                continue;
+            bool const granted = std::any_of(AscensionCompatData::CoATalentEntries.begin(),
+                AscensionCompatData::CoATalentEntries.end(), [spellId](AscensionCompatData::CoATalentEntry const& entry)
+                {
+                    return entry.ClassId == CLASS_TINKER &&
+                        std::find(entry.SpellIds.begin(), entry.SpellIds.end(), spellId) != entry.SpellIds.end();
+                });
+            if (granted)
+                continue;
+            player->removeSpell(spellId, SPEC_MASK_ALL, false);
+            LOG_INFO("module.ascension_compat", "Apex: {} lost {}, granted by no node any more", player->GetName(), spellId);
+        }
+    }
 
     // Danger Seeker: once a second, the crit buff follows the enemies at melee contact that attack the Apex.
     void OnPlayerUpdate(Player* player, uint32 diff) override
@@ -1240,12 +1818,16 @@ void AddAscensionTinkerApexTalentScripts()
     RegisterSpellScript(aura_apex_trophy_hunter);
     RegisterSpellScript(spell_apex_mimicked_voice);
     RegisterSpellScript(spell_apex_grapple_snatch);
+    RegisterSpellScript(spell_apex_smart_disc);
     RegisterSpellScript(spell_apex_razor_disc);
     RegisterSpellScript(aura_apex_patient_ambush);
     RegisterSpellScript(aura_apex_plasma_splash);
     RegisterSpellScript(spell_apex_plasma_splash_damage);
+    RegisterSpellScript(aura_apex_plasma_frenzy);
+    RegisterSpellScript(spell_apex_plasma_frenzy_shot);
     RegisterCreatureAI(npc_apex_hunting_drone);
     new AscensionApexTalentSpellScript();
+    new AscensionApexDiscSpellInfoScript();
     new AscensionApexTalentUnitScript();
     new AscensionApexTalentPlayerScript();
 }
