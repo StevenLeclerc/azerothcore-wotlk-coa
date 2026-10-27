@@ -126,6 +126,7 @@ void AddSC_AscensionTemplarTemporaryLibramProcs();
 void AddAscensionTinkerAugmentationScripts();
 void AddAscensionTinkerAugmentationTalentScripts();
 void AddAscensionTinkerHackingScripts();
+void AddAscensionTinkerApexTalentScripts();   // Tinker Apex (PTR) : boutons par posture, talents 31-60
 void AddSC_AscensionPrimalistEarthshaping();
 void AddSC_AscensionVenomancerCatalyst();
 void AddSC_AscensionPrimalistSpiritBeast();
@@ -294,6 +295,7 @@ void Addmod_ascension_compatScripts()
     AddAscensionTinkerAugmentationScripts();
     AddAscensionTinkerAugmentationTalentScripts();
     AddAscensionTinkerHackingScripts();
+    AddAscensionTinkerApexTalentScripts();
     AddSC_AscensionPrimalistEarthshaping();
     AddAscensionRunemasterGlyphScripts();
     AddSC_AscensionVenomancerCatalyst();

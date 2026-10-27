@@ -9,6 +9,7 @@
 #include "AscensionCultist.h"
 #include "AscensionVenomancer.h"
 #include "AscensionTinker.h"
+#include "AscensionTinkerApex.h"
 #include "AscensionSunCleric.h"
 #include "AllCreatureScript.h"
 #include "AllGameObjectScript.h"
@@ -248,7 +249,10 @@ constexpr uint8 TINKER_APEX_EXCLUSION_LEVEL = 10;
 // them today, but their effect masks name the family-34 bits given to the Apex spells (mot 0 0x40000, mot 2
 // 0x200000, mot 0 0x800; sortie-apex/talents30/proposition.md § 1). Should one come back in a tree, an Apex
 // may not learn it (SetTalentRank, ApexMayNotHold) and loses it (ReconcileTinkerApex).
-constexpr std::array<uint32, 34> TINKER_APEX_EXCLUDED_SPELLS =
+// Four more orphans (27/10, R4 of sortie-apex/talents60/plan.json): 705800, 706713, 806615 and 806632 aim at the
+// family-34 bits given to the new RAFALE (mot 1 0x20, Wristblade Flurry only) and ESTOC (mot 1 0x40, Spear Thrust
+// only) groups; no node, spell or item gives them (measured by the plan).
+constexpr std::array<uint32, 38> TINKER_APEX_EXCLUDED_SPELLS =
 {
     75,      // Auto Shot: the ranged slot holds the combistick, thrown by Combistick Throw, never auto-fired
     107,     // Block: no shield (9116 is closed below)
@@ -268,7 +272,9 @@ constexpr std::array<uint32, 34> TINKER_APEX_EXCLUDED_SPELLS =
     653236,  // Explosive Augmentation (gun)
     653242,  // Magic Augmentation (gun)
     680315,  // Greater Power Module (level 60)
+    705800,  // Medical Training (orphan): aims at mot 1 0x40, the ESTOC group (Spear Thrust)
     706699,  // Speedy Setup (orphan): SPELLMOD_COOLDOWN -15 s on mot 0 0x800, the BOND group (Rocket Pounce)
+    706713,  // Tactical Reload (orphan): aims at mot 1 0x20, the RAFALE group (Wristblade Flurry)
     706742,  // Power Module
     801707,  // Repair Shot
     801718,  // Deploy Blast Mine (Remote Detonation 801798 follows it, AscensionTinker.cpp)
@@ -282,6 +288,8 @@ constexpr std::array<uint32, 34> TINKER_APEX_EXCLUDED_SPELLS =
     803665,  // Greater Mana Module (level 58)
     805351,  // Spanner Smash
     806157,  // Freeze Ray
+    806615,  // Junkyard Bruiser (orphan): aims at mot 1 0x40, the ESTOC group
+    806632,  // Junkyard Bruiser (orphan): aims at mot 1 0x40, the ESTOC group
     807197,  // Discombobulate!
     807846,  // Control Mechanical
 };
@@ -883,6 +891,8 @@ public:
 
     learned += SynchronizeTaughtAbilities(player);
     learned += SynchronizeTalentReplacements(player);
+    // Not counted in `learned`: the stance targets are unannounced temporary spells, never "restored".
+    SynchronizeApexStanceAttacks(player);
     RemoveAscensionPrimalistWeapons(player);
     SynchronizeAscensionRunemasterEchoes(player, GetActiveSpecialization(player));
 
@@ -932,6 +942,38 @@ public:
             player->removeSpell(spellId, SPEC_MASK_ALL, false);
             ++removed;
           }
+      }
+
+      // Stance buttons (docs/CONCEPTION-apex-attaques-par-posture.md): Spear Stance, Shredding Whirl, Spear
+      // Thrust and Pinning Strike are only shown in the slot of their original now, as temporary spells
+      // (SynchronizeApexStanceAttacks). A copy held for good (PTR characters that bought the four retired nodes
+      // 138355-138357, 138359) would put them twice in the spellbook (P-144): it goes, unless a node of the loaded
+      // CharacterAdvancement.dbc still grants it (C++ installed before the data: nothing to take back yet).
+      // Removing Spear Stance this way also drops its aura once (Player::removeSpell -> RemoveOwnedAura).
+      for (AscensionTinkerApex::StancePair const& pair : AscensionTinkerApex::STANCE_PAIRS)
+      {
+        auto const owned = player->GetSpellMap().find(pair.Target);
+        if (owned == player->GetSpellMap().end() || !owned->second ||
+            owned->second->State == PLAYERSPELL_TEMPORARY || owned->second->State == PLAYERSPELL_REMOVED)
+          continue;
+        bool const stillGranted = std::any_of(AscensionCompatData::CoATalentEntries.begin(),
+            AscensionCompatData::CoATalentEntries.end(), [player, &pair](auto const& entry)
+            {
+              return entry.ClassId == player->getClass() &&
+                     std::find(entry.SpellIds.begin(), entry.SpellIds.end(), pair.Target) != entry.SpellIds.end();
+            });
+        if (stillGranted)
+          continue;
+        player->removeSpell(pair.Target, SPEC_MASK_ALL, false);
+        ++removed;
+      }
+
+      // Razor Disc (R5) is never held without Smart Disc, whose button it takes over.
+      if (player->HasSpell(AscensionTinkerApex::SPELL_RAZOR_DISC_TALENT) &&
+          !player->HasSpell(AscensionTinkerApex::SPELL_SMART_DISC))
+      {
+        player->removeSpell(AscensionTinkerApex::SPELL_RAZOR_DISC_TALENT, SPEC_MASK_ALL, false);
+        ++removed;
       }
       return removed;
     }
@@ -1907,6 +1949,15 @@ public:
       return false;
     }
 
+    // Razor Disc replaces Smart Disc on its button (R5): the server reads RequiredIDs only for free nodes.
+    // A known-entries upload applies its additions in entry order, Smart Disc (138379) before Razor Disc (138399).
+    if (rank > 0 && entryId == AscensionTinkerApex::ENTRY_RAZOR_DISC &&
+        !player->HasSpell(AscensionTinkerApex::SPELL_SMART_DISC))
+    {
+      error = Acore::StringFormat("Talent entry {} requires Smart Disc.", entryId);
+      return false;
+    }
+
     uint32 const freeChoiceGroup = GetSelectableFreeGroup(entryId);
     bool const automaticallyGranted = entry.AECost == 0 && entry.TECost == 0 && !freeChoiceGroup;
     if (automaticallyGranted && rank != 0 && rank != entry.SpellCount)
@@ -2125,6 +2176,23 @@ public:
       bool const barred = entry && (uploadApex ? ApexMayNotHold(*entry)
                                                : OutsideApexMayNotHold(player, *entry, uploadSpecialization));
       itr = barred ? wanted.erase(itr) : std::next(itr);
+    }
+    // Razor Disc without Smart Disc leaves the set like a barred node (R5), instead of failing the whole upload
+    // after validation in SetTalentRank. The upload is the whole set: a paid Smart Disc (138379, class tab) it
+    // leaves out is REMOVED by it, unless the progression pass hands it back (same rule as the pricing below);
+    // only a Smart Disc the upload cannot touch is read from the spellbook. Read after the barred pass.
+    if (auto const razor = wanted.find(AscensionTinkerApex::ENTRY_RAZOR_DISC); razor != wanted.end() && razor->second)
+    {
+      bool keepsSmartDisc = player->HasSpell(AscensionTinkerApex::SPELL_SMART_DISC);
+      if (AscensionCompatData::CoATalentEntry const* smart = FindTalentEntry(AscensionTinkerApex::ENTRY_SMART_DISC);
+          smart && (smart->AECost || smart->TECost || GetSelectableFreeGroup(smart->EntryId)))
+      {
+        auto const smartDisc = wanted.find(AscensionTinkerApex::ENTRY_SMART_DISC);
+        keepsSmartDisc = std::max(smartDisc == wanted.end() ? 0u : uint32(smartDisc->second),
+                                  PersistentRank(player, *smart)) > 0;
+      }
+      if (!keepsSmartDisc)
+        wanted.erase(razor);
     }
 
     // Price the state the upload leads to: its own ranks, and for every other paid entry the rank the
@@ -6239,7 +6307,8 @@ public:
         killed->GetCharmerOrOwnerPlayerOrPlayerItself() == killer || !ApexTrophyFilterActive() ||
         !WorthyPrey(killed) || !killer->isHonorOrXPTarget(killed))
       return;
-    killer->CastSpell(killer, SPELL_APEX_TROPHIES, true);
+    // One owner for the cap (5, or 6/7 with Trophy Rack) and the Trophy Rack heal: AscensionTinkerApexTalents.cpp.
+    GrantApexTrophies(killer, 1);
   }
 
   void OnPlayerPVPKill(Player* killer, Player* killed) override { Reward(killer, killed); }
@@ -6459,6 +6528,12 @@ public:
         AscensionClassService::Instance().AffectsTalentReplacements(spellId))
       AscensionClassService::Instance().SynchronizeTalentReplacements(player);
 
+    // Only the ORIGINALS of the stance pairs: learning a target (from inside the synchronization) must not
+    // call it again (learn/forget recursion).
+    if (ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) &&
+        AscensionTinkerApex::IsStanceOriginal(spellId))
+      SynchronizeApexStanceAttacks(player);
+
     if (ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED) &&
         AscensionClassService::Instance().AffectsProficiencies(spellId))
@@ -6488,6 +6563,11 @@ public:
       AscensionClassService::Instance().SynchronizeTalentReplacements(player);
     }
 
+    // Originals only, as in OnPlayerLearnSpell (the synchronization removes targets itself).
+    if (ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED) &&
+        AscensionTinkerApex::IsStanceOriginal(spellId))
+      SynchronizeApexStanceAttacks(player);
+
     if (ascensionCompatConfig.GetConfigValue<bool>(
             AscensionCompatConfig::ENABLED) &&
         AscensionClassService::Instance().AffectsProficiencies(spellId))
@@ -6502,6 +6582,7 @@ public:
                 AscensionClassService::Instance().GetActiveSpecialization(player));
             AscensionClassService::Instance().SynchronizeTaughtAbilities(player);
             AscensionClassService::Instance().SynchronizeTalentReplacements(player);
+            SynchronizeApexStanceAttacks(player);
             RemoveAscensionPrimalistWeapons(player);
         }
     }
@@ -7591,6 +7672,16 @@ public:
     {
         if (!player || !action || !ascensionCompatConfig.GetConfigValue<bool>(AscensionCompatConfig::ENABLED))
             return;
+        // Tinker Apex stance pairs: a button saved on a target (Spear Thrust, Pinning Strike, Shredding Whirl or
+        // Spear Stance, separate spells until 27/10) goes back to its original, whose slot shows the target in
+        // the stance. Before the "owned for good" rule below: the old permanent copies go (ReconcileTinkerApex).
+        if (player->getClass() == CLASS_TINKER)
+            if (uint32 const original = AscensionTinkerApex::StanceOriginalOf(action);
+                original && player->HasActiveSpell(original))
+            {
+                action = original;
+                return;
+            }
         // A target the player owns for good (not the temporary replacement copy) stays on its button.
         auto const& spells = player->GetSpellMap();
         if (auto owned = spells.find(action); owned != spells.end() && owned->second &&

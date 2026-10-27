@@ -35,7 +35,7 @@ struct TalentReplacement
 // compares it to sSpellMgr->GetFirstSpellInChain(id). Ranks must be declared by
 // ascending RequiredLevel: the loop keeps the LAST qualifying entry, not the
 // highest one.
-inline constexpr std::array<TalentReplacement, 17> TalentReplacements =
+inline constexpr std::array<TalentReplacement, 18> TalentReplacements =
 {{
     // Warbringer: every rank of Spell.dbc, at its SpellLevel (802581@8, 802582@18 .. 802586@52;
     // rank 1 keeps gate 0 as before). These ranks are in no acore_world.spell_ranks chain and not in
@@ -111,7 +111,12 @@ inline constexpr std::array<TalentReplacement, 17> TalentReplacements =
     // and Shieldgore read to summon. Direct casts of 804883 (bots, scripts) are refused in
     // AscensionXorothAbilities.cpp's OnSpellCheckCast while this replacement is shown. Spec 17 DEFIANCE
     // (talent node 34085). 804883 is a single-rank root (no spell_ranks chain).
-    { 17, 17, 706755, 804883, {{ { 707666, 0 } }} }  // Call: Hellfire Imp -> Impcaller
+    { 17, 17, 706755, 804883, {{ { 707666, 0 } }} }, // Call: Hellfire Imp -> Impcaller
+    // Tinker Apex (spec 102, PTR, R5 of sortie-apex/talents60/plan.json): the Razor Disc node (138399) teaches the
+    // marker 9300089; Smart Disc's button (9300046, single rank, no spell_ranks chain) then shows Razor Disc 9300090.
+    // The node requires Smart Disc (SetTalentRank, known-entries upload) and ReconcileTinkerApex takes the marker
+    // back if Smart Disc is lost.
+    { 28, 102, 9300089, 9300046, {{ { 9300090, 0 } }} }  // Smart Disc -> Razor Disc
 }};
 
 // Rank 1 of the replacement chain a spell belongs to, or the spell itself.
