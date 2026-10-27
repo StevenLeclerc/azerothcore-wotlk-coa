@@ -34,12 +34,13 @@ struct StancePair
 constexpr uint32 SPELL_WRISTBLADE_STANCE = 9300001;
 constexpr uint32 SPELL_SPEAR_STANCE = 9300002;
 
-constexpr std::array<StancePair, 4> STANCE_PAIRS =
+// Both stances are base abilities from level 10 (free nodes 138352 and 138356), each on its own button: no
+// stance button pair (D4 dropped on 27/10).
+constexpr std::array<StancePair, 3> STANCE_PAIRS =
 {{
     { 9300003, 9300008, SPELL_SPEAR_STANCE, 10 },      // key 1: Wristblade Flurry / Spear Thrust
     { 9300006, 9300010, SPELL_SPEAR_STANCE, 14 },      // key 2: Rending Claws / Pinning Strike
     { 9300009, 9300007, SPELL_WRISTBLADE_STANCE, 16 }, // key 3: Spear Throw / Shredding Whirl
-    { SPELL_WRISTBLADE_STANCE, SPELL_SPEAR_STANCE, SPELL_WRISTBLADE_STANCE, 10 }, // the stance button
 }};
 
 /// An original of STANCE_PAIRS (a spell whose learn or loss changes the buttons).

@@ -946,12 +946,12 @@ public:
           }
       }
 
-      // Stance buttons (docs/CONCEPTION-apex-attaques-par-posture.md): Spear Stance, Shredding Whirl, Spear
-      // Thrust and Pinning Strike are only shown in the slot of their original now, as temporary spells
-      // (SynchronizeApexStanceAttacks). A copy held for good (PTR characters that bought the four retired nodes
-      // 138355-138357, 138359) would put them twice in the spellbook (P-144): it goes, unless a node of the loaded
-      // CharacterAdvancement.dbc still grants it (C++ installed before the data: nothing to take back yet).
-      // Removing Spear Stance this way also drops its aura once (Player::removeSpell -> RemoveOwnedAura).
+      // Stance buttons (docs/CONCEPTION-apex-attaques-par-posture.md): Shredding Whirl, Spear Thrust and Pinning
+      // Strike are only shown in the slot of their original now, as temporary spells (SynchronizeApexStanceAttacks).
+      // A copy held for good (PTR characters that bought the retired nodes 138355, 138357, 138359) would put them
+      // twice in the spellbook (P-144): it goes, unless a node of the loaded CharacterAdvancement.dbc still grants
+      // it (C++ installed before the data: nothing to take back yet). Spear Stance is no target any more: its free
+      // node 138356 is back (27/10).
       for (AscensionTinkerApex::StancePair const& pair : AscensionTinkerApex::STANCE_PAIRS)
       {
         auto const owned = player->GetSpellMap().find(pair.Target);
