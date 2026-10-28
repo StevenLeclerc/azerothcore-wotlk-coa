@@ -43,6 +43,27 @@ constexpr std::array<StancePair, 3> STANCE_PAIRS =
     { 9300009, 9300007, SPELL_WRISTBLADE_STANCE, 16 }, // key 3: Spear Throw / Shredding Whirl
 }};
 
+// Support trunk (28/10, docs/apex-tronc-revue/talents.json v3): the three buffs of the Apex are learned for free by level,
+// like the buffs of every other class, and never through a node (a free node of the class tab would go to the three
+// other Tinker specializations too). Single target 10/14/20, Greater 56/58/60. Reserved to an Apex of level 10 or more;
+// taken back outside Apex (SynchronizeProgression, AscensionCompat.cpp). One buff per Apex on a target: spell_group
+// 2128001-2128004 (exploitation/apex/apex-tronc-soutien-ptr.sql).
+struct ApexBuff
+{
+    uint8 Level;
+    uint32 SpellId;
+};
+
+constexpr std::array<ApexBuff, 6> APEX_BUFFS =
+{{
+    { 10, 9300140 },   // Acid Mark: critical strike chance
+    { 14, 9300142 },   // Elder's Gift: attack and casting speed
+    { 20, 9300144 },   // Cooling Bloom: maximum health and healing received
+    { 56, 9300141 },   // Greater Acid Mark
+    { 58, 9300143 },   // Greater Elder's Gift
+    { 60, 9300145 },   // Greater Cooling Bloom
+}};
+
 /// An original of STANCE_PAIRS (a spell whose learn or loss changes the buttons).
 constexpr bool IsStanceOriginal(uint32 spellId)
 {
