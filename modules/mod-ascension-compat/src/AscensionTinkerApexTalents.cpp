@@ -8,7 +8,7 @@
 //   9300011 spell_apex_rocket_pounce          Canopy Drop
 //   9300012, 9300108, 9300116 spell_apex_cannon_gate   Cannon Offline refuses the cannon (and Plasma Frenzy holds it)
 //   9300013 spell_apex_plasma_bolt            Patient Ambush: the shot spends Charged Caster
-//   9300018 spell_apex_skull_and_spine        Claim the Skull; the killed one's skeleton rises (27/10 16:00)
+//   9300018 spell_apex_skull_and_spine        Claim the Skull; the killed one's body becomes its bones (28/10)
 //   9300036 aura_apex_trophy_hunter           Trophy Hunter v1, through GrantApexTrophies (cap of Trophy Rack)
 //   9300055 spell_apex_mimicked_voice         creatures walk to the voice
 //   9300062 spell_apex_grapple_snatch         the pack stays silent 3 s
@@ -41,6 +41,7 @@
 #include "CreatureScript.h"
 #include "DBCStores.h"
 #include "DataMap.h"
+#include "DatabaseEnv.h"
 #include "GlobalScript.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
@@ -122,6 +123,7 @@ enum ApexSpells : uint32
     SPELL_DISC_RETURN_MISSILE = 9300131, // 27/10 evening: the disc seen flying back to the hand (DUMMY, no effect)
     SPELL_DRONE_REVEAL = 9300132,        // 27/10 evening: Falconer's Eye spotted a hidden enemy (MOD_STALKED, 3 s)
     SPELL_CAMOUFLAGE_MEND = 9300133,     // 27/10 evening: Optical Camouflage mends the Apex (HEAL_PCT, set here)
+    SPELL_SKULL_TROPHY = 9300134,        // 28/10: the torn skull and spine in the Apex's hand (hidden dummy aura, 3 s)
     SPELL_RAZOR_DISC_PASS = 9300091,
     SPELL_RAZOR_DISC_RETURN = 9300092,
     SPELL_DISC_OVERCHARGE = 9300093,
@@ -720,24 +722,187 @@ void LaunchDisc(Player* apex, ApexDiscFlight const& planned, float speed, uint32
     ScheduleDiscTick(apex, flight);
 }
 
-// ---- Skull and Spine (27/10 16:00, sponsor: « when the creature dies, the skeleton must rise; the body is gone, only
-// the skeleton is seen ») ----
-// Creature 9300001 (exploitation/apex/apex-retours-1600-ptr.sql): display 63424 (brown), creature\orcskeleton\orcskeleton.m2,
-// the only skeleton of the client with Submerged (202) and Emerge (224, 3.7 s) sequences (measured on the extracted
-// M2; Skeleton.m2 and its variants have neither). Passive (NullCreatureAI), not selectable, immune, faction 35.
-constexpr uint32 NPC_APEX_TORN_SKELETON = 9300001;
-constexpr uint32 DISPLAY_BONE_PILE = 25537;            // SPELLS\DeathKnight_DestroyCorpse_Bones_01 (creature 28590)
-constexpr uint32 KIT_BONE_BURST = 10414;               // DeathKnight_Ghoul_Explode (effect 4282) posed in the world
-constexpr uint32 TORN_SKELETON_LIFE_MS = 45000;
-constexpr Milliseconds TORN_SKELETON_EMERGE_DELAY = 250ms;   // the client must have the creature before the emote
-constexpr Milliseconds BODY_HIDE_DELAY = 300ms;               // the burst covers the body as it goes
+// ---- Skull and Spine (28/10, docs/ETUDE-apex-skull-spine-animation.md § 5-6: « the body becomes its bones ») ----
+// The killed one's body bursts (flesh and a spray of bones, no animation forced), and 0.3 s later, inside the burst,
+// the body itself takes the display of a lying skeleton of its kind, scaled to its size. One object: the loot, the
+// skinning, the « Dead » tooltip and the normal decay stay the body's. Creature::Respawn gives the native model and
+// scale back (Creature.cpp:2097-2105, skipped while a transform aura is on: hence no bones on a transformed body).
+// The lying skeletons are doodad M2s given a CreatureDisplayInfo (CDI = CMD = same id, CDI scale 1.0) by the Apex client
+// patch; Length = length of the lying skeleton along the M2's X axis, in m (sortie-apex/etude-skull-spine/
+// deathskeletons.json, § 5 R3; sortie-apex/gisants/gisants.json may correct them: tune here).
+struct ApexBoneBed
+{
+    uint32 Display;
+    float Length;
+};
 
-/// A killing blow of Skull and Spine: the body bursts (bones and blood), a skeleton rises out of the ground where it
-/// lay and stands 45 s, and the body is gone. The loot is never lost: a corpse that still holds loot (or skins) stays
-/// where it is, as a pile of bones (same object, same loot rights, same decay); only a corpse with nothing left to
-/// take is removed. Kept as they are: a player's body (where the ghost comes back, what a resurrection targets), a pet
-/// or guardian (its owner's), and a dungeon or world boss (encounter scripts may still use the corpse). No skeleton for
-/// a totem or a critter.
+constexpr ApexBoneBed BONE_BEDS_UPRIGHT[] =   // humanoid, undead, demon, giant: chosen by the prey's HEIGHT
+{
+    { 9300001, 1.13f },   // Gnome M
+    { 9300002, 1.31f },   // Goblin M
+    { 9300003, 1.85f },   // Dwarf M
+    { 9300004, 2.25f },   // Human M
+    { 9300005, 2.43f },   // Orc M
+    { 9300006, 2.66f },   // Tauren M
+    { 9300007, 5.06f },   // Vrykul M
+};
+constexpr ApexBoneBed BONE_BED_COW = { 9300008, 5.69f };       // BlastedLandsBlastedCow: a stocky quadruped
+constexpr ApexBoneBed BONE_BED_MULE = { 9300009, 5.82f };      // BlastedLandsBlastedMule: a slender quadruped
+constexpr ApexBoneBed BONE_BED_REPTILE = { 9300010, 5.77f };   // DragonFootSoldierBones: tail, reptile or dragonkin
+constexpr uint32 BONE_BED_FIRST = 9300001;
+constexpr uint32 BONE_BED_LAST = 9300010;
+
+constexpr uint32 KIT_FLESH_BURST = 11644;   // Ghoul_Explode (effect 4282), AnimID -1: the body is not stood up
+constexpr uint32 KIT_BONE_SPRAY = 11245;    // WorldEffect 4260 DeathKnight_CorpseExplosion (x2), StartAnim/Anim -1
+constexpr Milliseconds BONE_BED_DELAY = 300ms;    // the bones come in the burst's cloud
+constexpr Milliseconds BARE_BODY_LIFE = 45s;      // a body with nothing to loot nor skin: its bones lie 45 s
+constexpr float BONE_BED_MIN_SCALE = 0.35f;
+constexpr float BONE_BED_MAX_SCALE = 3.0f;
+// Fallback when the display is not in coa_apex_display_taille: UNIT_FIELD_COMBATREACH (model's combat_reach x object
+// scale, Creature::SetDisplayId) times this. Combat reach is 1.5 for most humanoid and beast models, for about 2 m
+// of height or length; the bounding radius is a half width, the wrong axis. [S] a rough rule, bounded by the clamp.
+constexpr float SIZE_PER_COMBAT_REACH = 1.3f;
+
+struct ApexPreySize
+{
+    float Length;
+    float Height;
+};
+
+/// coa_apex_display_taille (world database), by display id: written once at startup (AscensionApexSkullSpineWorldScript,
+/// before any map updates), only read afterwards from the map threads.
+std::unordered_map<uint32, ApexPreySize> ApexPreySizes;
+
+void LoadApexPreySizes()
+{
+    ApexPreySizes.clear();
+    if (!WorldDatabase.Query("SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND "
+                             "TABLE_NAME = 'coa_apex_display_taille'"))
+    {
+        LOG_INFO("module", "apex skull and spine: no table coa_apex_display_taille, sizes from the combat reach");
+        return;
+    }
+    uint32 rejected = 0;
+    if (QueryResult result = WorldDatabase.Query("SELECT display_id, longueur, hauteur FROM coa_apex_display_taille"))
+    {
+        do
+        {
+            Field* fields = result->Fetch();
+            float const length = fields[1].Get<float>();
+            float const height = fields[2].Get<float>();
+            if (!std::isfinite(length) || !std::isfinite(height) || length < 0.0f || height < 0.0f)
+            {
+                ++rejected;
+                continue;
+            }
+            ApexPreySizes[fields[0].Get<uint32>()] = { length, height };
+        } while (result->NextRow());
+    }
+    LOG_INFO("module", "apex skull and spine: {} display sizes loaded, {} rejected", ApexPreySizes.size(), rejected);
+}
+
+/// Creature types with a skeleton (CreatureType, SharedDefines.h). None: elemental, critter, mechanical, not specified,
+/// totem, non-combat pet, gas cloud; their body only bursts.
+bool HasSkeleton(uint32 creatureType)
+{
+    switch (creatureType)
+    {
+        case CREATURE_TYPE_BEAST:
+        case CREATURE_TYPE_DRAGONKIN:
+        case CREATURE_TYPE_DEMON:
+        case CREATURE_TYPE_GIANT:
+        case CREATURE_TYPE_UNDEAD:
+        case CREATURE_TYPE_HUMANOID:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// The lying skeleton of a creature's kind, nullptr for none. `upright`: the prey's size is its height (else its length).
+ApexBoneBed const* ChooseBoneBed(Creature const* body, bool& upright)
+{
+    upright = false;
+    uint32 const type = body->GetCreatureType();
+    if (!HasSkeleton(type))
+        return nullptr;
+    if (type == CREATURE_TYPE_DRAGONKIN)
+        return &BONE_BED_REPTILE;
+    if (type != CREATURE_TYPE_BEAST)
+    {
+        upright = true;
+        return nullptr;   // the caller picks by height among BONE_BEDS_UPRIGHT
+    }
+    switch (body->GetCreatureTemplate()->family)
+    {
+        case CREATURE_FAMILY_CROCOLISK:
+        case CREATURE_FAMILY_RAPTOR:
+        case CREATURE_FAMILY_TURTLE:
+        case CREATURE_FAMILY_WIND_SERPENT:
+        case CREATURE_FAMILY_DRAGONHAWK:
+        case CREATURE_FAMILY_SERPENT:
+        case CREATURE_FAMILY_CHIMAERA:
+        case CREATURE_FAMILY_DEVILSAUR:
+        case CREATURE_FAMILY_WORM:
+            return &BONE_BED_REPTILE;
+        case CREATURE_FAMILY_WOLF:
+        case CREATURE_FAMILY_CAT:
+        case CREATURE_FAMILY_TALLSTRIDER:
+        case CREATURE_FAMILY_HYENA:
+        case CREATURE_FAMILY_SPIRIT_BEAST:
+            return &BONE_BED_MULE;
+        default:
+            return &BONE_BED_COW;   // bear, boar, spider, insects, no family...
+    }
+}
+
+/// The prey's size in m: the table's value for its NATIVE display (the CDI's own scale included) times the object
+/// scale (OBJECT_FIELD_SCALE_X = creature_template_model.DisplayScale, Creature::InitEntry; the client multiplies
+/// both). Fallback: the combat reach, which carries the object scale already.
+float PreySize(Creature const* body, bool upright)
+{
+    if (auto itr = ApexPreySizes.find(body->GetNativeDisplayId()); itr != ApexPreySizes.end())
+    {
+        float const size = (upright ? itr->second.Height : itr->second.Length) * body->GetObjectScale();
+        if (std::isfinite(size) && size > 0.0f)
+            return size;
+    }
+    return body->GetCombatReach() * SIZE_PER_COMBAT_REACH;
+}
+
+/// 0.3 s after the burst: the body becomes its bones. Run from the map's events, so neither the Apex nor the body need
+/// to exist any more: the body is looked up again, and left alone if it is gone, alive again (respawned: same GUID),
+/// no longer a corpse, or no longer shows the display it died with (already bones, a script or an aura changed it).
+void LayBoneBed(Map* map, ObjectGuid bodyGuid, uint32 deathDisplay)
+{
+    Creature* body = map->GetCreature(bodyGuid);
+    if (!body || !body->IsInWorld() || body->getDeathState() != DeathState::Corpse ||
+        body->GetDisplayId() != deathDisplay || !body->GetAuraEffectsByType(SPELL_AURA_TRANSFORM).empty())
+        return;
+    bool upright = false;
+    ApexBoneBed const* bed = ChooseBoneBed(body, upright);
+    if (!bed && !upright)
+        return;
+    float const size = PreySize(body, upright);
+    if (!bed)
+    {
+        bed = &BONE_BEDS_UPRIGHT[0];
+        for (ApexBoneBed const& candidate : BONE_BEDS_UPRIGHT)
+            if (std::fabs(candidate.Length - size) < std::fabs(bed->Length - size))
+                bed = &candidate;
+    }
+    float scale = size / bed->Length;
+    if (!std::isfinite(scale))
+        scale = 1.0f;
+    body->SetDisplayId(bed->Display, std::clamp(scale, BONE_BED_MIN_SCALE, BONE_BED_MAX_SCALE));
+    if (!body->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) && !body->HasUnitFlag(UNIT_FLAG_SKINNABLE))
+        body->DespawnOrUnsummon(BARE_BODY_LIFE);
+}
+
+/// A killing blow of Skull and Spine: the body bursts at once; 0.3 s later it lies as its skeleton, and the Apex holds
+/// the torn skull and spine (9300134, 3 s, hidden dummy aura carrying the visual). Kept as they are, burst only: a
+/// player's body (where the ghost comes back, what a resurrection targets), a pet or guardian (its owner's), and a
+/// dungeon or world boss (encounter scripts may still use the corpse). Nothing for a totem or a critter.
 void TearOutSkeleton(Player* apex, Unit* victim)
 {
     if (!victim || !victim->IsInWorld() || victim->IsAlive())
@@ -745,27 +910,37 @@ void TearOutSkeleton(Player* apex, Unit* victim)
     Creature* body = victim->ToCreature();
     if (body && (body->IsTotem() || body->IsCritter()))
         return;
-    victim->SendPlaySpellVisual(KIT_BONE_BURST);
-    if (TempSummon* skeleton = apex->SummonCreature(NPC_APEX_TORN_SKELETON, victim->GetPositionX(),
-            victim->GetPositionY(), victim->GetPositionZ(), victim->GetOrientation(), TEMPSUMMON_TIMED_DESPAWN,
-            TORN_SKELETON_LIFE_MS))
-    {
-        // Under the ground (also the template's addon emote 429, sent with the creation), then the rise (anim 224).
-        skeleton->SetEmoteState(EMOTE_STATE_SUBMERGED_NEW);
-        skeleton->m_Events.AddEventAtOffset([skeleton]()
-        {
-            skeleton->SetEmoteState(EMOTE_ONESHOT_NONE);
-            skeleton->HandleEmoteCommand(EMOTE_ONESHOT_EMERGE);
-        }, TORN_SKELETON_EMERGE_DELAY);
-    }
-    if (!body || body->IsPet() || body->IsGuardian() || body->IsCharmedOwnedByPlayerOrPlayer() ||
-        body->IsDungeonBoss() || body->isWorldBoss())
+    uint32 const deathDisplay = victim->GetDisplayId();
+    if (deathDisplay >= BONE_BED_FIRST && deathDisplay <= BONE_BED_LAST)
+        return;   // already its bones (a second Skull and Spine on the same body)
+    victim->SendPlaySpellVisual(KIT_FLESH_BURST);
+    victim->SendPlaySpellVisual(KIT_BONE_SPRAY);
+    bool const trophy = HasSkeleton(victim->GetCreatureType());
+    bool const bones = body && !(body->IsPet() || body->IsGuardian() || body->IsCharmedOwnedByPlayerOrPlayer() ||
+                                 body->IsDungeonBoss() || body->isWorldBoss());
+    if (!trophy && !bones)
         return;
-    if (body->HasDynamicFlag(UNIT_DYNFLAG_LOOTABLE) || body->HasUnitFlag(UNIT_FLAG_SKINNABLE))
-        body->SetDisplayId(DISPLAY_BONE_PILE, body->GetObjectScale());   // Creature::Respawn gives the native model back
-    else
-        body->DespawnOrUnsummon(BODY_HIDE_DELAY);
+    Map* map = victim->GetMap();
+    map->Events.AddEventAtOffset([map, apexGuid = apex->GetGUID(), bodyGuid = victim->GetGUID(), deathDisplay, trophy,
+                                  bones]()
+    {
+        if (trophy)
+            if (Player* hunter = ObjectAccessor::GetPlayer(map, apexGuid);
+                hunter && hunter->IsAlive() && sSpellMgr->GetSpellInfo(SPELL_SKULL_TROPHY))
+                hunter->CastSpell(hunter, SPELL_SKULL_TROPHY, true);
+        if (bones)
+            LayBoneBed(map, bodyGuid, deathDisplay);
+    }, BONE_BED_DELAY);
 }
+
+/// Loads coa_apex_display_taille once, after the world database is up and before the maps update.
+class AscensionApexSkullSpineWorldScript : public WorldScript
+{
+public:
+    AscensionApexSkullSpineWorldScript() : WorldScript("AscensionApexSkullSpineWorldScript", { WORLDHOOK_ON_STARTUP }) { }
+
+    void OnStartup() override { LoadApexPreySizes(); }
+};
 
 // ==================================================================================================
 // Spell and aura scripts
@@ -859,7 +1034,7 @@ class spell_apex_plasma_bolt : public SpellScript
     }
 };
 
-// A killing blow of Skull and Spine tears the skeleton out (TearOutSkeleton, 27/10 16:00). Claim the Skull (138396):
+// A killing blow of Skull and Spine tears the skeleton out (TearOutSkeleton, 28/10). Claim the Skull (138396):
 // it also gives one more Trophy and resets Rocket Pounce.
 class spell_apex_skull_and_spine : public SpellScript
 {
@@ -2112,4 +2287,5 @@ void AddAscensionTinkerApexTalentScripts()
     new AscensionApexDiscSpellInfoScript();
     new AscensionApexTalentUnitScript();
     new AscensionApexTalentPlayerScript();
+    new AscensionApexSkullSpineWorldScript();
 }
