@@ -307,9 +307,13 @@ constexpr std::array<uint32, 29> TINKER_APEX_EXCLUDED_CLASS_ENTRIES =
 // 138379 Smart Disc, 138380 Constricting Net, 138381 Medicomp. The other Tinker specializations (49, 50, 51) and
 // an Apex below level 10 may not buy them and lose them; the class-tab record keeps them for the next Apex visit
 // (StoreBuilds). Ids absent from the DBC are inert: FindTalentEntry finds nothing.
-constexpr std::array<uint32, 8> TINKER_APEX_ONLY_CLASS_ENTRIES =
+// Support trunk (28/10, docs/apex-tronc-revue/talents.json v3): 19 more, 138411-138429, on the excluded slots of rows
+// 4-9 and three empty slots (0,3), (8,3), (8,7) (outils/apex-spe-dbc.py NOEUDS_TRONC).
+constexpr std::array<uint32, 27> TINKER_APEX_ONLY_CLASS_ENTRIES =
 {
     138374, 138375, 138376, 138377, 138378, 138379, 138380, 138381,
+    138411, 138412, 138413, 138414, 138415, 138416, 138417, 138418, 138419, 138420,
+    138421, 138422, 138423, 138424, 138425, 138426, 138427, 138428, 138429,
 };
 // Trophy Hunter (free Apex node 138349, level 20) and its stacking aura. v1 is data: 9300036 procs on every kill
 // that yields experience or honor. v2 (AscensionApexTrophyScript) grants a trophy only for a player, a bot, an
@@ -820,6 +824,9 @@ public:
       removed += ReconcileTinkerApex(player);
     else if (player->getClass() == CLASS_TINKER)
       removed += ReconcileTinkerOutsideApex(player, activeSpec);
+    // Not counted in `learned`/`removed`: the Apex buffs are announced by learnSpell itself, never « restored ».
+    if (player->getClass() == CLASS_TINKER)
+      SynchronizeTinkerApexBuffs(player, apex, activeSpec);
     // Trophies outlive the node that grants them only until death; leaving Apex (or losing the node) ends them.
     if (player->getClass() == CLASS_TINKER && !player->HasSpell(SPELL_APEX_TROPHY_HUNTER))
       player->RemoveAurasDueToSpell(SPELL_APEX_TROPHIES);
@@ -978,6 +985,32 @@ public:
       return removed;
     }
 
+    /// Support trunk (28/10): the three Apex buffs and their Greater versions (AscensionTinkerApex::APEX_BUFFS) are
+    /// learned at their level by an Apex of level 10 or more, and taken back from any other Tinker. Same caution as
+    /// ReconcileTinkerOutsideApex: an empty specialization map falls back on the stored setting, and an Apex found there
+    /// keeps them. A buff whose spell is missing from the loaded Spell.dbc is neither learned nor kept.
+    void SynchronizeTinkerApexBuffs(Player* player, bool apex, uint32 specializationId)
+    {
+      if (!apex && !specializationId &&
+          IsTinkerApex(player, player->GetPlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0).value))
+        return;
+      for (AscensionTinkerApex::ApexBuff const& buff : AscensionTinkerApex::APEX_BUFFS)
+      {
+        bool const wanted = apex && player->GetLevel() >= buff.Level && sSpellMgr->GetSpellInfo(buff.SpellId);
+        if (wanted && !player->HasSpell(buff.SpellId))
+        {
+          player->learnSpell(buff.SpellId, false);
+          LOG_INFO("module.ascension_compat", "Apex: {} learned buff {} (level {})", player->GetName(), buff.SpellId,
+                   uint32(player->GetLevel()));
+        }
+        else if (!wanted && player->HasSpell(buff.SpellId))
+        {
+          player->removeSpell(buff.SpellId, SPEC_MASK_ALL, false);
+          LOG_INFO("module.ascension_compat", "Apex: {} lost buff {} (outside Apex)", player->GetName(), buff.SpellId);
+        }
+      }
+    }
+
     /// Mirror of ReconcileTinkerApex for the other Tinker specializations (and an Apex below level 10): takes
     /// back the class-tab nodes reserved to Apex. A spec switch already removed them (every talent spell goes)
     /// and SetTalentRank refuses them, so this only meets a character that holds one otherwise (level lowered,
@@ -989,7 +1022,8 @@ public:
       if (!specializationId && IsTinkerApex(player, player->GetPlayerSetting(ASCENSION_ACTIVE_SPEC_SETTING, 0).value))
         return 0;
 
-      // Eight lookups first: nearly every call holds none, and LivePicks walks the whole catalog.
+      // A lookup per reserved node first (27 since the support trunk): nearly every call holds none, and LivePicks
+      // walks the whole catalog.
       std::vector<AscensionCompatData::CoATalentEntry const*> held;
       for (uint32 const entryId : TINKER_APEX_ONLY_CLASS_ENTRIES)
         if (AscensionCompatData::CoATalentEntry const* entry = FindTalentEntry(entryId))

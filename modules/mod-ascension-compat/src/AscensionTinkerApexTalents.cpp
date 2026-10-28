@@ -43,6 +43,8 @@
 #include "DataMap.h"
 #include "DatabaseEnv.h"
 #include "GlobalScript.h"
+#include "Group.h"
+#include "GroupReference.h"
 #include "GridNotifiers.h"
 #include "GridNotifiersImpl.h"
 #include "Log.h"
@@ -224,6 +226,21 @@ ApexTalentState& State(Player* player)
     return *player->CustomData.GetDefault<ApexTalentState>("coa.apex.talents");
 }
 
+/// Support trunk (28/10, end of this file): a shot of the shoulder cannon fired by the Apex himself (Heat Purge).
+void ApexSupportShotFired(Player* apex, uint32 spellId);
+/// Support trunk, Blood Feud: Plasma Caster at the killer of a marked ally fires without aiming.
+void ApexBloodFeudAim(Player* apex, Unit* target);
+/// Cut the Chains (9300168, own 90 s cooldown, NO category: a category cooldown of another shot would overwrite it,
+/// Player::_AddSpellCooldown replaces the entry): it uses the cannon, so the shots of the cannon's category go on its
+/// cooldown, laid here by hand.
+void ApexCannonCooldownFromCut(Player* apex);
+constexpr uint32 SPELL_CUT_THE_CHAINS_SHOT = 9300168;
+/// Plasma Caster and the three aimed support shots (Cautery Round, Guardian Lock, Plasma Lattice): held by Plasma Frenzy.
+constexpr bool ApexAimedShot(uint32 spellId)
+{
+    return spellId == 9300012 || spellId == 9300146 || spellId == 9300152 || spellId == 9300156;
+}
+
 /// Drops the entries older than `ttl`; called before an insert, the maps stay a handful of entries long.
 void Prune(std::unordered_map<ObjectGuid, uint32>& stamps, uint32 now, uint32 ttl)
 {
@@ -257,13 +274,14 @@ bool IsWorthyPrey(Unit const* unit)
     return creature->isElite() || creature->GetCreatureTemplate()->rank == CREATURE_ELITE_RARE;
 }
 
-/// True when the Apex already fights someone other than `newcomer` (or the newcomer's master).
-bool EngagedWithAnother(Player* apex, Unit* newcomer)
+/// True when `defender` (the Apex, or since the support trunk an ally of his Chosen Clan) already fights someone other
+/// than `newcomer` (or the newcomer's master).
+bool EngagedWithAnother(Unit* defender, Unit* newcomer)
 {
     ObjectGuid const self = newcomer->GetGUID();
     ObjectGuid const master = newcomer->GetCharmerOrOwnerGUID();
     auto other = [&](ObjectGuid const& guid) { return guid != self && (!master || guid != master); };
-    CombatManager const& combat = apex->GetCombatManager();
+    CombatManager const& combat = defender->GetCombatManager();
     for (auto const& [guid, ref] : combat.GetPvECombatRefs())
         if (other(guid))
             return true;
@@ -303,10 +321,14 @@ void TryArcDischarge(Player* apex)
 
 // ---- Sentry Protocol ----
 
-void TrySentry(Player* apex, Unit* newcomer)
+/// `defended` = the unit the newcomer joins the fight against: the Apex himself, or (support trunk, Chosen Clan) an ally
+/// of his clan. One lock per target for both.
+void TrySentry(Player* apex, Unit* newcomer, Unit* defended = nullptr)
 {
-    if (!apex->IsAlive() || !newcomer->IsAlive() || !apex->HasAura(SPELL_SENTRY_PROTOCOL) ||
-        !EngagedWithAnother(apex, newcomer) || !sSpellMgr->GetSpellInfo(SPELL_SENTRY_SHOT))
+    if (!defended)
+        defended = apex;
+    if (!apex->IsAlive() || !newcomer->IsAlive() || !defended->IsAlive() || !apex->HasAura(SPELL_SENTRY_PROTOCOL) ||
+        !EngagedWithAnother(defended, newcomer) || !sSpellMgr->GetSpellInfo(SPELL_SENTRY_SHOT))
         return;
     ApexTalentState& state = State(apex);
     uint32 const now = getMSTime();
@@ -991,9 +1013,11 @@ class spell_apex_rocket_pounce : public SpellScript
     }
 };
 
-// Plasma Caster (9300012), Plasma Barrage (9300108) and Plasma Frenzy (9300116): no shot while the cannon is offline
-// (Self-Destruct), and no Plasma Caster while Plasma Frenzy fires.
-// EXCLUDE_CASTER_AURA already holds Unmasked, and a spell has only one.
+// Plasma Caster (9300012), Plasma Barrage (9300108) and Plasma Frenzy (9300116), and since 28/10 the shots of the
+// support trunk on an ally (Cautery Round 9300146, Guardian Lock 9300152, Plasma Lattice 9300156, Cut the Chains
+// 9300168): no shot while the cannon is offline (Self-Destruct), and no other shot while Plasma Frenzy fires.
+// EXCLUDE_CASTER_AURA already holds Unmasked, and a spell has only one. After a shot the Apex fires himself, the count
+// of Heat Purge (ApexSupportShotFired).
 class spell_apex_cannon_gate : public SpellScript
 {
     PrepareSpellScript(spell_apex_cannon_gate);
@@ -1005,15 +1029,32 @@ class spell_apex_cannon_gate : public SpellScript
             return SPELL_CAST_OK;
         if (caster->HasAura(SPELL_CANNON_OFFLINE))
             return SPELL_FAILED_CASTER_AURASTATE;
-        // Plasma Frenzy holds the cannon for its 5 s: no aimed shot meanwhile.
-        if (GetSpellInfo()->Id == SPELL_PLASMA_CASTER && caster->HasAura(SPELL_PLASMA_FRENZY))
+        // Plasma Frenzy holds the cannon for its 5 s: no AIMED shot meanwhile (Plasma Caster, as before the support
+        // trunk, and the three aimed support shots). Plasma Barrage and Cut the Chains stay usable.
+        if (ApexAimedShot(GetSpellInfo()->Id) && caster->HasAura(SPELL_PLASMA_FRENZY))
             return SPELL_FAILED_CASTER_AURASTATE;
+        // Runs after the core's range, line of sight and caster aura checks (Spell::CheckCast): a refused shot lays nothing.
+        // Only the check of a cast being prepared, never a probe (bots call Spell::CheckCast on spells they do not cast).
+        if (GetSpellInfo()->Id == SPELL_PLASMA_CASTER && GetSpell()->getState() == SPELL_STATE_PREPARING)
+            if (Player* player = caster->ToPlayer())
+                ApexBloodFeudAim(player, GetExplTargetUnit());
         return SPELL_CAST_OK;
+    }
+
+    void HandleAfterCast()
+    {
+        if (Player* player = GetCaster() ? GetCaster()->ToPlayer() : nullptr)
+        {
+            ApexSupportShotFired(player, GetSpellInfo()->Id);
+            if (GetSpellInfo()->Id == SPELL_CUT_THE_CHAINS_SHOT)
+                ApexCannonCooldownFromCut(player);
+        }
     }
 
     void Register() override
     {
         OnCheckCast += SpellCheckCastFn(spell_apex_cannon_gate::CheckCast);
+        AfterCast += SpellCastFn(spell_apex_cannon_gate::HandleAfterCast);
     }
 };
 
@@ -2199,6 +2240,1258 @@ int32 TrophyRackHealPct(Player const* player)
         return 3;
     return 0;
 }
+
+// ==================================================================================================
+// Support trunk of the Tinker class tab (28/10/2026, PTR): three buffs and 19 nodes of the class tab reserved to Apex
+// (138411-138429). Design: docs/apex-tronc-revue/talents.json v3, docs/CONCEPTION-apex-tronc-commun-support.md § 4-5,
+// 10-11; ids: sortie-apex/tronc-commun/RAPPORT-fabrication.md; data: outils/apex-spe-dbc.py (CLES_TRONC).
+// ==================================================================================================
+//
+// Script names (exploitation/apex/apex-tronc-soutien-ptr.sql):
+//   9300146, 9300152, 9300156, 9300168 spell_apex_cannon_gate + spell_apex_support_cast   the cannon's support shots
+//   9300148, 9300149 spell_apex_support_cast           Field Medicomp (Runt's Oath)
+//   9300147 spell_apex_cautery_round                   the heal of Cautery Round
+//   9300148, 9300149 aura_apex_field_medicomp          the heal of Field Medicomp (share of the ally's maximum health)
+//   9300157, 9300167 aura_apex_plasma_lattice          the lattice (amount, burst when it breaks)
+//   9300177 spell_apex_gifted_trophy                   Gifted Trophy
+//   9300178 spell_apex_strapped_ally, aura_apex_strapped_ally   Strapped Ally
+//   9300181 spell_apex_chosen_clan                     Chosen Clan
+// Without a script name (hooks below): Scent of the Clan, Coolant Round, Guardian Lock's ripostes, Runt's Oath,
+// Recognize Strength, Kalisk Graft, the return of a gifted Trophy, Ursa's Stand, Blood Feud, Sentry Protocol for the
+// Chosen Clan, Heat Purge (counted by spell_apex_cannon_gate).
+//
+// « Marked » ally (talents.json, Acid Mark): carries one of the Apex's six buffs (single or Greater) or his Chosen Clan
+// aura. The buffs and the clan aura persist through death (SPELL_ATTR3_ALLOW_AURA_WHILE_DEAD): Blood Feud reads them
+// on the dead ally. Only an Apex on the ally's map counts (ObjectAccessor::GetPlayer by map): every hook below runs on
+// that map's thread, so the Apex's state (CustomData) is never touched from another thread.
+
+enum ApexSupportSpells : uint32
+{
+    SPELL_ACID_MARK = 9300140,
+    SPELL_ACID_MARK_GREATER = 9300141,
+    SPELL_ELDERS_GIFT = 9300142,
+    SPELL_ELDERS_GIFT_GREATER = 9300143,
+    SPELL_COOLING_BLOOM = 9300144,
+    SPELL_COOLING_BLOOM_GREATER = 9300145,
+    SPELL_CAUTERY_ROUND = 9300146,
+    SPELL_CAUTERY_HEAL = 9300147,
+    SPELL_FIELD_MEDICOMP_1 = 9300148,
+    SPELL_FIELD_MEDICOMP_2 = 9300149,
+    SPELL_SCENT_1 = 9300150,
+    SPELL_SCENT_2 = 9300151,
+    SPELL_GUARDIAN_LOCK = 9300152,
+    SPELL_GUARDED = 9300153,
+    SPELL_GUARD_RIPOSTE = 9300154,
+    SPELL_GUARD_RIPOSTE_STUN = 9300155,
+    SPELL_PLASMA_LATTICE = 9300156,
+    SPELL_LATTICE_SHIELD = 9300157,
+    SPELL_LATTICE_BURST = 9300158,
+    SPELL_COOLANT_1 = 9300159,
+    SPELL_COOLANT_2 = 9300160,
+    SPELL_COOLED = 9300161,
+    SPELL_TRIAGE_READOUT = 9300162,
+    SPELL_HEAT_PURGE = 9300163,
+    SPELL_HEAT_PURGE_HEAL = 9300164,
+    SPELL_SPOTTERS_SWEEP = 9300165,
+    SPELL_SPOTTER_HEAL = 9300166,
+    SPELL_SPOTTER_SHIELD = 9300167,
+    SPELL_CUT_THE_CHAINS = 9300168,
+    SPELL_RUNTS_OATH_1 = 9300169,
+    SPELL_RUNTS_OATH_2 = 9300170,
+    SPELL_RUNTS_OATH_READY = 9300171,
+    SPELL_LOCKED_SHOT = 9300172,
+    SPELL_RECOGNIZE_STRENGTH = 9300173,
+    SPELL_RESPECT = 9300174,
+    SPELL_KALISK_GRAFT = 9300175,
+    SPELL_KALISK_REGROWTH = 9300176,
+    SPELL_GIFTED_TROPHY = 9300177,
+    SPELL_STRAPPED_ALLY = 9300178,
+    SPELL_CHOSEN_CLAN = 9300181,
+    SPELL_URSAS_STAND = 9300182,
+    SPELL_URSA_SHIELD = 9300183,
+    SPELL_BLOOD_FEUD = 9300184,
+    SPELL_BLOOD_FEUD_MARK = 9300185,
+};
+
+// Numbers of talents.json v3 (values validated on 28/10; the hit point orders of magnitude are supposed, not measured).
+constexpr int32 CAUTERY_MAX_HEALTH_PCT = 8;            // of the APEX's maximum health
+constexpr int32 CAUTERY_ATTACK_POWER_PCT = 40;
+constexpr int32 LATTICE_MAX_HEALTH_PCT = 12;
+constexpr int32 LATTICE_ATTACK_POWER_PCT = 60;
+constexpr int32 LATTICE_BURST_PCT = 30;                // of what the lattice absorbed
+constexpr int32 TRIAGE_BONUS_PCT = 25;
+constexpr float TRIAGE_HEALTH_PCT = 40.0f;
+constexpr int32 CLAN_BONUS_PCT = 15;
+constexpr std::size_t CLAN_SIZE = 2;
+constexpr int32 SPOTTER_POWER_PCT = 40;
+constexpr float SPOTTER_RANGE = 20.0f;
+constexpr uint8 HEAT_PURGE_SHOTS = 3;
+constexpr float GUARD_RANGE = 40.0f;                   // from the Apex to the striking enemy
+constexpr uint32 GUARD_PER_ATTACKER_MS = 3000;
+constexpr uint32 GUARD_GLOBAL_MS = 1000;
+constexpr uint8 GUARD_MAX_RIPOSTES = 15;
+constexpr float OATH_RANGE = 30.0f;
+constexpr int32 OATH_HEALTH_PCT = 30;
+constexpr uint32 OATH_ALLY_LOCK_MS = 20000;
+constexpr uint32 OATH_WINDOW_MS = 10000;               // the aura 9300171 lasts as long (duration index 1)
+constexpr uint32 OATH_SCAN_MS = 250;
+constexpr uint32 OATH_ARM_MS = 2000;                   // a check of the cast older than this is stale
+constexpr int32 OATH_BONUS_PCT_1 = 25;
+constexpr int32 OATH_BONUS_PCT_2 = 50;
+constexpr int32 SCENT_PCT_1 = 10;                      // markers 9300150/9300151 (misc 10/20)
+constexpr int32 SCENT_PCT_2 = 20;
+constexpr int32 COOLANT_PCT_1 = 15;                    // markers 9300159/9300160 (misc 15/30)
+constexpr int32 COOLANT_PCT_2 = 30;
+constexpr float RECOGNIZE_RANGE = 40.0f;
+constexpr uint32 RESPECT_LOCK_MS = 30000;
+constexpr int32 KALISK_THRESHOLD_PCT = 8;              // of the ally's maximum health, per blow
+constexpr int32 KALISK_RETURN_PCT = 40;
+constexpr int32 KALISK_TICKS = 4;                      // 9300176: 4 s, one tick a second
+constexpr float STRAP_RANGE = 10.0f;
+constexpr uint32 STRAP_CHECK_MS = 1000;
+constexpr float SENTRY_SHOT_RANGE = 29.0f;             // SpellRange 4 = 30 m, checked in 3D even when triggered
+constexpr int32 STRAP_ARMOR_PCT = 30;
+constexpr int32 STRAP_DAMAGE_TAKEN_PCT = -10;
+constexpr float URSA_RANGE = 15.0f;
+constexpr int32 URSA_MAX_HEALTH_PCT = 15;
+constexpr uint32 BLOOD_FEUD_DAMAGE_PCT = 125;
+constexpr uint32 BLOOD_FEUD_MS = 60000;                // the mark 9300185 lasts as long (duration index 3)
+constexpr uint32 BLOOD_FEUD_RAISE_COOLDOWN_MS = 600000;
+constexpr int32 BLOOD_FEUD_RAISE_PCT = 20;
+constexpr uint32 KIT_BLOOD_FEUD_RISE = 3455844;          // SpellVisualKit of the visuals chantier (releve_impact), client only
+constexpr uint32 BLOOD_FEUD_RISE_MARK_MS = 300000;      // the offer is answered within this, or forgotten
+constexpr uint64 SCENT_MECHANICS = (uint64(1) << MECHANIC_STUN) | (uint64(1) << MECHANIC_FEAR) |
+                                   (uint64(1) << MECHANIC_ROOT) | (uint64(1) << MECHANIC_SNARE);
+
+/// Per-Apex state of the support trunk, in the character's own CustomData (one map thread per player).
+struct ApexSupportState : public DataMap::Base
+{
+    uint8 heatShots = 0;                                    // Heat Purge: shots fired since the last purge
+    // Guardian Lock: one guarded ally at a time (SPELL_ATTR5_LIMIT_N on 9300153)
+    ObjectGuid guarded;
+    uint8 ripostes = 0;
+    uint32 lastRiposteAt = 0;
+    bool riposted = false;
+    std::unordered_map<ObjectGuid, uint32> riposteByAttacker;
+    std::unordered_set<ObjectGuid> riposteStunned;
+    // Runt's Oath: the ally whose next Cautery Round or Field Medicomp is empowered
+    ObjectGuid oathAlly;
+    uint32 oathAt = 0;
+    uint32 oathScanTimer = 0;
+    std::unordered_map<ObjectGuid, uint32> oathLock;
+    bool oathArmed = false;                                 // the empowered cast passed its check
+    uint32 oathSpell = 0;
+    uint32 oathArmedAt = 0;
+    std::unordered_map<uint32, uint32> oathCooldowns;       // spell -> ms left when the cast was checked
+    // Recognize Strength
+    std::unordered_map<ObjectGuid, uint32> respectLock;
+    // Strapped Ally: the ally strapped to the Apex, checked from the Apex's side every second
+    ObjectGuid strapped;
+    uint32 strapTimer = 0;
+    // Chosen Clan: the allies chosen during this session (others are found in the group)
+    std::vector<ObjectGuid> clan;
+    // Blood Feud: killer -> (fallen ally, when)
+    std::unordered_map<ObjectGuid, std::pair<ObjectGuid, uint32>> feuds;
+    bool raisedOnce = false;
+    uint32 lastRaiseAt = 0;
+};
+
+ApexSupportState& Support(Player* player)
+{
+    return *player->CustomData.GetDefault<ApexSupportState>("coa.apex.soutien");
+}
+
+/// On the fallen ALLY: the Apex who offered it to rise (Blood Feud), to show the rise when it accepts.
+struct ApexRiseOffer : public DataMap::Base
+{
+    ObjectGuid apex;
+    uint32 at = 0;
+};
+
+bool IsApexBuff(uint32 spellId)
+{
+    return std::any_of(APEX_BUFFS.begin(), APEX_BUFFS.end(), [spellId](ApexBuff const& buff)
+    {
+        return buff.SpellId == spellId;
+    });
+}
+
+/// Calls fn(member) for every member of the player's group or raid on his map, the player included (alone: himself).
+template <typename Fn>
+void ForEachGroupMember(Player* player, Fn&& fn)
+{
+    Group* group = player->GetGroup();
+    if (!group)
+    {
+        fn(player);
+        return;
+    }
+    std::vector<Player*> members;
+    for (GroupReference* ref = group->GetFirstMember(); ref; ref = ref->next())
+        if (Player* member = ref->GetSource())
+            if (member->IsInWorld() && member->GetMap() == player->GetMap())
+                members.push_back(member);
+    for (Player* member : members)
+        fn(member);
+}
+
+/// The Apexes of `ally`'s map that marked it (one of their buffs, or their Chosen Clan) and hold `talent` (0: any).
+std::vector<Player*> MarkingApexes(Unit* ally, uint32 talent)
+{
+    std::vector<ObjectGuid> casters;
+    for (auto const& [spellId, application] : ally->GetAppliedAuras())
+        if ((IsApexBuff(spellId) || spellId == SPELL_CHOSEN_CLAN) && application && application->GetBase())
+        {
+            ObjectGuid const caster = application->GetBase()->GetCasterGUID();
+            if (std::find(casters.begin(), casters.end(), caster) == casters.end())
+                casters.push_back(caster);
+        }
+    std::vector<Player*> apexes;
+    for (ObjectGuid const& guid : casters)
+        if (Player* apex = ObjectAccessor::GetPlayer(*ally, guid))
+            if (IsTinker(apex) && (!talent || apex->HasAura(talent)))
+                apexes.push_back(apex);
+    return apexes;
+}
+
+bool InChosenClan(Player* apex, Unit* ally)
+{
+    return ally && ally->GetAura(SPELL_CHOSEN_CLAN, apex->GetGUID());
+}
+
+/// Cautery Round and Plasma Lattice: a share of the APEX's maximum health and attack power, then Triage Readout
+/// (+25% below 40% health) and Chosen Clan (+15%). 64-bit until the clamp.
+int32 SupportShotPower(Player* apex, Unit* ally, int32 maxHealthPct, int32 attackPowerPct)
+{
+    int64 amount = int64(apex->CountPctFromMaxHealth(maxHealthPct)) +
+        int64(apex->GetTotalAttackPowerValue(BASE_ATTACK) * float(attackPowerPct) / 100.0f);
+    if (apex->HasAura(SPELL_TRIAGE_READOUT) && ally->GetHealthPct() < TRIAGE_HEALTH_PCT)
+        amount = amount * (100 + TRIAGE_BONUS_PCT) / 100;
+    if (InChosenClan(apex, ally))
+        amount = amount * (100 + CLAN_BONUS_PCT) / 100;
+    return int32(std::clamp<int64>(amount, 1, std::numeric_limits<int32>::max()));
+}
+
+/// Spotter's Sweep: the most injured member of the Apex's group within 20 m of `center`; neither `center` nor the Apex
+/// (never on oneself, like every support shot).
+Player* MostInjuredNear(Player* apex, Unit* center)
+{
+    Player* best = nullptr;
+    ForEachGroupMember(apex, [&](Player* member)
+    {
+        if (member == center || member == apex || !member->IsAlive() || member->GetHealthPct() >= 100.0f ||
+            !member->IsWithinDist(center, SPOTTER_RANGE))
+            return;
+        if (!best || member->GetHealthPct() < best->GetHealthPct())
+            best = member;
+    });
+    return best;
+}
+
+/// A triggered cast of the Apex on an ally at his next update (out of the hook that found it), with a custom value.
+void CastOnAllyDeferred(Player* apex, ObjectGuid allyGuid, uint32 spellId, int32 value)
+{
+    Defer(apex, [allyGuid, spellId, value](Player* player)
+    {
+        Unit* ally = allyGuid == player->GetGUID() ? player : ObjectAccessor::GetUnit(*player, allyGuid);
+        if (!ally || !ally->IsAlive() || !sSpellMgr->GetSpellInfo(spellId))
+            return;
+        if (value > 0)
+            player->CastCustomSpell(spellId, SPELLVALUE_BASE_POINT0, value, ally, true);
+        else
+            player->CastSpell(ally, spellId, true);
+    });
+}
+
+// ---- Runt's Oath ----
+
+int32 OathBonusPct(Player* apex)
+{
+    return apex->HasAura(SPELL_RUNTS_OATH_2) ? OATH_BONUS_PCT_2 : apex->HasAura(SPELL_RUNTS_OATH_1) ? OATH_BONUS_PCT_1 : 0;
+}
+
+bool OathPendingFor(Player* apex, ApexSupportState& state, Unit* ally)
+{
+    return ally && state.oathAlly && state.oathAlly == ally->GetGUID() &&
+        getMSTimeDiff(state.oathAt, getMSTime()) < OATH_WINDOW_MS && OathBonusPct(apex);
+}
+
+void EndOath(Player* apex, ApexSupportState& state)
+{
+    state.oathAlly.Clear();
+    state.oathArmed = false;
+    state.oathSpell = 0;
+    state.oathCooldowns.clear();
+    apex->RemoveAurasDueToSpell(SPELL_RUNTS_OATH_READY);
+}
+
+/// The spells sharing `spellId`'s category that the player knows (itself included).
+std::vector<uint32> CategorySpells(Player* player, SpellInfo const* spellInfo)
+{
+    std::vector<uint32> spells{ spellInfo->Id };
+    if (uint32 const category = spellInfo->GetCategory())
+    {
+        auto const found = sSpellsByCategoryStore.find(category);
+        if (found != sSpellsByCategoryStore.end())
+            for (auto const& [byItem, id] : found->second)
+                if (!byItem && id != spellInfo->Id && player->HasSpell(id))
+                    spells.push_back(id);
+    }
+    return spells;
+}
+
+/// Locked Shot is laid by a CheckCast (Runt's Oath, Blood Feud) just before Spell::prepare computes the cast time. A
+/// check that leads to no cast (a bot that only probes with Spell::CheckCast, a cast refused further on) must not leave
+/// it for the next shot: at the Apex's next update it goes unless a shot of the cannon is being cast.
+void LayLockedShot(Player* apex)
+{
+    if (apex->HasAura(SPELL_LOCKED_SHOT) || !sSpellMgr->GetSpellInfo(SPELL_LOCKED_SHOT))
+        return;
+    apex->AddAura(SPELL_LOCKED_SHOT, apex);
+    Defer(apex, [](Player* player)
+    {
+        Spell const* casting = player->GetCurrentSpell(CURRENT_GENERIC_SPELL);
+        uint32 const id = casting && casting->GetSpellInfo() ? casting->GetSpellInfo()->Id : 0;
+        if (id != SPELL_PLASMA_CASTER && id != SPELL_CAUTERY_ROUND)
+            player->RemoveAurasDueToSpell(SPELL_LOCKED_SHOT);
+    });
+}
+
+/// Runt's Oath, from the CheckCast of an empowered cast (after range, line of sight and caster auras, Spell.cpp): the
+/// cooldowns of the category are recorded, given back after the cast; Cautery Round is made instant.
+void ArmOath(Player* apex, SpellInfo const* info, Unit* target)
+{
+    ApexSupportState& state = Support(apex);
+    uint32 const id = info->Id;
+    if (!OathPendingFor(apex, state, target) || apex->HasSpellCooldown(id) ||
+        apex->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        return;
+    // Every CheckCast handler runs even after another refused (Spell::CallScriptCheckCastHandlers): the refusals of
+    // spell_apex_cannon_gate are tested here again for the cannon shot.
+    if (id == SPELL_CAUTERY_ROUND && (apex->HasAura(SPELL_CANNON_OFFLINE) || apex->HasAura(SPELL_PLASMA_FRENZY)))
+        return;
+    uint32 const now = getMSTime();
+    if (!state.oathArmed || state.oathSpell != id || getMSTimeDiff(state.oathArmedAt, now) >= OATH_ARM_MS)
+    {
+        state.oathArmed = true;
+        state.oathSpell = id;
+        state.oathArmedAt = now;
+        state.oathCooldowns.clear();
+        for (uint32 const other : CategorySpells(apex, info))
+            if (apex->HasSpellCooldown(other))
+                state.oathCooldowns[other] = apex->GetSpellCooldownDelay(other);
+    }
+    if (id == SPELL_CAUTERY_ROUND)
+        LayLockedShot(apex);
+}
+
+void ApexBloodFeudAim(Player* apex, Unit* target)
+{
+    SpellInfo const* info = sSpellMgr->GetSpellInfo(SPELL_PLASMA_CASTER);
+    if (!info || !target || !IsTinker(apex) || !apex->HasAura(SPELL_BLOOD_FEUD) || apex->HasAura(SPELL_CANNON_OFFLINE) ||
+        apex->HasAura(SPELL_PLASMA_FRENZY) ||
+        !target->GetAura(SPELL_BLOOD_FEUD_MARK, apex->GetGUID()) || apex->HasSpellCooldown(SPELL_PLASMA_CASTER) ||
+        apex->GetGlobalCooldownMgr().HasGlobalCooldown(info))
+        return;
+    LayLockedShot(apex);
+}
+
+void ApexCannonCooldownFromCut(Player* apex)
+{
+    SpellInfo const* caster = sSpellMgr->GetSpellInfo(SPELL_PLASMA_CASTER);
+    if (!caster || !caster->GetCategory())
+        return;
+    // The category cooldown of the cannon (8 s), with the cooldown modifiers of a cannon shot (Constant Lock: CANON).
+    int32 cooldown = int32(caster->CategoryRecoveryTime);
+    apex->ApplySpellMod(SPELL_PLASMA_CASTER, SPELLMOD_COOLDOWN, cooldown);
+    if (cooldown <= 0)
+        return;
+    for (uint32 const id : CategorySpells(apex, caster))
+    {
+        // Only lengthens: a shot with a longer cooldown left keeps it.
+        if (apex->HasSpellCooldown(id) && apex->GetSpellCooldownDelay(id) >= uint32(cooldown))
+            continue;
+        apex->AddSpellCooldown(id, 0, uint32(cooldown));
+        WorldPacket data(SMSG_SPELL_COOLDOWN, 8 + 1 + 4 + 4);
+        data << apex->GetGUID();
+        data << uint8(0);
+        data << uint32(id);
+        data << uint32(cooldown);
+        apex->SendDirectMessage(&data);
+    }
+}
+
+/// After the empowered cast: every spell of its category gets back the cooldown it had when the cast was checked (the
+/// time spent since then deducted): the oath « triggers no cooldown ». Sent to the client spell by spell.
+void RestoreOathCooldowns(Player* apex, ApexSupportState& state, SpellInfo const* spellInfo)
+{
+    uint32 const spent = getMSTimeDiff(state.oathArmedAt, getMSTime());
+    for (uint32 const id : CategorySpells(apex, spellInfo))
+    {
+        auto const saved = state.oathCooldowns.find(id);
+        uint32 const left = saved == state.oathCooldowns.end() || saved->second <= spent ? 0 : saved->second - spent;
+        apex->RemoveSpellCooldown(id, true);
+        if (!left)
+            continue;
+        apex->AddSpellCooldown(id, 0, left);
+        WorldPacket data(SMSG_SPELL_COOLDOWN, 8 + 1 + 4 + 4);
+        data << apex->GetGUID();
+        data << uint8(0);
+        data << uint32(id);
+        data << uint32(left);
+        apex->SendDirectMessage(&data);
+    }
+}
+
+/// Once every OATH_SCAN_MS (OnPlayerUpdate): a member of the group within 30 m below 30% health opens the oath for 10 s
+/// (aura 9300171 on the Apex), once every 20 s per ally. One oath at a time.
+void ScanRuntsOath(Player* apex, uint32 diff)
+{
+    ApexSupportState& state = Support(apex);
+    if (state.oathScanTimer > diff)
+    {
+        state.oathScanTimer -= diff;
+        return;
+    }
+    state.oathScanTimer = OATH_SCAN_MS;
+    uint32 const now = getMSTime();
+    if (state.oathAlly && getMSTimeDiff(state.oathAt, now) >= OATH_WINDOW_MS)
+        EndOath(apex, state);
+    if (state.oathAlly || !apex->IsAlive() || !OathBonusPct(apex))
+        return;
+    Player* weak = nullptr;
+    ForEachGroupMember(apex, [&](Player* member)
+    {
+        if (weak || member == apex || !member->IsAlive() || !member->HealthBelowPct(OATH_HEALTH_PCT) ||
+            !apex->IsWithinDist(member, OATH_RANGE))
+            return;
+        auto const lock = state.oathLock.find(member->GetGUID());
+        if (lock != state.oathLock.end() && getMSTimeDiff(lock->second, now) < OATH_ALLY_LOCK_MS)
+            return;
+        weak = member;
+    });
+    if (!weak)
+        return;
+    Prune(state.oathLock, now, OATH_ALLY_LOCK_MS);
+    state.oathLock[weak->GetGUID()] = now;
+    state.oathAlly = weak->GetGUID();
+    state.oathAt = now;
+    if (sSpellMgr->GetSpellInfo(SPELL_RUNTS_OATH_READY))
+        apex->AddAura(SPELL_RUNTS_OATH_READY, apex);
+}
+
+// ---- Heat Purge ----
+
+void ApexSupportShotFired(Player* apex, uint32 spellId)
+{
+    switch (spellId)
+    {
+        case SPELL_PLASMA_CASTER:
+        case SPELL_CAUTERY_ROUND:
+        case SPELL_PLASMA_LATTICE:
+        case SPELL_GUARDIAN_LOCK:
+        case SPELL_CUT_THE_CHAINS:
+            break;
+        default:
+            return;   // Plasma Frenzy, Plasma Barrage: not « a shot the Apex fires himself »
+    }
+    if (!IsTinker(apex) || !apex->HasAura(SPELL_HEAT_PURGE))
+        return;
+    ApexSupportState& state = Support(apex);
+    if (++state.heatShots < HEAT_PURGE_SHOTS)
+        return;
+    state.heatShots = 0;
+    if (apex->IsAlive() && sSpellMgr->GetSpellInfo(SPELL_HEAT_PURGE_HEAL))
+        apex->CastSpell(apex, SPELL_HEAT_PURGE_HEAL, true);
+}
+
+// ---- Blood Feud: the offer to rise ----
+
+void OfferBloodFeudRaise(Player* apex, ObjectGuid allyGuid)
+{
+    ApexSupportState& state = Support(apex);
+    uint32 const now = getMSTime();
+    if (state.raisedOnce && getMSTimeDiff(state.lastRaiseAt, now) < BLOOD_FEUD_RAISE_COOLDOWN_MS)
+        return;
+    Player* ally = ObjectAccessor::GetPlayer(*apex, allyGuid);
+    // Not released (no ghost), still dead, never in an arena (the Apex's nor the ally's).
+    if (!ally || ally == apex || ally->IsAlive() || ally->HasPlayerFlag(PLAYER_FLAGS_GHOST) || apex->InArena() ||
+        ally->InArena() || ally->isResurrectRequested())
+        return;
+    state.raisedOnce = true;
+    state.lastRaiseAt = now;
+    // Where the ally fell, not where the Apex stands (setResurrectRequestData, ResurectUsingRequestData teleports there).
+    ally->setResurrectRequestData(apex->GetGUID(), ally->GetMapId(), ally->GetPositionX(), ally->GetPositionY(),
+                                  ally->GetPositionZ(), ally->CountPctFromMaxHealth(BLOOD_FEUD_RAISE_PCT),
+                                  CalculatePct(ally->GetMaxPower(POWER_MANA), BLOOD_FEUD_RAISE_PCT));
+    // Same packet as Spell::SendResurrectRequest for a player resurrector (empty name: the client looks it up).
+    std::string const sentName;
+    WorldPacket data(SMSG_RESURRECT_REQUEST, (8 + 4 + sentName.size() + 1 + 1 + 1));
+    data << apex->GetGUID();
+    data << uint32(sentName.size() + 1);
+    data << sentName;
+    data << uint8(0);
+    data << uint8(0);   // no resurrection sickness
+    ally->SendDirectMessage(&data);
+    ApexRiseOffer& offer = *ally->CustomData.GetDefault<ApexRiseOffer>("coa.apex.releve");
+    offer.apex = apex->GetGUID();
+    offer.at = now;
+    LOG_INFO("module.ascension_compat", "Apex: {} offers {} to rise (Blood Feud)", apex->GetName(), ally->GetName());
+}
+
+// ==================================================================================================
+// Spell and aura scripts of the support trunk
+// ==================================================================================================
+
+// The support casts: Cautery Round, Guardian Lock, Plasma Lattice, Cut the Chains (with spell_apex_cannon_gate) and
+// Field Medicomp, and Kalisk Graft: never on oneself. Runt's Oath is armed at the check (Cautery Round, Field Medicomp)
+// and gives the cooldowns back after the cast. After the cast of Guardian Lock, a new guard starts.
+class spell_apex_support_cast : public SpellScript
+{
+    PrepareSpellScript(spell_apex_support_cast);
+
+    void HandleAfterCast()
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetExplTargetUnit();
+        if (!apex || !ally)
+            return;
+        ApexSupportState& state = Support(apex);
+        uint32 const id = GetSpellInfo()->Id;
+        if (id == SPELL_GUARDIAN_LOCK)
+        {
+            state.guarded = ally->GetGUID();
+            state.ripostes = 0;
+            state.riposted = false;
+            state.riposteByAttacker.clear();
+            state.riposteStunned.clear();
+        }
+        if (state.oathArmed && state.oathSpell == id && state.oathAlly == ally->GetGUID())
+        {
+            RestoreOathCooldowns(apex, state, GetSpellInfo());
+            EndOath(apex, state);
+        }
+    }
+
+    // « On an ally » (talents.json): never on oneself (Medicomp is the Apex's own; Guardian Lock on oneself would turn
+    // the support shot into a personal turret).
+    // Runt's Oath is armed here, after the core's range, line of sight and caster aura checks (Spell::CheckCast).
+    SpellCastResult CheckCast()
+    {
+        Unit* target = GetExplTargetUnit();
+        if (!target || target == GetCaster())
+            return SPELL_FAILED_BAD_TARGETS;
+        uint32 const id = GetSpellInfo()->Id;
+        // Only the check of a cast being prepared, never a probe (bots call Spell::CheckCast on spells they do not cast).
+        if (Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+            apex && GetSpell()->getState() == SPELL_STATE_PREPARING &&
+            (id == SPELL_CAUTERY_ROUND || id == SPELL_FIELD_MEDICOMP_1 || id == SPELL_FIELD_MEDICOMP_2))
+            ArmOath(apex, GetSpellInfo(), target);
+        return SPELL_CAST_OK;
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(spell_apex_support_cast::CheckCast);
+        AfterCast += SpellCastFn(spell_apex_support_cast::HandleAfterCast);
+    }
+};
+
+// Cautery Round's heal (9300147, launched by the aimed shot 9300146): 8% of the Apex's maximum health + 40% of his attack
+// power, Triage Readout, Chosen Clan and Runt's Oath (computed at launch, EffectHeal runs in LAUNCH_TARGET mode). On
+// arrival it cauterizes ONE bleeding wound and, with Coolant Round, cools the ally. Spotter's Sweep sends 40% of it to
+// the most injured ally within 20 m of the target.
+class spell_apex_cautery_round : public SpellScript
+{
+    PrepareSpellScript(spell_apex_cautery_round);
+
+    void HandleLaunch(SpellEffIndex /*effIndex*/)
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetHitUnit();
+        if (!apex || !ally)
+            return;
+        int64 heal = SupportShotPower(apex, ally, CAUTERY_MAX_HEALTH_PCT, CAUTERY_ATTACK_POWER_PCT);
+        ApexSupportState& state = Support(apex);
+        if (state.oathArmed && state.oathSpell == SPELL_CAUTERY_ROUND && state.oathAlly == ally->GetGUID())
+            heal = heal * (100 + OathBonusPct(apex)) / 100;
+        int32 const amount = int32(std::clamp<int64>(heal, 1, std::numeric_limits<int32>::max()));
+        SetEffectValue(amount);
+        if (apex->HasAura(SPELL_SPOTTERS_SWEEP))
+            if (Player* second = MostInjuredNear(apex, ally))
+                CastOnAllyDeferred(apex, second->GetGUID(), SPELL_SPOTTER_HEAL, std::max(1, amount * SPOTTER_POWER_PCT / 100));
+    }
+
+    void HandleAfterHit()
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetHitUnit();
+        if (!apex || !ally || !ally->IsAlive())
+            return;
+        // One bleed, the first harmful aura found whose mechanics include bleeding (collected, then removed).
+        AuraApplication* bleed = nullptr;
+        for (auto const& [spellId, application] : ally->GetAppliedAuras())
+            if (application && !application->IsPositive() && application->GetBase() &&
+                (application->GetBase()->GetSpellInfo()->GetAllEffectsMechanicMask() & (uint64(1) << MECHANIC_BLEED)))
+            {
+                bleed = application;
+                break;
+            }
+        if (bleed)
+            ally->RemoveAura(bleed, AURA_REMOVE_BY_ENEMY_SPELL);
+        int32 const cooling = apex->HasAura(SPELL_COOLANT_2) ? COOLANT_PCT_2 : apex->HasAura(SPELL_COOLANT_1) ? COOLANT_PCT_1 : 0;
+        if (cooling && ally->IsAlive() && sSpellMgr->GetSpellInfo(SPELL_COOLED))
+            apex->CastCustomSpell(SPELL_COOLED, SPELLVALUE_BASE_POINT0, cooling, ally, true);
+    }
+
+    void Register() override
+    {
+        OnEffectLaunchTarget += SpellEffectFn(spell_apex_cautery_round::HandleLaunch, EFFECT_0, SPELL_EFFECT_HEAL);
+        AfterHit += SpellHitFn(spell_apex_cautery_round::HandleAfterHit);
+    }
+};
+
+// Plasma Lattice (9300157) and its copy of Spotter's Sweep (9300167): the amount of the first (12% of the Apex's maximum
+// health + 60% of his attack power, Triage, Chosen Clan; the copy gets its value from the cast), and when either breaks
+// (emptied: Unit::CalcAbsorbResist removes it AURA_REMOVE_BY_ENEMY_SPELL) it bursts at the ally for 30% of what it
+// absorbed, Fire damage to the enemies within 5 m (9300158, cast by the Apex at his next update).
+class aura_apex_plasma_lattice : public AuraScript
+{
+    PrepareAuraScript(aura_apex_plasma_lattice);
+
+    uint32 _absorbed = 0;
+
+    void CalculateAmount(AuraEffect const* /*aurEff*/, int32& amount, bool& /*canBeRecalculated*/)
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetUnitOwner();
+        _absorbed = 0;   // a refreshed lattice starts over (ModStackAmount -> SetStackAmount recalculates, same script)
+        if (GetId() == SPELL_LATTICE_SHIELD && apex && ally)
+            amount = SupportShotPower(apex, ally, LATTICE_MAX_HEALTH_PCT, LATTICE_ATTACK_POWER_PCT);
+    }
+
+    // Spotter's Sweep: when the lattice lands (a missile: after AfterCast of the aimed shot), 40% of it on the most
+    // injured member of the group within 20 m of the ally. Never from the copy itself (9300167).
+    void AfterApply(AuraEffect const* aurEff, AuraEffectHandleModes /*mode*/)
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetTarget();
+        if (GetId() != SPELL_LATTICE_SHIELD || !apex || !ally || !apex->HasAura(SPELL_SPOTTERS_SWEEP))
+            return;
+        if (Player* second = MostInjuredNear(apex, ally))
+            CastOnAllyDeferred(apex, second->GetGUID(), SPELL_SPOTTER_SHIELD,
+                               std::max(1, int32(int64(aurEff->GetAmount()) * SPOTTER_POWER_PCT / 100)));
+    }
+
+    void AfterAbsorb(AuraEffect* /*aurEff*/, DamageInfo& /*dmgInfo*/, uint32& absorbAmount)
+    {
+        _absorbed += absorbAmount;
+    }
+
+    void AfterRemove(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+    {
+        AuraApplication const* application = GetTargetApplication();
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* ally = GetTarget();
+        if (!application || application->GetRemoveMode() != AURA_REMOVE_BY_ENEMY_SPELL || !_absorbed || !apex ||
+            !apex->IsAlive() || !ally)
+            return;
+        int32 const burst = int32(std::min<uint64>(uint64(_absorbed) * LATTICE_BURST_PCT / 100,
+                                                   uint64(std::numeric_limits<int32>::max())));
+        if (burst <= 0)
+            return;
+        float const x = ally->GetPositionX(), y = ally->GetPositionY(), z = ally->GetPositionZ();
+        uint32 const mapId = ally->GetMapId();
+        Defer(apex, [x, y, z, mapId, burst](Player* player)
+        {
+            SpellInfo const* info = sSpellMgr->GetSpellInfo(SPELL_LATTICE_BURST);
+            if (!info || !player->IsAlive() || player->GetMapId() != mapId)
+                return;
+            SpellCastTargets targets;
+            targets.SetDst(x, y, z, 0.0f, mapId);
+            CustomSpellValues values;
+            values.AddSpellMod(SPELLVALUE_BASE_POINT0, burst);
+            player->CastSpell(targets, info, &values, TRIGGERED_FULL_MASK);
+        });
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_apex_plasma_lattice::CalculateAmount, EFFECT_0,
+                                                     SPELL_AURA_SCHOOL_ABSORB);
+        AfterEffectAbsorb += AuraEffectAbsorbFn(aura_apex_plasma_lattice::AfterAbsorb, EFFECT_0);
+        AfterEffectApply += AuraEffectApplyFn(aura_apex_plasma_lattice::AfterApply, EFFECT_0, SPELL_AURA_SCHOOL_ABSORB,
+                                              AURA_EFFECT_HANDLE_REAL_OR_REAPPLY_MASK);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_apex_plasma_lattice::AfterRemove, EFFECT_0, SPELL_AURA_SCHOOL_ABSORB,
+                                                AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+// Field Medicomp (9300148/9300149): effect 0 is a PERIODIC_HEAL whose Spell.dbc value is the share of the ALLY's
+// maximum health per tick (5 or 10%, 3 ticks); the amount is that share of its maximum health, plus Runt's Oath (+25 or
+// +50%) when the cast was empowered on this ally (exact: no rounding of a per-tick percentage).
+class aura_apex_field_medicomp : public AuraScript
+{
+    PrepareAuraScript(aura_apex_field_medicomp);
+
+    void CalculateAmount(AuraEffect const* /*aurEff*/, int32& amount, bool& canBeRecalculated)
+    {
+        canBeRecalculated = false;
+        Unit* ally = GetUnitOwner();
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        int32 const pctPerTick = GetSpellInfo()->Effects[EFFECT_0].CalcValue();
+        if (!ally || pctPerTick <= 0)
+            return;
+        int64 heal = int64(ally->CountPctFromMaxHealth(pctPerTick));
+        if (apex)
+        {
+            ApexSupportState& state = Support(apex);
+            if (state.oathArmed && state.oathSpell == GetId() && state.oathAlly == ally->GetGUID())
+                heal = heal * (100 + OathBonusPct(apex)) / 100;
+        }
+        amount = int32(std::clamp<int64>(heal, 1, std::numeric_limits<int32>::max()));
+        // The healing done modifiers of the Apex (Respect, ...): this hook replaces the core's amount, which already went
+        // through Unit::SpellHealingBonusDone (SpellAuraEffects.cpp, PERIODIC_HEAL). Coefficients 0 in spell_bonus_data
+        // (no spell power, and the DmgClass 0 early return of SpellHealingBonusDone skipped). Healing taken applies at
+        // each tick. MOD_HEALING_DONE_PERCENT is excluded here, as in AuraEffect::CalculatePeriodicData: the tick
+        // (SpellAuraEffects.cpp, PERIODIC_HEAL) applies it again.
+        if (Unit* caster = GetCaster())
+            amount = int32(std::min<uint32>(caster->SpellHealingBonusDone(ally, GetSpellInfo(), uint32(amount), DOT, EFFECT_0,
+                                                caster->SpellPctHealingModsDone(ally, GetSpellInfo(), DOT, false)),
+                                            uint32(std::numeric_limits<int32>::max())));
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_apex_field_medicomp::CalculateAmount, EFFECT_0,
+                                                     SPELL_AURA_PERIODIC_HEAL);
+    }
+};
+
+// Gifted Trophy (138423): never on oneself, needs a Trophy, and the Trophy leaves the Apex when it is given.
+class spell_apex_gifted_trophy : public SpellScript
+{
+    PrepareSpellScript(spell_apex_gifted_trophy);
+
+    SpellCastResult CheckCast()
+    {
+        Unit* caster = GetCaster();
+        Unit* target = GetExplTargetUnit();
+        if (!caster || !target || target == caster)
+            return SPELL_FAILED_BAD_TARGETS;
+        if (!caster->HasAura(SPELL_TROPHIES))
+            return SPELL_FAILED_CASTER_AURASTATE;
+        return SPELL_CAST_OK;
+    }
+
+    void HandleAfterCast()
+    {
+        Unit* caster = GetCaster();
+        if (Aura* trophies = caster ? caster->GetAura(SPELL_TROPHIES) : nullptr)
+        {
+            if (trophies->GetStackAmount() > 1)
+                trophies->ModStackAmount(-1);
+            else
+                trophies->Remove();
+        }
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(spell_apex_gifted_trophy::CheckCast);
+        AfterCast += SpellCastFn(spell_apex_gifted_trophy::HandleAfterCast);
+    }
+};
+
+// Strapped Ally (138424): never on oneself.
+class spell_apex_strapped_ally : public SpellScript
+{
+    PrepareSpellScript(spell_apex_strapped_ally);
+
+    SpellCastResult CheckCast()
+    {
+        Unit* target = GetExplTargetUnit();
+        return target && target != GetCaster() ? SPELL_CAST_OK : SPELL_FAILED_BAD_TARGETS;
+    }
+
+    void HandleAfterCast()
+    {
+        if (Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr)
+            if (Unit* ally = GetExplTargetUnit())
+                Support(apex).strapped = ally->GetGUID();
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(spell_apex_strapped_ally::CheckCast);
+        AfterCast += SpellCastFn(spell_apex_strapped_ally::HandleAfterCast);
+    }
+};
+
+// Strapped Ally, the aura (9300178): on the ally, effect 0 = armor (30% of the Apex's armor), effect 1 = a check every
+// second; on the Apex, effect 2 = -10% damage taken. Both hold only while the ally stays within 10 m of the Apex, 0
+// otherwise. The Apex's part goes with the ally's.
+class aura_apex_strapped_ally : public AuraScript
+{
+    PrepareAuraScript(aura_apex_strapped_ally);
+
+    void CalculateArmor(AuraEffect const* /*aurEff*/, int32& amount, bool& canBeRecalculated)
+    {
+        canBeRecalculated = false;
+        Unit* apex = GetCaster();
+        amount = apex ? int32(CalculatePct(apex->GetArmor(), STRAP_ARMOR_PCT)) : 0;
+    }
+
+    void HandlePeriodic(AuraEffect const* /*aurEff*/)
+    {
+        Unit* ally = GetTarget();
+        Unit* apex = GetCaster();
+        bool const near = apex && apex != ally && apex->IsAlive() && ally->IsAlive() && ally->IsWithinDist(apex, STRAP_RANGE);
+        if (AuraEffect* armor = GetAura()->GetEffect(EFFECT_0))
+        {
+            int32 const wanted = near ? int32(CalculatePct(apex->GetArmor(), STRAP_ARMOR_PCT)) : 0;
+            if (armor->GetAmount() != wanted)
+                armor->ChangeAmount(wanted);
+        }
+        if (apex)
+            if (AuraEffect* guard = apex->GetAuraEffect(SPELL_STRAPPED_ALLY, EFFECT_2, apex->GetGUID()))
+                if (guard->GetAmount() != (near ? STRAP_DAMAGE_TAKEN_PCT : 0))
+                    guard->ChangeAmount(near ? STRAP_DAMAGE_TAKEN_PCT : 0);
+    }
+
+    void AfterRemove(AuraEffect const* /*aurEff*/, AuraEffectHandleModes /*mode*/)
+    {
+        Unit* apex = GetCaster();
+        if (apex && apex != GetTarget())
+            apex->RemoveAurasDueToSpell(SPELL_STRAPPED_ALLY, apex->GetGUID());
+    }
+
+    void Register() override
+    {
+        DoEffectCalcAmount += AuraEffectCalcAmountFn(aura_apex_strapped_ally::CalculateArmor, EFFECT_0,
+                                                     SPELL_AURA_MOD_RESISTANCE);
+        OnEffectPeriodic += AuraEffectPeriodicFn(aura_apex_strapped_ally::HandlePeriodic, EFFECT_1,
+                                                 SPELL_AURA_PERIODIC_DUMMY);
+        AfterEffectRemove += AuraEffectRemoveFn(aura_apex_strapped_ally::AfterRemove, EFFECT_1, SPELL_AURA_PERIODIC_DUMMY,
+                                                AURA_EFFECT_HANDLE_REAL);
+    }
+};
+
+// Chosen Clan (138427): never on oneself; two allies at most. The holders are the allies chosen this session and the
+// members of the group carrying the Apex's clan aura (a clan chosen before a relog, outside the group and away, is not
+// seen: it runs out within the hour). Choosing a third releases the one whose mark runs out first.
+class spell_apex_chosen_clan : public SpellScript
+{
+    PrepareSpellScript(spell_apex_chosen_clan);
+
+    SpellCastResult CheckCast()
+    {
+        Unit* target = GetExplTargetUnit();
+        return target && target != GetCaster() ? SPELL_CAST_OK : SPELL_FAILED_BAD_TARGETS;
+    }
+
+    void HandleAfterCast()
+    {
+        Player* apex = GetCaster() ? GetCaster()->ToPlayer() : nullptr;
+        Unit* chosen = GetExplTargetUnit();
+        if (!apex || !chosen)
+            return;
+        ApexSupportState& state = Support(apex);
+        std::vector<Unit*> holders;
+        auto consider = [&](Unit* unit)
+        {
+            if (unit && unit != chosen && unit != apex && InChosenClan(apex, unit) &&
+                std::find(holders.begin(), holders.end(), unit) == holders.end())
+                holders.push_back(unit);
+        };
+        for (ObjectGuid const& guid : state.clan)
+            consider(ObjectAccessor::GetUnit(*apex, guid));
+        ForEachGroupMember(apex, [&](Player* member) { consider(member); });
+        std::sort(holders.begin(), holders.end(), [apex](Unit* a, Unit* b)
+        {
+            return a->GetAura(SPELL_CHOSEN_CLAN, apex->GetGUID())->GetDuration() <
+                b->GetAura(SPELL_CHOSEN_CLAN, apex->GetGUID())->GetDuration();
+        });
+        while (holders.size() >= CLAN_SIZE)
+        {
+            holders.front()->RemoveAurasDueToSpell(SPELL_CHOSEN_CLAN, apex->GetGUID());
+            holders.erase(holders.begin());
+        }
+        state.clan.clear();
+        for (Unit* unit : holders)
+            state.clan.push_back(unit->GetGUID());
+        state.clan.push_back(chosen->GetGUID());
+    }
+
+    void Register() override
+    {
+        OnCheckCast += SpellCheckCastFn(spell_apex_chosen_clan::CheckCast);
+        AfterCast += SpellCastFn(spell_apex_chosen_clan::HandleAfterCast);
+    }
+};
+
+// ==================================================================================================
+// Hooks of the support trunk
+// ==================================================================================================
+
+// Runt's Oath: an empowered cast cancelled during its aim drops its record of the cooldowns and Locked Shot (the oath
+// stays open). Scent of the Clan shortens the controls on a marked ally (OnCalcMaxDuration, before the diminishing
+// returns). Runt's Oath and Blood Feud lay Locked Shot (9300172: -100% cast time on the CANON group, one charge, 1 s)
+// from the CheckCast of their spell scripts, which run after the core's own checks and before Spell::prepare computes
+// the cast time.
+class AscensionApexSupportSpellScript : public AllSpellScript
+{
+public:
+    AscensionApexSupportSpellScript() : AllSpellScript("AscensionApexSupportSpellScript",
+        { ALLSPELLHOOK_ON_CAST_CANCEL, ALLSPELLHOOK_ON_CALC_MAX_DURATION }) { }
+
+    // An empowered cast that did not go through: the oath stays open, its record of the cooldowns is dropped.
+    void OnSpellCastCancel(Spell* /*spell*/, Unit* caster, SpellInfo const* spellInfo, bool /*bySelf*/) override
+    {
+        Player* apex = caster ? caster->ToPlayer() : nullptr;
+        if (!apex || !spellInfo || !IsTinker(apex))
+            return;
+        ApexSupportState& state = Support(apex);
+        if (state.oathArmed && state.oathSpell == spellInfo->Id)
+        {
+            state.oathArmed = false;
+            state.oathCooldowns.clear();
+            apex->RemoveAurasDueToSpell(SPELL_LOCKED_SHOT);
+        }
+    }
+
+    void OnCalcMaxDuration(Aura const* aura, int32& maxDuration) override
+    {
+        if (maxDuration <= 0 || !aura)
+            return;
+        Unit* owner = aura->GetOwner() ? aura->GetOwner()->ToUnit() : nullptr;
+        SpellInfo const* info = aura->GetSpellInfo();
+        if (!owner || !owner->IsPlayer() || !info || info->IsPositive() || aura->GetCasterGUID() == owner->GetGUID() ||
+            !(info->GetAllEffectsMechanicMask() & SCENT_MECHANICS))
+            return;
+        int32 best = 0;
+        for (Player* apex : MarkingApexes(owner, 0))
+            if (apex != owner)   // « a marked ALLY »: an Apex's own buff does not shorten his own controls
+                best = std::max(best, apex->HasAura(SPELL_SCENT_2) ? SCENT_PCT_2 : apex->HasAura(SPELL_SCENT_1) ? SCENT_PCT_1 : 0);
+        if (best)
+            maxDuration = maxDuration * (100 - best) / 100;
+    }
+};
+
+class AscensionApexSupportUnitScript : public UnitScript
+{
+public:
+    AscensionApexSupportUnitScript() : UnitScript("AscensionApexSupportUnitScript", true,
+        { UNITHOOK_ON_DAMAGE, UNITHOOK_MODIFY_MELEE_DAMAGE, UNITHOOK_MODIFY_SPELL_DAMAGE_TAKEN,
+          UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK, UNITHOOK_ON_UNIT_ENTER_COMBAT, UNITHOOK_ON_UNIT_DEATH }) { }
+
+    // Guardian Lock (ripostes), Kalisk Graft (regrowth), Sentry Protocol for the Chosen Clan (a player's first hit).
+    void OnDamage(Unit* attacker, Unit* victim, uint32& damage) override
+    {
+        if (!attacker || !victim || attacker == victim || !victim->IsAlive())
+            return;
+        if (victim->HasAura(SPELL_GUARDED))
+            Riposte(attacker, victim);
+        if (damage && victim->HasAura(SPELL_KALISK_GRAFT) && damage >= victim->CountPctFromMaxHealth(KALISK_THRESHOLD_PCT))
+            Regrow(victim, damage);
+        if (attacker->IsPlayer() && victim->HasAura(SPELL_CHOSEN_CLAN))
+            for (Player* apex : MarkingApexes(victim, SPELL_SENTRY_PROTOCOL))
+                if (InChosenClan(apex, victim) && apex != victim)
+                    ClanSentry(apex, attacker, victim, true);
+    }
+
+    // Sentry Protocol for the Chosen Clan: a creature engages a member of the clan.
+    void OnUnitEnterCombat(Unit* unit, Unit* victim) override
+    {
+        if (!unit || !victim || unit == victim || !unit->IsCreature() || !victim->IsPlayer() ||
+            !victim->HasAura(SPELL_CHOSEN_CLAN))
+            return;
+        for (Player* apex : MarkingApexes(victim, SPELL_SENTRY_PROTOCOL))
+            if (InChosenClan(apex, victim) && apex != victim)
+                ClanSentry(apex, unit, victim, false);
+    }
+
+    // Blood Feud: +25% from the Apex to the killer he marked.
+    static bool FeudBonus(Unit const* target, Unit const* attacker)
+    {
+        return attacker && target && attacker != target && IsTinker(attacker) &&
+            target->GetAura(SPELL_BLOOD_FEUD_MARK, attacker->GetGUID());
+    }
+
+    void ModifyMeleeDamage(Unit* target, Unit* attacker, uint32& damage) override
+    {
+        if (damage && FeudBonus(target, attacker))
+            damage = damage * BLOOD_FEUD_DAMAGE_PCT / 100;
+    }
+
+    void ModifySpellDamageTaken(Unit* target, Unit* attacker, int32& damage, SpellInfo const* /*spellInfo*/) override
+    {
+        if (damage > 0 && FeudBonus(target, attacker))
+            damage = int32(int64(damage) * BLOOD_FEUD_DAMAGE_PCT / 100);
+    }
+
+    // Also called for periodic HEALS (SpellAuraEffects.cpp): the positive ones are left alone. Coolant Round: periodic
+    // damage taken by a cooled ally reduced by the strongest cooling it carries (15 or 30%).
+    void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
+    {
+        if (!damage || !target || !spellInfo || spellInfo->IsPositive())
+            return;
+        if (FeudBonus(target, attacker))
+            damage = damage * BLOOD_FEUD_DAMAGE_PCT / 100;
+        if (target->HasAura(SPELL_COOLED))
+        {
+            int32 cooling = 0;
+            for (AuraEffect const* effect : target->GetAuraEffectsByType(SPELL_AURA_DUMMY))
+                if (effect->GetId() == SPELL_COOLED)
+                    cooling = std::max(cooling, effect->GetAmount());
+            if (cooling > 0)
+                damage = damage * uint32(100 - std::min(cooling, 100)) / 100;
+        }
+    }
+
+    // Recognize Strength, the return of a gifted Trophy, Blood Feud (the mark, then the offer to rise).
+    void OnUnitDeath(Unit* victim, Unit* killer) override
+    {
+        if (!victim)
+            return;
+        Player* killerPlayer = killer ? killer->GetCharmerOrOwnerPlayerOrPlayerItself() : nullptr;
+
+        // Blood Feud, the mark: a marked ally died; its killer (the master of a pet) is marked for 60 s.
+        if (Player* fallen = victim->ToPlayer(); fallen && killer)
+        {
+            Unit* murderer = killer->GetCharmerOrOwnerOrSelf();
+            for (Player* apex : MarkingApexes(fallen, SPELL_BLOOD_FEUD))
+            {
+                if (apex == fallen || !murderer || murderer == apex || murderer == fallen || !murderer->IsAlive() ||
+                    !apex->IsValidAttackTarget(murderer) || !sSpellMgr->GetSpellInfo(SPELL_BLOOD_FEUD_MARK))
+                    continue;
+                ApexSupportState& state = Support(apex);
+                uint32 const now = getMSTime();
+                for (auto itr = state.feuds.begin(); itr != state.feuds.end();)
+                    itr = getMSTimeDiff(itr->second.second, now) >= BLOOD_FEUD_MS ? state.feuds.erase(itr) : std::next(itr);
+                state.feuds[murderer->GetGUID()] = { fallen->GetGUID(), now };
+                apex->AddAura(SPELL_BLOOD_FEUD_MARK, murderer);
+            }
+        }
+
+        if (!killerPlayer || killerPlayer == victim)
+            return;
+
+        // Blood Feud, the vengeance: the Apex (or his pet) killed the one he marked.
+        if (IsTinker(killerPlayer) && killerPlayer->HasAura(SPELL_BLOOD_FEUD))
+        {
+            ApexSupportState& state = Support(killerPlayer);
+            auto const feud = state.feuds.find(victim->GetGUID());
+            if (feud != state.feuds.end())
+            {
+                ObjectGuid const ally = feud->second.first;
+                bool const fresh = getMSTimeDiff(feud->second.second, getMSTime()) < BLOOD_FEUD_MS;
+                state.feuds.erase(feud);
+                if (fresh)
+                    OfferBloodFeudRaise(killerPlayer, ally);
+            }
+        }
+
+        // Worthy prey (player, bot, elite, rare, boss) that yields experience or honor.
+        Creature* creature = victim->ToCreature();
+        bool const worthy = IsWorthyPrey(victim) || (creature && (creature->isWorldBoss() || creature->IsDungeonBoss()));
+        if (!worthy || !killerPlayer->isHonorOrXPTarget(victim))
+            return;
+
+        // Gifted Trophy: the gifted Trophy goes back to its Apex.
+        if (killerPlayer->HasAura(SPELL_GIFTED_TROPHY))
+        {
+            std::vector<ObjectGuid> givers;
+            for (auto const& [spellId, application] : killerPlayer->GetAppliedAuras())
+                if (spellId == SPELL_GIFTED_TROPHY && application && application->GetBase())
+                    givers.push_back(application->GetBase()->GetCasterGUID());
+            // Once per gift: the aura goes at once (a death leaves the killer's auras alone), and only when the Trophy
+            // could go back (an Apex dead or without Trophy Hunter keeps his gift running).
+            for (ObjectGuid const& guid : givers)
+                if (Player* apex = ObjectAccessor::GetPlayer(*killerPlayer, guid); apex && apex != killerPlayer &&
+                    GrantApexTrophies(apex, 1))
+                    killerPlayer->RemoveAurasDueToSpell(SPELL_GIFTED_TROPHY, apex->GetGUID());
+        }
+
+        // Recognize Strength: every Apex within 40 m of the killer who is his ally (friendly to him; the killer himself
+        // left out), in his group or not.
+        uint32 const now = getMSTime();
+        std::vector<Player*> around;
+        Acore::AnyPlayerInObjectRangeCheck check(killerPlayer, RECOGNIZE_RANGE);
+        Acore::PlayerListSearcher<Acore::AnyPlayerInObjectRangeCheck> searcher(killerPlayer, around, check);
+        Cell::VisitObjects(killerPlayer, searcher, RECOGNIZE_RANGE);
+        for (Player* apex : around)
+        {
+            if (apex == killerPlayer || !IsTinker(apex) || !apex->IsAlive() || !apex->HasAura(SPELL_RECOGNIZE_STRENGTH) ||
+                !apex->IsFriendlyTo(killerPlayer))
+                continue;
+            GrantApexTrophies(apex, 1);
+            ApexSupportState& state = Support(apex);
+            auto const lock = state.respectLock.find(killerPlayer->GetGUID());
+            if (lock != state.respectLock.end() && getMSTimeDiff(lock->second, now) < RESPECT_LOCK_MS)
+                continue;
+            Prune(state.respectLock, now, RESPECT_LOCK_MS);
+            state.respectLock[killerPlayer->GetGUID()] = now;
+            CastOnAllyDeferred(apex, killerPlayer->GetGUID(), SPELL_RESPECT, 0);
+        }
+    }
+
+private:
+    // Guardian Lock: a riposte from every Apex guarding the victim, capped (3 s per enemy, 1 s in all, 15 per guard),
+    // within 40 m of the Apex and only at an enemy he may attack; the first riposte at an enemy stuns it 1 s.
+    static void Riposte(Unit* attacker, Unit* victim)
+    {
+        std::vector<ObjectGuid> guards;
+        for (auto const& [spellId, application] : victim->GetAppliedAuras())
+            if (spellId == SPELL_GUARDED && application && application->GetBase())
+                guards.push_back(application->GetBase()->GetCasterGUID());
+        Unit* foe = attacker;
+        for (ObjectGuid const& guid : guards)
+        {
+            Player* apex = ObjectAccessor::GetPlayer(*victim, guid);
+            if (!apex || !apex->IsAlive() || apex == foe || apex->HasAura(SPELL_CANNON_OFFLINE) ||
+                !apex->IsValidAttackTarget(foe) || !apex->IsWithinDist(foe, GUARD_RANGE))
+                continue;
+            ApexSupportState& state = Support(apex);
+            uint32 const now = getMSTime();
+            if (state.guarded != victim->GetGUID() || state.ripostes >= GUARD_MAX_RIPOSTES ||
+                (state.riposted && getMSTimeDiff(state.lastRiposteAt, now) < GUARD_GLOBAL_MS))
+                continue;
+            auto const last = state.riposteByAttacker.find(foe->GetGUID());
+            if (last != state.riposteByAttacker.end() && getMSTimeDiff(last->second, now) < GUARD_PER_ATTACKER_MS)
+                continue;
+            Prune(state.riposteByAttacker, now, GUARD_PER_ATTACKER_MS);
+            state.riposteByAttacker[foe->GetGUID()] = now;
+            state.riposted = true;
+            state.lastRiposteAt = now;
+            ++state.ripostes;
+            bool const first = state.riposteStunned.insert(foe->GetGUID()).second;
+            uint32 const shot = first ? SPELL_GUARD_RIPOSTE_STUN : SPELL_GUARD_RIPOSTE;
+            if (sSpellMgr->GetSpellInfo(shot))
+                CastDeferred(apex, foe->GetGUID(), shot);
+        }
+    }
+
+    // Kalisk Graft: 40% of a blow of 8% or more of the ally's maximum health grows back over 4 s (one tick a second);
+    // what the regrowth already under way still had to give is added to it.
+    static void Regrow(Unit* victim, uint32 damage)
+    {
+        std::vector<ObjectGuid> grafters;
+        for (auto const& [spellId, application] : victim->GetAppliedAuras())
+            if (spellId == SPELL_KALISK_GRAFT && application && application->GetBase())
+                grafters.push_back(application->GetBase()->GetCasterGUID());
+        for (ObjectGuid const& guid : grafters)
+        {
+            Player* apex = ObjectAccessor::GetPlayer(*victim, guid);
+            if (!apex || !apex->IsAlive())
+                continue;
+            int64 total = int64(damage) * KALISK_RETURN_PCT / 100;
+            if (AuraEffect const* growing = victim->GetAuraEffect(SPELL_KALISK_REGROWTH, EFFECT_0, apex->GetGUID()))
+                total += int64(growing->GetAmount()) * std::max(0, growing->GetTotalTicks() - int32(growing->GetTickNumber()));
+            int32 const perTick = int32(std::clamp<int64>((total + KALISK_TICKS - 1) / KALISK_TICKS, 1,
+                                                          std::numeric_limits<int32>::max()));
+            CastOnAllyDeferred(apex, victim->GetGUID(), SPELL_KALISK_REGROWTH, perTick);
+        }
+    }
+
+    // Sentry Protocol for a member of the Chosen Clan: same lock per target as for the Apex (TrySentry); a player's
+    // first hit counts once every 60 s per Apex, as for the Apex himself.
+    static void ClanSentry(Player* apex, Unit* newcomer, Unit* member, bool playerHit)
+    {
+        // Out of the shot's reach, no lock is taken (Spell::CheckRange refuses the triggered shot too).
+        if (apex->GetExactDist(newcomer) > SENTRY_SHOT_RANGE)
+            return;
+        if (playerHit)
+        {
+            ApexTalentState& state = State(apex);
+            uint32 const now = getMSTime();
+            auto itr = state.sentrySeen.find(newcomer->GetGUID());
+            if (itr != state.sentrySeen.end() && getMSTimeDiff(itr->second, now) < SENTRY_SEEN_MS)
+            {
+                itr->second = now;
+                return;
+            }
+            Prune(state.sentrySeen, now, SENTRY_SEEN_MS);
+            state.sentrySeen[newcomer->GetGUID()] = now;
+        }
+        TrySentry(apex, newcomer, member);
+    }
+};
+
+class AscensionApexSupportPlayerScript : public PlayerScript
+{
+public:
+    AscensionApexSupportPlayerScript() : PlayerScript("AscensionApexSupportPlayerScript",
+        { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_PLAYER_JUST_DIED, PLAYERHOOK_ON_PLAYER_RESURRECT }) { }
+
+    // Blood Feud: the ally accepted the Apex's offer (the request data still names him: Player::ResurrectPlayer runs
+    // from ResurectUsingRequestData before anything clears it): the rise is shown.
+    void OnPlayerResurrect(Player* player, float /*restorePercent*/, bool& /*applySickness*/) override
+    {
+        ApexRiseOffer* offer = player ? player->CustomData.Get<ApexRiseOffer>("coa.apex.releve") : nullptr;
+        if (!offer || !offer->apex)
+            return;
+        bool const ours = player->isResurrectRequestedBy(offer->apex) &&
+            getMSTimeDiff(offer->at, getMSTime()) < BLOOD_FEUD_RISE_MARK_MS;
+        offer->apex.Clear();
+        if (ours)
+            player->SendPlaySpellVisual(KIT_BLOOD_FEUD_RISE);
+    }
+
+    void OnPlayerUpdate(Player* player, uint32 diff) override
+    {
+        if (!player || player->getClass() != CLASS_TINKER)
+            return;
+        if (player->HasAura(SPELL_RUNTS_OATH_1) || player->HasAura(SPELL_RUNTS_OATH_2) || Support(player).oathAlly)
+            ScanRuntsOath(player, diff);
+        // Strapped Ally, the Apex's side: its -10% goes once the ally's part is gone or out of reach (another map, a
+        // logout: the ally's own checks cannot run then).
+        if (player->GetAura(SPELL_STRAPPED_ALLY, player->GetGUID()))
+        {
+            ApexSupportState& state = Support(player);
+            if (state.strapTimer > diff)
+            {
+                state.strapTimer -= diff;
+                return;
+            }
+            state.strapTimer = STRAP_CHECK_MS;
+            Unit* ally = state.strapped ? ObjectAccessor::GetUnit(*player, state.strapped) : nullptr;
+            if (!ally || ally == player || !ally->GetAura(SPELL_STRAPPED_ALLY, player->GetGUID()))
+                player->RemoveAurasDueToSpell(SPELL_STRAPPED_ALLY, player->GetGUID());
+        }
+    }
+
+    // Ursa's Stand: each member of the group within 15 m gets a lattice of 15% of the Apex's maximum health (a triggered
+    // cast is allowed to a dead caster, Spell::CheckCast). Read from the spellbook: auras go at death.
+    void OnPlayerJustDied(Player* player) override
+    {
+        if (!player || player->getClass() != CLASS_TINKER)
+            return;
+        if (Support(player).oathAlly)
+            EndOath(player, Support(player));
+        if (!player->HasSpell(SPELL_URSAS_STAND))
+            return;
+        int32 const amount = int32(player->CountPctFromMaxHealth(URSA_MAX_HEALTH_PCT));
+        if (amount <= 0)
+            return;
+        ForEachGroupMember(player, [&](Player* member)
+        {
+            if (member != player && member->IsAlive() && member->IsWithinDist(player, URSA_RANGE))
+                CastOnAllyDeferredFromTheDead(player, member->GetGUID(), amount);
+        });
+    }
+
+private:
+    static void CastOnAllyDeferredFromTheDead(Player* apex, ObjectGuid allyGuid, int32 amount)
+    {
+        Defer(apex, [allyGuid, amount](Player* player)
+        {
+            Player* ally = ObjectAccessor::GetPlayer(*player, allyGuid);
+            if (ally && ally->IsAlive() && sSpellMgr->GetSpellInfo(SPELL_URSA_SHIELD))
+                player->CastCustomSpell(SPELL_URSA_SHIELD, SPELLVALUE_BASE_POINT0, amount, ally, true);
+        });
+    }
+};
 } // namespace
 
 void SynchronizeApexStanceAttacks(Player* player)
@@ -2289,4 +3582,16 @@ void AddAscensionTinkerApexTalentScripts()
     new AscensionApexTalentUnitScript();
     new AscensionApexTalentPlayerScript();
     new AscensionApexSkullSpineWorldScript();
+    // support trunk (28/10)
+    RegisterSpellScript(spell_apex_support_cast);
+    RegisterSpellScript(spell_apex_cautery_round);
+    RegisterSpellScript(aura_apex_field_medicomp);
+    RegisterSpellScript(aura_apex_plasma_lattice);
+    RegisterSpellScript(spell_apex_gifted_trophy);
+    RegisterSpellScript(spell_apex_strapped_ally);
+    RegisterSpellScript(aura_apex_strapped_ally);
+    RegisterSpellScript(spell_apex_chosen_clan);
+    new AscensionApexSupportSpellScript();
+    new AscensionApexSupportUnitScript();
+    new AscensionApexSupportPlayerScript();
 }
