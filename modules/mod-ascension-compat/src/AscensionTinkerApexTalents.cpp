@@ -183,9 +183,10 @@ constexpr float FRENZY_SHOT_RANGE = 29.0f;         // SpellRange 4 = 30 m, check
 // crosses, once per leg, through armor, absorption shields and invulnerabilities (Spell.dbc COUPE_PERCANTE and
 // AscensionApexDiscSpellInfoScript below). 27/10 evening (sponsor): BOTH discs come back to the hand, wherever the
 // Apex stands, and cut each enemy again on the way back.
-constexpr float DISC_RANGE = 35.0f;
+constexpr float DISC_RANGE = 25.0f;                  // 28/10 (sponsor: « it fetches mobs much too far »), SpellRange 34
 constexpr float DISC_HALF_WIDTH = 1.5f;              // 3 m blade path, plus the combat reach of the unit
-constexpr float DISC_DEFAULT_SPEED = 14.0f;          // Speed of 9300046 / 9300090 (VITESSE_DISQUE), read from the spell
+constexpr float DISC_DEFAULT_SPEED = 18.0f;          // Speed of 9300046 / 9300090 (VITESSE_DISQUE), read from the spell
+constexpr float DISC_RETURN_SPEED = 36.0f;           // 28/10 (sponsor: « the return must be fast »): Speed of 9300131
 constexpr float DISC_HEIGHT = 1.2f;                  // above the feet of the Apex at the throw
 constexpr float DISC_VERTICAL_REACH = 5.0f;          // feet of a unit at most 5 m above or below the disc
 constexpr uint32 DISC_TICK_MS = 100;
@@ -532,7 +533,7 @@ Position PlanDiscFlight(Player* apex, Unit* aim, ApexDiscFlight& flight)
                                     flight.StartY + flight.DirY * length, DiscHeightAt(flight, length),
                                     apex->GetPhaseMask(), LINEOFSIGHT_ALL_CHECKS, VMAP::ModelIgnoreFlags::M2);
     };
-    // Spell::CheckRange accepts the aimed unit a little beyond 35 m (combat reaches, leeway): the line reaches it.
+    // Spell::CheckRange accepts the aimed unit a little beyond DISC_RANGE (combat reaches, leeway): the line reaches it.
     float const reach = aim && aim != apex ? apex->GetExactDist2d(aim) + aim->GetCombatReach() : 0.0f;
     float length = std::max(DISC_RANGE, reach);
     if (!clear(length))
@@ -626,7 +627,7 @@ void ScheduleDiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> flight);
 constexpr Milliseconds DISC_RETURN_MISSILE_DELAY = 100ms;   // the client must have the trigger before its missile
 
 /// The disc seen flying back (27/10 evening): an invisible trigger (WORLD_TRIGGER, the Apex's faction) left where the
-/// disc turned sends the disc's missile (9300131: DUMMY, no effect, the throw's visual and speed) at the Apex. The
+/// disc turned sends the disc's missile (9300131: DUMMY, no effect, the throw's visual, DISC_RETURN_SPEED since 28/10) at the Apex. The
 /// client follows a missile aimed at a unit, as the server's return follows the Apex. Visual only: the cuts of the
 /// return are SweepDisc's. The trigger lives as long as the longest return (MaxMs), plus a second.
 void ShowDiscReturn(Player* apex, ApexDiscFlight const& flight, float z, uint32 lifeMs)
@@ -646,7 +647,7 @@ void ShowDiscReturn(Player* apex, ApexDiscFlight const& flight, float z, uint32 
 }
 
 /// One step of a disc: out along its line at its speed (time measured from the throw, so the cuts follow the
-/// missile the client draws), then back to the hand at the same speed, wherever the Apex is (Smart Disc and Razor
+/// missile the client draws), then back to the hand at DISC_RETURN_SPEED (twice as fast, 28/10), wherever the Apex is (Smart Disc and Razor
 /// Disc alike since 27/10 evening).
 void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
 {
@@ -676,13 +677,13 @@ void DiscTick(Player* apex, std::shared_ptr<ApexDiscFlight> const& flight)
             return;
         flight->Returning = true;
         flight->Z = DiscHeightAt(*flight, flight->Length);   // the return starts at the height the disc turned
-        uint32 const returnMs = uint32(flight->Length / flight->Speed * 1000.0f) + DISC_RETURN_GRACE_MS;
+        uint32 const returnMs = uint32(flight->Length / DISC_RETURN_SPEED * 1000.0f) + DISC_RETURN_GRACE_MS;
         flight->MaxMs = getMSTimeDiff(flight->LaunchMs, now) + returnMs;
         ShowDiscReturn(apex, *flight, DiscHeightAt(*flight, flight->Length), returnMs);
         ScheduleDiscTick(apex, flight);
         return;
     }
-    float const step = flight->Speed * float(getMSTimeDiff(flight->LastMs, now)) / 1000.0f;
+    float const step = DISC_RETURN_SPEED * float(getMSTimeDiff(flight->LastMs, now)) / 1000.0f;
     float const dx = apex->GetPositionX() - flight->X;
     float const dy = apex->GetPositionY() - flight->Y;
     float const distance = std::sqrt(dx * dx + dy * dy);
