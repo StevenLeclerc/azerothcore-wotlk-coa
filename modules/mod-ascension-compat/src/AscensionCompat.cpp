@@ -830,7 +830,10 @@ public:
       removed += ReconcileTinkerOutsideApex(player, activeSpec);
     // Not counted in `learned`/`removed`: the Apex buffs are announced by learnSpell itself, never « restored ».
     if (player->getClass() == CLASS_TINKER)
+    {
       SynchronizeTinkerApexBuffs(player, apex, activeSpec);
+      ClearTinkerApexDeadButtons(player, apex);
+    }
     // Trophies outlive the node that grants them only until death; leaving Apex (or losing the node) ends them.
     if (player->getClass() == CLASS_TINKER && !player->HasSpell(SPELL_APEX_TROPHY_HUNTER))
       player->RemoveAurasDueToSpell(SPELL_APEX_TROPHIES);
@@ -919,6 +922,45 @@ public:
 
     return learned;
   }
+
+    /// Tinker Apex: removeSpell leaves the action bars untouched, so the Tinker kit taken back at level 10
+    /// (Repair Shot, Sticky Bomb, turrets...) stayed on the bars and only played its cast bar (commander,
+    /// 31/10 on the Live). Only the spells Apex takes back (ReconcileTinkerApex: ranks of the excluded roots,
+    /// spells of the nodes Apex may not hold) lose their button, and only once unknown: a talent or replacement
+    /// spell taught later at login is never one of them. Leaving Apex (or below level 10), the same goes for the
+    /// Apex spells (9300000-9300199: ReconcileTinkerOutsideApex, SynchronizeTinkerApexBuffs). Saved with the next
+    /// character save.
+    void ClearTinkerApexDeadButtons(Player* player, bool apex)
+    {
+      auto takenBack = [player, apex](uint32 spellId)
+      {
+        if (!apex)
+          return spellId >= TINKER_APEX_EXOFRAME && spellId <= TINKER_APEX_EXOFRAME + 199;
+        if (IsTinkerApexExcludedSpell(spellId))
+          return true;
+        for (AscensionProgression::Rank const& rank : AscensionProgression::Ranks)
+          if (rank.SpellId == spellId && rank.ClassId == player->getClass() &&
+              IsTinkerApexExcludedSpell(rank.FirstSpellId))
+            return true;
+        for (AscensionCompatData::CoATalentEntry const& entry : AscensionCompatData::CoATalentEntries)
+          if (entry.ClassId == player->getClass() && ApexMayNotHold(entry) &&
+              std::find(entry.SpellIds.begin(), entry.SpellIds.end(), spellId) != entry.SpellIds.end())
+            return true;
+        return false;
+      };
+      bool changed = false;
+      for (uint8 slot = 0; slot < MAX_ACTION_BUTTONS; ++slot)
+      {
+        ActionButton const* button = player->GetActionButton(slot);
+        if (!button || button->GetType() != ACTION_BUTTON_SPELL || !button->GetAction() ||
+            player->HasSpell(button->GetAction()) || !takenBack(button->GetAction()))
+          continue;
+        player->removeActionButton(slot);
+        changed = true;
+      }
+      if (changed && player->IsInWorld())
+        player->SendActionButtons(1);
+    }
 
     /// Tinker Apex: takes back the ranks of the excluded roots (removeSpell follows a server rank chain only
     /// when sSpellMgr knows it) and the excluded class-tab picks. The class-tab record (tree 0) is what the
