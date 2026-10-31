@@ -269,14 +269,21 @@ bool VisitDue(PendingStep const& pending)
            pending.State == StepState::Return;
 }
 
-/// Reward items of a quest (RewardItemId, non-zero), empty when the quest is not loaded.
+/// Reward items of a quest (RewardItemId, non-zero), empty when the quest is not loaded. A lone choice item is a
+/// reward too (always taken): 26151 gives five pieces, one more than the RewardItem columns hold.
 std::vector<uint32> QuestRewardItems(uint32 questId)
 {
     std::vector<uint32> items;
     if (Quest const* quest = sObjectMgr->GetQuestTemplate(questId))
+    {
         for (uint32 i = 0; i < QUEST_REWARDS_COUNT; ++i)
             if (quest->RewardItemId[i])
                 items.push_back(quest->RewardItemId[i]);
+        if (quest->GetRewChoiceItemsCount() == 1)
+            for (uint32 i = 0; i < QUEST_REWARD_CHOICES_COUNT; ++i)
+                if (quest->RewardChoiceItemId[i])
+                    items.push_back(quest->RewardChoiceItemId[i]);
+    }
     return items;
 }
 
