@@ -6380,6 +6380,35 @@ public:
 // hook calls RefreshApexWeaponVisual, which would call the restore again.
 constexpr uint32 SPELL_APEX_COMBISTICK_STANCE = 9300002;
 constexpr uint32 ITEM_APEX_COMBISTICK_APPEARANCE = 9120002; // display 202102, appearance entry only
+// The spear shown follows the tier of the combistick held (exploitation/apex/apex-lances-progression-ptr.sql): plain
+// vanilla spears up to level 50, the Apex model only at 60. Appearance entries are two-handed spears the client
+// already knows (Item.dbc); an unknown combistick shows the Apex model, as before.
+constexpr std::array<std::pair<uint32, uint32>, 6> APEX_COMBISTICK_APPEARANCES = {{
+  { 9120006, 420 },   // 10, Simple Spear
+  { 9120080, 15810 }, // 20, Short Spear
+  { 9120081, 15811 }, // 30, Heavy Spear
+  { 9120082, 10799 }, // 40, Headspike
+  { 9120083, 20083 }, // 50, Hunting Spear
+  { 9120003, ITEM_APEX_COMBISTICK_APPEARANCE }, // 60
+}};
+
+static uint32 ApexCombistickAppearance(uint32 combistick)
+{
+  for (auto const& [entry, appearance] : APEX_COMBISTICK_APPEARANCES)
+    if (entry == combistick)
+      return appearance;
+  return ITEM_APEX_COMBISTICK_APPEARANCE;
+}
+
+static bool IsApexCombistickAppearance(uint32 entry)
+{
+  if (entry == ITEM_APEX_COMBISTICK_APPEARANCE)
+    return true;
+  for (auto const& [combistick, appearance] : APEX_COMBISTICK_APPEARANCES)
+    if (appearance == entry)
+      return true;
+  return false;
+}
 constexpr uint32 SPELL_APEX_COMBISTICK_OFFHAND_DISARM = 9300017; // hidden aura 254 (off-hand disarm), held with the stance
 
 static Item* GetApexCombistick(Player* player)
@@ -6395,7 +6424,7 @@ static void ApplyApexWeaponVisual(Player* player, Item const* lance)
 {
   uint16 const mainHand = EQUIPMENT_SLOT_MAINHAND * 2;
   uint16 const offHand = EQUIPMENT_SLOT_OFFHAND * 2;
-  player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + mainHand, ITEM_APEX_COMBISTICK_APPEARANCE);
+  player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + mainHand, ApexCombistickAppearance(lance->GetEntry()));
   player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + mainHand, 0, lance->GetEnchantmentId(PERM_ENCHANTMENT_SLOT));
   player->SetUInt16Value(PLAYER_VISIBLE_ITEM_1_ENCHANTMENT + mainHand, 1, lance->GetEnchantmentId(TEMP_ENCHANTMENT_SLOT));
   player->SetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + offHand, 0);
@@ -6432,8 +6461,7 @@ static void RefreshApexWeaponVisual(Player* player)
   Item* lance = GetApexCombistick(player);
   if (lance && player->HasAura(SPELL_APEX_COMBISTICK_STANCE))
     ApplyApexWeaponVisual(player, lance);
-  else if (player->GetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + EQUIPMENT_SLOT_MAINHAND * 2) ==
-           ITEM_APEX_COMBISTICK_APPEARANCE)
+  else if (IsApexCombistickAppearance(player->GetUInt32Value(PLAYER_VISIBLE_ITEM_1_ENTRYID + EQUIPMENT_SLOT_MAINHAND * 2)))
     RestoreApexWeaponVisual(player);
 }
 
