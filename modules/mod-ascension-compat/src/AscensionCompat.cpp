@@ -336,6 +336,10 @@ constexpr uint32 SPELL_TINKER_BLOCK = 107;
 constexpr std::array<uint32, 3> TINKER_APEX_STARTER_ITEMS = { 9120004, 9120005, 9120006 };
 constexpr char TINKER_APEX_STARTER_SETTING[] = "core.apex_starter";
 constexpr uint32 TINKER_APEX_STARTER_REVISION = 1;
+// T1 (docs/CONCEPTION-apex-chasses-paliers.md § 1, 31/10): Wristblade Stance posed once per character at its first
+// Apex pass, marker "core.apex_stance" (set once a stance is up).
+constexpr char TINKER_APEX_STANCE_SETTING[] = "core.apex_stance";
+constexpr uint32 TINKER_APEX_EXOFRAME = 9300000;   // identity passive of the free node 138347
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_SPELLS.begin(), TINKER_APEX_EXCLUDED_SPELLS.end()));
 static_assert(std::is_sorted(TINKER_APEX_EXCLUDED_CLASS_ENTRIES.begin(), TINKER_APEX_EXCLUDED_CLASS_ENTRIES.end()));
 static_assert(std::is_sorted(TINKER_APEX_ONLY_CLASS_ENTRIES.begin(), TINKER_APEX_ONLY_CLASS_ENTRIES.end()));
@@ -1290,6 +1294,85 @@ public:
     }
   }
 
+  // T1 (docs/CONCEPTION-apex-chasses-paliers.md § 1): key 1, Wristblade Flurry, asks Wristblade Stance (its
+  // CasterAuraSpell), and nothing posed a stance at the entry into Apex: the key stayed mute until the player found
+  // the stance. Once per character (marker core.apex_stance), never a bot, only when neither stance is up. The
+  // marker is set once a stance is there: a pass that could not pose it (dead, stance not learned yet, spell missing)
+  // tries again at the next pass (login, level, specialization). Runs after SynchronizeProgression, which grants the
+  // free stance nodes (138352, 138356) at level 10.
+  void PoseTinkerApexDefaultStance(Player* player)
+  {
+    if (!player->IsInWorld() || !player->IsAlive() || !player->GetSession() || player->GetSession()->IsBot() ||
+        player->GetPlayerSetting(TINKER_APEX_STANCE_SETTING, 0).value >= 1)
+      return;
+    // Leaving Apex, SwitchSpecialization removes the Apex spells while the active specialization is still 102, and
+    // the forget hook of Exoframe runs SynchronizeProficiencies: no stance (and no marker) once Exoframe is gone.
+    if (!player->HasSpell(TINKER_APEX_EXOFRAME))
+      return;
+    if (!player->HasAura(AscensionTinkerApex::SPELL_WRISTBLADE_STANCE) &&
+        !player->HasAura(AscensionTinkerApex::SPELL_SPEAR_STANCE))
+    {
+      if (!player->HasSpell(AscensionTinkerApex::SPELL_WRISTBLADE_STANCE) ||
+          !sSpellMgr->GetSpellInfo(AscensionTinkerApex::SPELL_WRISTBLADE_STANCE))
+        return;
+      player->CastSpell(player, AscensionTinkerApex::SPELL_WRISTBLADE_STANCE, true);
+      if (!player->HasAura(AscensionTinkerApex::SPELL_WRISTBLADE_STANCE))
+        return;
+      LOG_INFO("module.ascension_compat", "Apex default stance posed for {} (level {})", player->GetName(),
+               uint32(player->GetLevel()));
+    }
+    player->UpdatePlayerSetting(TINKER_APEX_STANCE_SETTING, 0, 1);
+  }
+
+  // T3 (docs/CONCEPTION-apex-chasses-paliers.md § 1): back from Apex, the weapons put away at the entry
+  // (UnequipWeaponsWithoutProficiency) stayed in the bags. Each weapon slot left empty (main hand, off hand, ranged)
+  // takes back the bag item of highest ItemLevel it accepts; CanEquipItem judges the rest (proficiency, level,
+  // class, combat). A two-hander never pushes out an occupied off hand. Bags only: never the bank or the mailbox.
+  void ReequipTinkerWeaponsFromBags(Player* player)
+  {
+    if (!player->IsInWorld())
+      return;
+    uint32 equipped = 0;
+    for (uint8 const slot : { uint8(EQUIPMENT_SLOT_MAINHAND), uint8(EQUIPMENT_SLOT_OFFHAND), uint8(EQUIPMENT_SLOT_RANGED) })
+    {
+      if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+        continue;
+      uint16 const wantedDest = (uint16(INVENTORY_SLOT_BAG_0) << 8) | slot;
+      Item* best = nullptr;
+      auto consider = [player, slot, wantedDest, &best](Item* item)
+      {
+        if (!item || item->IsInTrade())
+          return;
+        ItemTemplate const* proto = item->GetTemplate();
+        bool const shield = proto->Class == ITEM_CLASS_ARMOR && proto->SubClass == ITEM_SUBCLASS_ARMOR_SHIELD;
+        if (proto->Class != ITEM_CLASS_WEAPON && !(shield && slot == EQUIPMENT_SLOT_OFFHAND))
+          return;
+        if (slot == EQUIPMENT_SLOT_MAINHAND && proto->InventoryType == INVTYPE_2HWEAPON &&
+            player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_OFFHAND) && !player->CanTitanGrip(proto))
+          return;
+        uint16 dest = 0;
+        if (player->CanEquipItem(slot, dest, item, false) != EQUIP_ERR_OK || dest != wantedDest)
+          return;
+        if (!best || proto->ItemLevel > best->GetTemplate()->ItemLevel)
+          best = item;
+      };
+      for (uint8 i = INVENTORY_SLOT_ITEM_START; i < INVENTORY_SLOT_ITEM_END; ++i)
+        consider(player->GetItemByPos(INVENTORY_SLOT_BAG_0, i));
+      for (uint8 bagSlot = INVENTORY_SLOT_BAG_START; bagSlot < INVENTORY_SLOT_BAG_END; ++bagSlot)
+        if (Bag* bag = player->GetBagByPos(bagSlot))
+          for (uint32 j = 0; j < bag->GetBagSize(); ++j)
+            consider(bag->GetItemByPos(uint8(j)));
+      if (!best)
+        continue;
+      player->SwapItem(best->GetPos(), wantedDest);
+      if (player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot) == best)
+        ++equipped;
+    }
+    if (equipped)
+      LOG_INFO("module.ascension_compat", "Re-equipped {} weapon(s) from the bags of {} leaving Apex", equipped,
+               player->GetName());
+  }
+
   bool AffectsProficiencies(uint32 spellId) const {
     bool const isProficiency = std::any_of(
         AscensionCompatData::ProficiencyDefinitions.begin(),
@@ -1394,7 +1477,10 @@ public:
     // Every pass where a character is (or just became) Apex: spec entry, level 10, login of an existing Apex.
     // After the unequip above, so the starting weapons leaving their slots take the bag space first.
     if (apex)
+    {
       GrantTinkerApexStarterWeapons(player);
+      PoseTinkerApexDefaultStance(player);
+    }
 
     // Defense and Unarmed are intrinsic combat skills, absent from the equipment proficiency catalog.
     // Keep their current value and cap in step with the weapon skills on login and every level change.
@@ -2540,6 +2626,10 @@ public:
     uint32 const restored = RestoreBuilds(player, specializationId);
     uint32 granted = SynchronizeProgression(player);
     SynchronizeProficiencies(player);
+    // T3: leaving Apex (level 10 or more), the mace and gun put away at the entry go back to their slots.
+    if (player->getClass() == CLASS_TINKER && IsTinkerApex(player, previousSpecialization) &&
+        !IsTinkerApex(player, specializationId))
+      ReequipTinkerWeaponsFromBags(player);
     ChatHandler(player->GetSession())
         .PSendSysMessage(
             "Activated specialization {}. Stored the build of specialization {}, removed {} old talent "

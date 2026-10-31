@@ -6,7 +6,8 @@
 //
 // Script names (contract C-SCRIPTS, written to spell_script_names by exploitation/apex/apex-talents60-ptr.sql):
 //   9300011 spell_apex_rocket_pounce          Canopy Drop
-//   9300012, 9300108, 9300116 spell_apex_cannon_gate   Cannon Offline refuses the cannon (and Plasma Frenzy holds it)
+//   9300012, 9300108, 9300116 spell_apex_cannon_gate   Cannon Offline refuses the cannon (and Plasma Frenzy holds it);
+//                                                      so do empty shoulders (31/10, any pauldrons)
 //   9300013 spell_apex_plasma_bolt            Patient Ambush: the shot spends Charged Caster
 //   9300018 spell_apex_skull_and_spine        Claim the Skull; the killed one's body becomes its bones (28/10)
 //   9300036 aura_apex_trophy_hunter           Trophy Hunter v1, through GrantApexTrophies (cap of Trophy Rack)
@@ -1029,6 +1030,11 @@ class spell_apex_cannon_gate : public SpellScript
             return SPELL_CAST_OK;
         if (caster->HasAura(SPELL_CANNON_OFFLINE))
             return SPELL_FAILED_CASTER_AURASTATE;
+        // The cannon rides on the shoulder (decision Q1 of 31/10, docs/CONCEPTION-apex-chasses-paliers.md § 5): no
+        // pauldrons, no shot, whatever pauldrons they are. Every spell of this script, aimed or support shot.
+        if (Player* player = caster->ToPlayer())
+            if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS))
+                return SPELL_FAILED_EQUIPPED_ITEM;
         // Plasma Frenzy holds the cannon for its 5 s: no AIMED shot meanwhile (Plasma Caster, as before the support
         // trunk, and the three aimed support shots). Plasma Barrage and Cut the Chains stay usable.
         if (ApexAimedShot(GetSpellInfo()->Id) && caster->HasAura(SPELL_PLASMA_FRENZY))
@@ -2569,6 +2575,9 @@ void ArmOath(Player* apex, SpellInfo const* info, Unit* target)
     // Every CheckCast handler runs even after another refused (Spell::CallScriptCheckCastHandlers): the refusals of
     // spell_apex_cannon_gate are tested here again for the cannon shot.
     if (id == SPELL_CAUTERY_ROUND && (apex->HasAura(SPELL_CANNON_OFFLINE) || apex->HasAura(SPELL_PLASMA_FRENZY)))
+        return;
+    // Empty shoulders (31/10): the gate refuses every support shot of spell_apex_support_cast (all bound to it too).
+    if (!apex->GetItemByPos(INVENTORY_SLOT_BAG_0, EQUIPMENT_SLOT_SHOULDERS))
         return;
     uint32 const now = getMSTime();
     if (!state.oathArmed || state.oathSpell != id || getMSTimeDiff(state.oathArmedAt, now) >= OATH_ARM_MS)
