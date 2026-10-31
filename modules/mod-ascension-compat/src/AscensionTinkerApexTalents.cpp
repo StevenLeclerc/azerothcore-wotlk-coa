@@ -1960,6 +1960,33 @@ public:
     }
 };
 
+// ---- Camouflage tracking (31/10 evening, sponsor): under the camouflage, the Apex sees humanoids and beasts on the
+// minimap, from level 10 (the specialization itself starts there). Set on PLAYER_TRACK_CREATURES directly, as the
+// SPELL_AURA_TRACK_CREATURES handler does (SpellAuraEffects.cpp HandleAuraTrackCreatures), so no tracking spell of the
+// player is replaced. On removal, only the bits no remaining tracking aura holds are cleared.
+constexpr uint32 CAMO_TRACK_MASK = (1u << (CREATURE_TYPE_BEAST - 1)) | (1u << (CREATURE_TYPE_HUMANOID - 1));
+
+uint32 TrackedByAuras(Player const* player)
+{
+    uint32 mask = 0;
+    for (AuraEffect const* effect : player->GetAuraEffectsByType(SPELL_AURA_TRACK_CREATURES))
+        if (effect->GetMiscValue() > 0 && effect->GetMiscValue() <= 32)
+            mask |= 1u << (effect->GetMiscValue() - 1);
+    return mask;
+}
+
+void ApplyCamouflageTracking(Player* player)
+{
+    player->SetFlag(PLAYER_TRACK_CREATURES, CAMO_TRACK_MASK);
+}
+
+void ClearCamouflageTracking(Player* player)
+{
+    uint32 const clear = CAMO_TRACK_MASK & ~TrackedByAuras(player);
+    if (clear)
+        player->RemoveFlag(PLAYER_TRACK_CREATURES, clear);
+}
+
 class AscensionApexTalentUnitScript : public UnitScript
 {
 public:
@@ -2054,6 +2081,7 @@ public:
                 SynchronizeApexStanceAttacks(player);
                 break;
             case SPELL_CAMOUFLAGE:
+                ApplyCamouflageTracking(player);
                 // Never Saw It Coming: a new ambush starts with a clean slate (OnDamage records the hits).
                 if (player->HasAura(SPELL_NSIC))
                     State(player).ripostes.clear();
@@ -2095,6 +2123,7 @@ public:
                 SynchronizeApexStanceAttacks(player);
                 break;
             case SPELL_CAMOUFLAGE:
+                ClearCamouflageTracking(player);
                 // Optical Camouflage mends only under it: the next camouflage starts over (below 30% again).
                 State(player).camoMending = false;
                 if (mode == AURA_REMOVE_BY_DEATH || !player->IsAlive())
@@ -2116,6 +2145,10 @@ public:
                     Defer(player, [](Player* apex) { SelfDestruct(apex); });
                 break;
             default:
+                // A tracking spell ended under the camouflage: its handler cleared its bit, the camouflage keeps it.
+                if (aurApp->GetBase()->GetSpellInfo()->HasAura(SPELL_AURA_TRACK_CREATURES) &&
+                    player->HasAura(SPELL_CAMOUFLAGE))
+                    ApplyCamouflageTracking(player);
                 break;
         }
     }
