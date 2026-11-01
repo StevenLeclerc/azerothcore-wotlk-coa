@@ -3273,18 +3273,11 @@ bool Player::addSpell(uint32 spellId, uint8 addSpecMask, bool updateActive, bool
 
                     if (IsInWorld())
                     {
-                        auto supersede = [this](uint32 from, uint32 to)
-                        {
-                            WorldPacket data(SMSG_SUPERCEDED_SPELL, 4 + 4);
-                            data << uint32(from);
-                            data << uint32(to);
-                            SendDirectMessage(&data);
-                        };
                         if (shown != lowerId)
-                            supersede(shown, lowerId);
-                        supersede(lowerId, spellInfo->Id);
+                            SendSupercededSpell(shown, lowerId, true);
+                        SendSupercededSpell(lowerId, spellInfo->Id, false);
                         if (shown != lowerId)
-                            supersede(spellInfo->Id, shown);
+                            SendSupercededSpell(spellInfo->Id, shown, true);
                     }
                     return false;
                 }
@@ -3769,9 +3762,7 @@ void Player::removeSpell(uint32 spell_id, uint8 removeSpecMask, bool onlyTempora
         if (IsInWorld() && replacement->first != replacement->second &&
             std::find(shownReplacementKeys.begin(), shownReplacementKeys.end(), replacement->first) != shownReplacementKeys.end())
         {
-            WorldPacket packet(SMSG_SUPERCEDED_SPELL, 8);
-            packet << uint32(replacement->second) << uint32(replacement->first);
-            SendDirectMessage(&packet);
+            SendSupercededSpell(replacement->second, replacement->first, true);
         }
         replacement = m_temporarySpellReplacements.erase(replacement);
     }
@@ -13858,10 +13849,70 @@ void Player::SetTemporarySpellReplacement(uint32 original, uint32 replacement)
         m_temporarySpellReplacements[original] = replacement;
     }
     if (previous != replacement && IsInWorld())
+        SendSupercededSpell(previous, replacement, true);
+}
+
+namespace
+{
+    // Long enough for the client's answer to come back over a slow link.
+    constexpr uint32 SWAP_AUTOPLACE_WINDOW_MS = 1500;
+    // The bars are sent back at least this long after the last swap, and at least two round trips plus a
+    // margin, once: a burst of swaps sends them once, and the client's in-place rewrite of the last swap has
+    // landed first. Otherwise the resend would show a target the client no longer knows, and the client
+    // would clear that button (Player::UpdateActionButtonsResend).
+    constexpr uint32 SWAP_RESEND_DELAY_MS = 300;
+    constexpr uint32 SWAP_RESEND_MARGIN_MS = 100;
+    // The client's own copy only happens up to this level (Ascension.exe 0x542D5A: cmp level, 0Ah ; jg).
+    constexpr uint8 SWAP_AUTOPLACE_MAX_LEVEL = 10;
+}
+
+void Player::SendSupercededSpell(uint32 from, uint32 to, bool temporarySwap)
+{
+    WorldPacket packet(SMSG_SUPERCEDED_SPELL, 8);
+    packet << uint32(from) << uint32(to);
+    SendDirectMessage(&packet);
+    if (!temporarySwap)
+        return;
+
+    uint32 const now = getMSTime();
+    for (auto itr = m_temporarySwapSpells.begin(); itr != m_temporarySwapSpells.end();)
+        itr = getMSTimeDiff(itr->second.first, now) > SWAP_AUTOPLACE_WINDOW_MS ? m_temporarySwapSpells.erase(itr) : std::next(itr);
+    m_temporarySwapSpells[to] = { now, from };
+    m_lastTemporarySwapMSTime = now;
+}
+
+bool Player::IsClientSwapAutoPlacement(uint8 button, uint32 action, uint8 type) const
+{
+    if (type != ACTION_BUTTON_SPELL || GetLevel() > SWAP_AUTOPLACE_MAX_LEVEL)
+        return false;
+    auto const swap = m_temporarySwapSpells.find(action);
+    if (swap == m_temporarySwapSpells.end() || getMSTimeDiff(swap->second.first, getMSTime()) > SWAP_AUTOPLACE_WINDOW_MS)
+        return false;
+    // The rewritten button holds the new spell, or still the old one when the server refused the rewrite.
+    uint32 const replaced = swap->second.second;
+    bool heldElsewhere = false;
+    for (auto const& [slot, actionButton] : m_actionButtons)
     {
-        WorldPacket packet(SMSG_SUPERCEDED_SPELL, 8);
-        packet << previous << replacement;
-        GetSession()->SendPacket(&packet);
+        if (actionButton.uState == ACTIONBUTTON_DELETED)
+            continue;
+        if (slot == button)
+            return false;
+        if (actionButton.GetType() == ACTION_BUTTON_SPELL &&
+            (actionButton.GetAction() == action || actionButton.GetAction() == replaced))
+            heldElsewhere = true;
+    }
+    return heldElsewhere;
+}
+
+void Player::UpdateActionButtonsResend()
+{
+    if (!m_actionButtonsResendPending)
+        return;
+    uint32 const delay = std::max(SWAP_RESEND_DELAY_MS, 2 * GetSession()->GetLatency() + SWAP_RESEND_MARGIN_MS);
+    if (getMSTimeDiff(m_lastTemporarySwapMSTime, getMSTime()) >= delay)
+    {
+        m_actionButtonsResendPending = false;
+        SendActionButtons(1);
     }
 }
 

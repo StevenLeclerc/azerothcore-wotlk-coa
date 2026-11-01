@@ -71,6 +71,8 @@ void Player::Update(uint32 p_time)
     // Update cinematic camera (if needed)
     _cinematicMgr.UpdateCinematic(p_time);
 
+    UpdateActionButtonsResend();
+
     // used to implement delayed far teleports
     SetMustDelayTeleport(true);
     ProcessSpellQueue();
