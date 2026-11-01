@@ -1813,6 +1813,17 @@ public:
     // Does nothing when the player already holds the spell in any state (owned, other spec, pending
     // deletion): such a copy is not ours to hide.
     void LearnTemporarySpellReplacementTarget(uint32 spellId);
+    // At level 10 and below, the client copies the new spell of every SMSG_SUPERCEDED_SPELL into the first
+    // free button of a 12-button block on its own, then sends that button (Ascension.exe 0x542030, branch
+    // 0x542D4C-0x542DE3; rank-less spells only), even though 0x5AAFD0 has just rewritten the old spell's
+    // buttons to it. A temporary replacement swaps back and forth, so each swap added one more copy.
+    // True when a button set by the client is that copy: the new spell of a swap sent less than
+    // SWAP_AUTOPLACE_WINDOW_MS ago, at level 10 or below, put into a button the server holds empty while
+    // another button already holds it (the in-place rewrite arrives first). A button the player moves is
+    // accepted: its old button was cleared before.
+    [[nodiscard]] bool IsClientSwapAutoPlacement(uint8 button, uint32 action, uint8 type) const;
+    void RequestActionButtonsResend() { m_actionButtonsResendPending = true; }
+    void UpdateActionButtonsResend();
     [[nodiscard]] bool CanUseTwoHandWithShield(ItemTemplate const* main, ItemTemplate const* off) const;
     [[nodiscard]] float GetMeleeAbilityRangeBonus() const;
 
@@ -2951,6 +2962,13 @@ protected:
     std::set<uint32> m_unannouncedSpells;
     // The spell LearnTemporarySpellReplacementTarget is learning right now; _addSpell does not announce it.
     uint32 m_unannouncedLearnSpellId{0};
+    // New spell of each temporary-replacement SMSG_SUPERCEDED_SPELL -> when it was sent (getMSTime) and the
+    // spell it replaced.
+    std::map<uint32, std::pair<uint32, uint32>> m_temporarySwapSpells;
+    uint32 m_lastTemporarySwapMSTime{0};
+    // A refused client copy: the bars are sent back once the swaps have settled (Player::Update).
+    bool m_actionButtonsResendPending{false};
+    void SendSupercededSpell(uint32 from, uint32 to, bool temporarySwap);
     PlayerTalentMap m_talents;
     uint32 m_lastPotionId;                              // last used health/mana potion in combat, that block next potion use
 

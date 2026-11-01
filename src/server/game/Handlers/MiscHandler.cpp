@@ -1026,6 +1026,14 @@ void WorldSession::HandleSetActionButtonOpcode(WorldPacket& recv_data)
                     type, action, button, _player->GetName(), _player->GetGUID().ToString());
                 return;
         }
+        // The client's own copy of a swapped spell into a free button (Player::IsClientSwapAutoPlacement):
+        // not saved, and the bars are sent back once the swaps settle so that the client drops it too.
+        if (GetPlayer()->IsClientSwapAutoPlacement(button, action, type))
+        {
+            LOG_DEBUG("network.opcode", "MISC: Spell {} put into button {} by the client after a swap: refused", action, button);
+            GetPlayer()->RequestActionButtonsResend();
+            return;
+        }
         GetPlayer()->addActionButton(button, action, type);
     }
 }
