@@ -2061,8 +2061,10 @@ struct ApexTraqueState : public DataMap::Base
     bool rushFirstDone = false;
     ObjectGuid detonationPrey;      // Rocket Pounce took off at it: detonation once landed
     uint32 detonationAt = 0;
-    Spell const* launch = nullptr;  // multi-target launch being read (compared, never dereferenced)
-    uint32 launchAt = 0;
+    Spell const* launch = nullptr;  // multi-target launch being read: address (compared, never dereferenced) ...
+    uint32 launchSpellId = 0;       // ... spell id ...
+    uint8 launchCastCount = 0;      // ... and Spell::m_cast_count (the client's cast counter; 0 when triggered)
+    uint32 launchAt = 0;            // getMSTime of its first hit
     uint32 launchCount = 0;
     uint32 scaleSpell = 0;          // CastScaled: the triggered spell whose damage is scaled ...
     uint32 scalePct = 100;          // ... by this
@@ -2445,6 +2447,16 @@ void TakePvpLock(Unit* target, uint8 bit, ApexTraqueState& state)
     hunt.lockAt[bit] = getMSTime();
 }
 
+/// SPELL_CAST_OK is no hit: a prey immune to the reaction's damage, or an evading creature, counts nothing (the trace
+/// is still consumed). `spellId` 0 (Open Wound): the evade test only.
+bool ReactionReached(Player* apex, Unit* target, uint32 spellId)
+{
+    if (Creature const* creature = target->ToCreature(); creature && creature->IsEvadingAttacks())
+        return false;
+    SpellInfo const* info = spellId ? sSpellMgr->GetSpellInfo(spellId) : nullptr;
+    return !info || !target->IsImmunedToDamage(apex, info);
+}
+
 /// Plays `reaction` on `target`; true when its spell was cast. `detonation`: from the pounce (150% damage; the cannon's
 /// sure critical goes on Locked On, there is no shot to carry it). The trace is already gone. Counting (points, Blood
 /// Rush, doubled first reaction) and the PvP lock follow a success only.
@@ -2452,8 +2464,11 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
 {
     if (!target->IsAlive())
         return false;
-    // Nail is decided on what the prey does now: Silencing Haft on a caster.
-    bool const haft = reaction == REACTION_NAIL && target->IsNonMeleeSpellCast(false);
+    // Nail is decided on what the prey does now: Silencing Haft on a caster; under its own PvP lock, Pinned Down if
+    // that lock allows it (tested just below), else nothing.
+    bool haft = reaction == REACTION_NAIL && target->IsNonMeleeSpellCast(false);
+    if (haft && PvpLocked(target, LOCK_HAFT, state))
+        haft = false;
     int8 const lock = reaction == REACTION_BARBED ? int8(LOCK_BARBED) :
         reaction == REACTION_NAIL ? int8(haft ? LOCK_HAFT : LOCK_NAIL) : int8(-1);
     if (lock >= 0 && PvpLocked(target, uint8(lock), state))
@@ -2473,12 +2488,14 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
         pct = pct * DETONATION_PCT / 100;
 
     bool cast = false;
+    uint32 reachSpell = 0;   // the spell whose damage immunity says whether the reaction reached the prey
     switch (reaction)
     {
         case REACTION_BARBED:
         {
             // Read before the hit: « without Hemorrhage » means none of this Apex's on the prey (gone or immune).
             bool const bleeding = target->GetAura(SPELL_HEMORRHAGE, apex->GetGUID());
+            reachSpell = SPELL_BARBED;
             cast = CastScaled(apex, target, SPELL_BARBED, pct);
             if (!cast)
                 break;
@@ -2497,6 +2514,7 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
             break;
         }
         case REACTION_BOILING:
+            reachSpell = SPELL_BOILING_FIRE;
             if (target->GetAura(SPELL_HEMORRHAGE, apex->GetGUID()))
             {
                 Aura* mark = apex->AddAura(SPELL_BOILING_MARK, target);
@@ -2517,6 +2535,7 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
             }
             break;
         case REACTION_RIP:
+            reachSpell = SPELL_RIP;
             cast = CastScaled(apex, target, SPELL_RIP, pct);
             if (!cast)
                 break;
@@ -2534,11 +2553,13 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
             cast = true;
             break;
         case REACTION_QUARRY:
+            reachSpell = SPELL_QUARRY;
             cast = CastScaled(apex, target, SPELL_QUARRY, pct);
             if (cast)
                 AddHemorrhage(apex, target, uint8(HEMO_QUARRY * times));
             break;
         case REACTION_NAIL:
+            reachSpell = haft ? SPELL_SILENCING_HAFT : SPELL_PINNED_DOWN;
             if (haft)
                 cast = Cast(apex, target, SPELL_SILENCING_HAFT);
             else
@@ -2559,6 +2580,12 @@ bool ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonatio
     // A reflected tick may have killed the Apex, whose death reset the hunt (OnPlayerJustDied): count nothing more.
     if (!apex->IsAlive())
         return true;
+    if (!ReactionReached(apex, target, reachSpell))
+    {
+        LOG_DEBUG("module.ascension_compat", "apex traque: {} {} on {} not counted (immune or evading)", apex->GetName(),
+            ReactionName(reaction), target->GetGUID().ToString());
+        return false;
+    }
     if (lock >= 0)
         TakePvpLock(target, uint8(lock), state);
     // The prey may be dead by now: the point or the Blood Rush second still counts (the reaction was cast).
@@ -2603,7 +2630,8 @@ bool TryDetonation(Player* apex, ApexTraqueState& state)
 {
     uint32 const waited = getMSTimeDiff(state.detonationAt, getMSTime());
     Unit* target = ObjectAccessor::GetUnit(*apex, state.detonationPrey);
-    if (waited > DETONATION_WAIT_MS || !target || !target->IsAlive() || !apex->IsAlive() ||
+    if (waited > DETONATION_WAIT_MS || !target || !target->IsAlive() || !apex->IsAlive() || !IsApexHunter(apex) ||
+        apex->HasUnitState(UNIT_STATE_STUNNED | UNIT_STATE_CONFUSED | UNIT_STATE_FLEEING) ||
         !apex->IsValidAttackTarget(target))
     {
         LOG_DEBUG("module.ascension_compat", "apex traque: {} detonation dropped after {} ms", apex->GetName(), waited);
@@ -2626,12 +2654,18 @@ bool TryDetonation(Player* apex, ApexTraqueState& state)
 }
 
 /// Multi-target launches (Whirl, a bouncing Spear Throw): the first MULTI_TARGET_CAP targets only.
+/// A launch is told by its Spell address, its id and its m_cast_count (Spell has no cast id), within LAUNCH_WINDOW_MS of
+/// its first hit: a later Spell allocated at the same address is a new launch.
 bool TakeLaunchSlot(ApexTraqueState& state, Spell const* spell)
 {
     uint32 const now = getMSTime();
-    if (state.launch != spell || getMSTimeDiff(state.launchAt, now) > LAUNCH_WINDOW_MS)
+    uint32 const id = spell->GetSpellInfo()->Id;
+    if (state.launch != spell || state.launchSpellId != id || state.launchCastCount != spell->m_cast_count ||
+        getMSTimeDiff(state.launchAt, now) > LAUNCH_WINDOW_MS)
     {
         state.launch = spell;
+        state.launchSpellId = id;
+        state.launchCastCount = spell->m_cast_count;
         state.launchAt = now;
         state.launchCount = 0;
     }
@@ -2726,6 +2760,7 @@ void ResetTraque(Player* apex)
     state->boils.clear();
     state->detonationPrey.Clear();
     state->launch = nullptr;
+    state->launchSpellId = 0;
     state->launchCount = 0;
     state->scaleSpell = 0;
     state->scalePct = 100;
