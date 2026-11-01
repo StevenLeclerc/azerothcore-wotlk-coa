@@ -928,14 +928,14 @@ public:
     /// 31/10 on the Live). Only the spells Apex takes back (ReconcileTinkerApex: ranks of the excluded roots,
     /// spells of the nodes Apex may not hold) lose their button, and only once unknown: a talent or replacement
     /// spell taught later at login is never one of them. Leaving Apex (or below level 10), the same goes for the
-    /// Apex spells (9300000-9300199: ReconcileTinkerOutsideApex, SynchronizeTinkerApexBuffs). Saved with the next
-    /// character save.
+    /// Apex spells (9300000-9300399, widened from +199 on 01/11 for The Hunt v2: ReconcileTinkerOutsideApex,
+    /// SynchronizeTinkerApexBuffs). Saved with the next character save.
     void ClearTinkerApexDeadButtons(Player* player, bool apex)
     {
       auto takenBack = [player, apex](uint32 spellId)
       {
         if (!apex)
-          return spellId >= TINKER_APEX_EXOFRAME && spellId <= TINKER_APEX_EXOFRAME + 199;
+          return spellId >= TINKER_APEX_EXOFRAME && spellId <= TINKER_APEX_EXOFRAME + 399;
         if (IsTinkerApexExcludedSpell(spellId))
           return true;
         for (AscensionProgression::Rank const& rank : AscensionProgression::Ranks)

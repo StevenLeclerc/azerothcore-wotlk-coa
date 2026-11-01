@@ -1901,6 +1901,841 @@ private:
 };
 
 // ==================================================================================================
+// The Hunt v2, tier 10 (docs/CONCEPTION-apex-traque-v2.md § 3.1-3.4, PTR, 01/11/2026): traces, reactions, Hemorrhage,
+// Hunt Marks and Blood Rush; level 12: the Rocket Pounce detonation. Ids frozen by the § 8 contract (9300186-9300210).
+// Every number below is a starting value [S] for the benches at levels 10, 20, 30 and 60.
+//
+// Where it hooks (no spell_script_names row needed):
+//   AscensionApexTraqueSpellScript (AllSpellScript)
+//     OnSpellHitResult: a technique that landed reads the Apex's trace on its target, plays the reaction, lays its own.
+//                       Only the BUTTON spell of a technique is read (Flurry 9300003, never its strikes 9300004/05), so
+//                       a launch reacts once per target, and the spells a reaction casts are never techniques: no loop.
+//     OnSpellCritChance: Open Wound fired by the cannon itself: the bolt that meets Pierced is a sure critical.
+//     OnSpellCalculatedTarget: the damage scale of a reaction (70% against a player, x2 first reaction of a Blood Rush,
+//                       150% detonation), set around the triggered cast (CastScaled; launch is synchronous, Spell::_cast).
+//   AscensionApexTraqueUnitScript::ModifyPeriodicDamageAurasTick: Hemorrhage and Rending Claws' bleed x2 on the Blood
+//                       Rush prey (x1.5 against a player). Multiplies only: the other tick hooks keep their effect.
+//   AscensionApexTraquePlayerScript: Boiling Blood's ticks, the end of the Blood Rush, the clean-up (spec, death, logout).
+// Nothing runs outside an Apex (Tinker, specialization 102, level 10+) or while the core DBC spells are missing.
+// ==================================================================================================
+
+/// Defined with the support trunk below (the shots of the cannon's category the player knows).
+std::vector<uint32> CategorySpells(Player* player, SpellInfo const* spellInfo);
+
+namespace traque
+{
+enum TraqueSpells : uint32
+{
+    SPELL_TRACE_GASH = 9300186,          // claws trace
+    SPELL_TRACE_PIERCED = 9300187,       // spear trace
+    SPELL_TRACE_LOCKED = 9300188,        // cannon trace
+    SPELL_HUNT_MARKS = 9300189,          // points, 1 to 3 stacks (display; the count lives in ApexTraqueState)
+    SPELL_RUSH_PREY = 9300190,           // Blood Rush on the prey: its bleeds tick twice as hard
+    SPELL_RUSH_APEX = 9300191,           // Blood Rush on the Apex
+    SPELL_HEMORRHAGE = 9300192,          // stacking bleed, 2 s period, 12 s, 5 stacks
+    SPELL_RIP = 9300193,                 // 60% weapon
+    SPELL_PINNED_DOWN = 9300194,         // root 2 s
+    SPELL_SILENCING_HAFT = 9300195,      // interrupt
+    SPELL_BOILING_MARK = 9300196,        // 4 s marker (display; the ticks are driven here)
+    SPELL_BARBED = 9300197,              // 50% weapon
+    SPELL_BOILING_FIRE = 9300200,        // Fire tick of Boiling Blood, amount passed in base point 0
+    SPELL_POUNCE_IMPACT = 9300210,       // 60% weapon
+    // techniques in service
+    SPELL_FLURRY = 9300003,              // button; triggers 9300004 and 9300005 (never read)
+    SPELL_FLURRY_MH = 9300004,           // re-cast by Quarry
+    SPELL_RENDING_CLAWS = 9300006,
+    SPELL_WHIRL = 9300007,               // its off-hand 9300014 is never read
+    SPELL_SPEAR_THRUST = 9300008,
+    SPELL_SPEAR_THROW = 9300009,
+    SPELL_PINNING_STRIKE = 9300010,
+    SPELL_PLASMA_BOLT = 9300013,         // the shot of Plasma Caster 9300012 (the aim is never read)
+    SPELL_PEELED_HIDE = 9300024,
+    SPELL_SKEWERED_ARMOR = 9300088,
+};
+
+enum Weapon : uint8
+{
+    WEAPON_NONE = 0,
+    WEAPON_CLAWS,
+    WEAPON_SPEAR,
+    WEAPON_CANNON,
+};
+
+// One bit per reaction: the « distinct reactions » of the hunt and of the Blood Rush are masks.
+enum Reaction : uint8
+{
+    REACTION_NONE = 0,
+    REACTION_BARBED = 0x01,       // Gash + spear
+    REACTION_BOILING = 0x02,      // Gash + cannon
+    REACTION_RIP = 0x04,          // Pierced + claws
+    REACTION_OPEN_WOUND = 0x08,   // Pierced + cannon
+    REACTION_QUARRY = 0x10,       // Locked + claws
+    REACTION_NAIL = 0x20,         // Locked + spear (Pinned Down, or Silencing Haft on a caster)
+    REACTION_DETONATION = 0x40,   // Rocket Pounce on a trace (level 12), counted apart
+};
+
+constexpr uint8 APEX_DETONATION_LEVEL = 12;
+constexpr uint32 MULTI_TARGET_CAP = 3;            // Whirl (and a bouncing Spear Throw): 3 targets read per launch
+constexpr uint32 LAUNCH_WINDOW_MS = 500;          // hits of one launch land in the same update
+constexpr uint32 REACTION_PVP_PCT = 70;           // reactions against a player
+constexpr uint32 PVP_LOCK_MS = 20000;             // Barbed, Nail, Silencing Haft: once every 20 s per player
+constexpr uint32 REACTION_DOUBLE_PCT = 200;       // first reaction of a Blood Rush
+constexpr uint32 DETONATION_PCT = 150;
+constexpr uint8 HUNT_MARKS_MAX = 3;               // the third point starts the Blood Rush
+constexpr uint32 HUNT_MARKS_MS = 12000;           // a hunt without a new point for 12 s starts over
+constexpr int32 RUSH_BASE_MS = 5000;
+constexpr int32 RUSH_STEP_MS = 1000;              // per reaction not yet played in the phase
+constexpr int32 RUSH_MAX_MS = 8000;
+constexpr int32 RUSH_POUNCE_CDR_MS = 4000;        // level 12
+constexpr uint32 RUSH_TICK_PCT = 200;             // bleeds of the prey during the Blood Rush
+constexpr uint32 RUSH_TICK_PVP_PCT = 150;         // against a player
+constexpr uint8 HEMO_MAX_STACKS = 5;
+constexpr uint32 HEMO_TICK_L10 = 4;               // per stack and per tick at level 10 ...
+constexpr uint32 HEMO_TICK_L60 = 24;              // ... and 60, linear in between
+constexpr float HEMO_AP_PCT = 1.5f;               // plus 1.5% of the attack power, per stack and per tick
+constexpr uint8 HEMO_GASH = 1;                    // Gash laid
+constexpr uint8 HEMO_BARBED = 2;
+constexpr int32 HEMO_BARBED_EXTEND_MS = 4000;
+constexpr uint8 HEMO_RIP = 1;
+constexpr uint8 HEMO_QUARRY = 1;
+constexpr uint8 PEELED_HIDE_RIP = 1;
+constexpr uint8 SKEWERED_NAIL = 1;
+constexpr uint8 BOIL_TICKS = 4;
+constexpr uint32 BOIL_PERIOD_MS = 1000;
+constexpr int32 BOIL_MARK_MS = int32(BOIL_TICKS * BOIL_PERIOD_MS);
+constexpr uint32 BOIL_FALLBACK_L10 = 20;          // Boiling Blood on a prey without Hemorrhage (bleed immune): one hit
+constexpr uint32 BOIL_FALLBACK_L60 = 80;
+constexpr int32 OPEN_WOUND_CDR_MS = 2000;         // cannon cooldown
+constexpr uint32 SWEEP_MS = 1000;
+
+struct TraqueTarget
+{
+    uint8 huntMask = 0;             // reactions already played on this prey during the hunt
+    uint8 points = 0;
+    uint32 pointAt = 0;             // getMSTime of the last point
+    uint8 lockMask = 0;             // PvP: Barbed (bit 0), Nail (1), Silencing Haft (2) used ...
+    std::array<uint32, 3> lockAt{}; // ... at that getMSTime
+};
+
+struct TraqueBoil
+{
+    uint32 nextIn = BOIL_PERIOD_MS; // ms until the next Fire tick
+    uint8 ticksLeft = BOIL_TICKS;
+    uint32 pct = 100;               // the reaction's scale (PvP, first of a Blood Rush)
+};
+
+/// Per-Apex state of the hunt, in the character's own CustomData (one map thread per player). Every guid map is pruned
+/// once a second (Sweep): an entry outlives its target by at most PVP_LOCK_MS.
+struct ApexTraqueState : public DataMap::Base
+{
+    std::unordered_map<ObjectGuid, TraqueTarget> targets;
+    std::unordered_map<ObjectGuid, TraqueBoil> boils;
+    bool rush = false;
+    uint32 rushStart = 0;           // getMSTime
+    int32 rushTotal = 0;            // ms, 5 to 8 s
+    ObjectGuid rushPrey;
+    uint8 rushMask = 0;             // reactions played during the phase
+    bool rushFirstDone = false;
+    Spell const* launch = nullptr;  // multi-target launch being read (compared, never dereferenced)
+    uint32 launchAt = 0;
+    uint32 launchCount = 0;
+    uint32 scaleSpell = 0;          // CastScaled: the triggered spell whose damage is scaled ...
+    uint32 scalePct = 100;          // ... by this
+    uint32 sweepTimer = SWEEP_MS;
+
+    bool Empty() const { return targets.empty() && boils.empty() && !rush; }
+};
+
+ApexTraqueState& Traque(Player* player)
+{
+    return *player->CustomData.GetDefault<ApexTraqueState>("coa.apex.traque");
+}
+
+ApexTraqueState* TraqueIfAny(Player* player)
+{
+    return player->CustomData.Get<ApexTraqueState>("coa.apex.traque");
+}
+
+bool IsApexHunter(Unit const* unit)
+{
+    if (!IsTinker(unit))
+        return false;
+    Player const* player = unit->ToPlayer();
+    return player->GetLevel() >= APEX_LEVEL && GetAscensionActiveSpecialization(player) == SPEC_APEX;
+}
+
+/// The DBC half of the tier: without the traces, the points and the Hemorrhage nothing is read (inert until the DBC).
+bool EngineReady()
+{
+    for (uint32 const id : { uint32(SPELL_TRACE_GASH), uint32(SPELL_TRACE_PIERCED), uint32(SPELL_TRACE_LOCKED),
+                             uint32(SPELL_HUNT_MARKS), uint32(SPELL_HEMORRHAGE) })
+        if (!sSpellMgr->GetSpellInfo(id))
+            return false;
+    return true;
+}
+
+constexpr Weapon WeaponOf(uint32 spellId)
+{
+    switch (spellId)
+    {
+        case SPELL_FLURRY: case SPELL_RENDING_CLAWS: case SPELL_WHIRL:
+            return WEAPON_CLAWS;
+        case SPELL_SPEAR_THRUST: case SPELL_SPEAR_THROW: case SPELL_PINNING_STRIKE:
+            return WEAPON_SPEAR;
+        case SPELL_PLASMA_BOLT:
+            return WEAPON_CANNON;
+        default:
+            return WEAPON_NONE;
+    }
+}
+
+constexpr uint32 TraceOf(Weapon weapon)
+{
+    switch (weapon)
+    {
+        case WEAPON_CLAWS: return SPELL_TRACE_GASH;
+        case WEAPON_SPEAR: return SPELL_TRACE_PIERCED;
+        case WEAPON_CANNON: return SPELL_TRACE_LOCKED;
+        default: return 0;
+    }
+}
+
+/// § 3.3: the trace left by `trace`, met by `weapon`. Same weapon: none (the trace is refreshed).
+constexpr Reaction ReactionOf(Weapon trace, Weapon weapon)
+{
+    switch (trace)
+    {
+        case WEAPON_CLAWS:
+            return weapon == WEAPON_SPEAR ? REACTION_BARBED : weapon == WEAPON_CANNON ? REACTION_BOILING : REACTION_NONE;
+        case WEAPON_SPEAR:
+            return weapon == WEAPON_CLAWS ? REACTION_RIP : weapon == WEAPON_CANNON ? REACTION_OPEN_WOUND : REACTION_NONE;
+        case WEAPON_CANNON:
+            return weapon == WEAPON_CLAWS ? REACTION_QUARRY : weapon == WEAPON_SPEAR ? REACTION_NAIL : REACTION_NONE;
+        default:
+            return REACTION_NONE;
+    }
+}
+
+/// The detonation of the pounce plays the trace as if the « next » weapon met it: claws -> spear -> cannon -> claws.
+constexpr Weapon NextWeapon(Weapon weapon)
+{
+    return weapon == WEAPON_CLAWS ? WEAPON_SPEAR : weapon == WEAPON_SPEAR ? WEAPON_CANNON :
+        weapon == WEAPON_CANNON ? WEAPON_CLAWS : WEAPON_NONE;
+}
+
+static_assert(ReactionOf(WEAPON_CLAWS, NextWeapon(WEAPON_CLAWS)) == REACTION_BARBED);
+static_assert(ReactionOf(WEAPON_SPEAR, NextWeapon(WEAPON_SPEAR)) == REACTION_OPEN_WOUND);
+static_assert(ReactionOf(WEAPON_CANNON, NextWeapon(WEAPON_CANNON)) == REACTION_QUARRY);
+
+/// The weapon whose trace this Apex left on `target`, WEAPON_NONE without one.
+Weapon TraceOn(Unit const* target, ObjectGuid const& apex)
+{
+    for (Weapon const weapon : { WEAPON_CLAWS, WEAPON_SPEAR, WEAPON_CANNON })
+        if (target->GetAura(TraceOf(weapon), apex))
+            return weapon;
+    return WEAPON_NONE;
+}
+
+/// A player or a unit a player controls (pets, minions): the PvP rules of § 7.
+bool PlayerSide(Unit const* unit)
+{
+    return unit && unit->GetCharmerOrOwnerPlayerOrPlayerItself();
+}
+
+uint32 Interpolate(Player const* apex, uint32 atLevel10, uint32 atLevel60)
+{
+    uint32 const level = std::clamp<uint32>(apex->GetLevel(), 10, 60);
+    return atLevel10 + (atLevel60 - atLevel10) * (level - 10) / 50;
+}
+
+/// Adds `count` stacks of the Apex's own aura `spellId` on `target` (the DBC stack cap holds), refreshing it. Returns
+/// the aura, nullptr when it cannot be laid (immunity, spell missing, dead target).
+Aura* AddStacks(Player* apex, Unit* target, uint32 spellId, uint8 count)
+{
+    if (!count || !target->IsAlive() || !sSpellMgr->GetSpellInfo(spellId))
+        return nullptr;
+    Aura* aura = target->GetAura(spellId, apex->GetGUID());
+    if (!aura)
+    {
+        aura = apex->AddAura(spellId, target);
+        if (!aura)
+            return nullptr;
+        --count;
+    }
+    if (count && !aura->IsRemoved())
+        aura->ModStackAmount(count);
+    return aura->IsRemoved() ? nullptr : aura;
+}
+
+/// Hemorrhage's tick, set on the aura itself after every stack change: stacks x (4 at level 10 .. 24 at 60, plus 1.5%
+/// of the attack power, read now). SetAmount (ChangeAmount mark) keeps the core from recalculating it; a stack change
+/// (Aura::SetStackAmount) does recalculate it, hence the call after each one. The tick hooks then only multiply.
+void SyncHemorrhage(Player* apex, Aura* hemo)
+{
+    if (!hemo || hemo->IsRemoved())
+        return;
+    float const ap = std::max(0.0f, apex->GetTotalAttackPowerValue(BASE_ATTACK));
+    int64 const perStack = int64(Interpolate(apex, HEMO_TICK_L10, HEMO_TICK_L60)) + int64(ap * HEMO_AP_PCT / 100.0f);
+    int32 const amount = int32(std::min<int64>(perStack * hemo->GetStackAmount(), std::numeric_limits<int32>::max()));
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        if (AuraEffect* effect = hemo->GetEffect(i); effect && effect->GetAuraType() == SPELL_AURA_PERIODIC_DAMAGE)
+            effect->ChangeAmount(amount, true);
+}
+
+/// Hemorrhage +`count` (5 at most), refreshed to its 12 s. Never consumed by a reaction.
+Aura* AddHemorrhage(Player* apex, Unit* target, uint8 count)
+{
+    Aura* hemo = AddStacks(apex, target, SPELL_HEMORRHAGE, count);
+    if (hemo && hemo->GetStackAmount() > HEMO_MAX_STACKS)
+        hemo->SetStackAmount(HEMO_MAX_STACKS);
+    SyncHemorrhage(apex, hemo);
+    return hemo;
+}
+
+/// The current tick of the Apex's Hemorrhage on `target`, Blood Rush included; 0 without one.
+uint32 HemorrhageTick(Player* apex, Unit* target)
+{
+    Aura const* hemo = target->GetAura(SPELL_HEMORRHAGE, apex->GetGUID());
+    if (!hemo)
+        return 0;
+    int32 amount = 0;
+    for (uint8 i = 0; i < MAX_SPELL_EFFECTS; ++i)
+        if (AuraEffect const* effect = hemo->GetEffect(i); effect && effect->GetAuraType() == SPELL_AURA_PERIODIC_DAMAGE)
+            amount = std::max(amount, effect->GetAmount());
+    uint64 tick = uint64(std::max(amount, 0));
+    if (target->GetAura(SPELL_RUSH_PREY, apex->GetGUID()))
+        tick = tick * (PlayerSide(target) ? RUSH_TICK_PVP_PCT : RUSH_TICK_PCT) / 100;
+    return uint32(std::min<uint64>(tick, std::numeric_limits<int32>::max()));
+}
+
+/// A triggered reaction spell whose damage is scaled by `pct` (OnSpellCalculatedTarget reads the pair). Spell::_cast
+/// runs the launch phase synchronously for a triggered spell (TRIGGERED_CAST_DIRECTLY), so the pair is cleared at once.
+void CastScaled(Player* apex, Unit* target, uint32 spellId, uint32 pct)
+{
+    if (!target->IsAlive() || !sSpellMgr->GetSpellInfo(spellId))
+        return;
+    ApexTraqueState& state = Traque(apex);
+    uint32 const savedSpell = state.scaleSpell;
+    uint32 const savedPct = state.scalePct;
+    state.scaleSpell = spellId;
+    state.scalePct = pct;
+    apex->CastSpell(target, spellId, true);
+    state.scaleSpell = savedSpell;
+    state.scalePct = savedPct;
+}
+
+/// Cannon cooldown -`ms`, every shot of its category (the category cooldown is one entry per spell, Player.cpp).
+void ShortenCannon(Player* apex, int32 ms)
+{
+    SpellInfo const* cannon = sSpellMgr->GetSpellInfo(SPELL_PLASMA_CASTER);
+    if (!cannon || ms <= 0)
+        return;
+    for (uint32 const id : CategorySpells(apex, cannon))
+        if (apex->HasSpellCooldown(id))
+            apex->ModifySpellCooldown(id, -ms);
+}
+
+/// The two Blood Rush auras follow the elastic duration: max = the phase's total, left = what remains of it.
+void SyncRushAuras(Player* apex, ApexTraqueState const& state)
+{
+    int32 const elapsed = int32(getMSTimeDiff(state.rushStart, getMSTime()));
+    int32 const left = std::max(1, state.rushTotal - elapsed);
+    auto sync = [&](Aura* aura)
+    {
+        if (!aura || aura->IsRemoved())
+            return;
+        aura->SetMaxDuration(state.rushTotal);
+        aura->SetDuration(left);   // SetNeedClientUpdateForTargets: the client gets the new time
+    };
+    sync(apex->GetAura(SPELL_RUSH_APEX, apex->GetGUID()));
+    if (Unit* prey = state.rushPrey ? ObjectAccessor::GetUnit(*apex, state.rushPrey) : nullptr)
+        sync(prey->GetAura(SPELL_RUSH_PREY, apex->GetGUID()));
+}
+
+/// Every hunt of this Apex starts over: points and played reactions (the PvP locks stay).
+void ClearHunts(Player* apex, ApexTraqueState& state)
+{
+    for (auto& [guid, hunt] : state.targets)
+    {
+        if (hunt.points)
+            if (Unit* target = ObjectAccessor::GetUnit(*apex, guid))
+                target->RemoveAurasDueToSpell(SPELL_HUNT_MARKS, apex->GetGUID());
+        hunt.huntMask = 0;
+        hunt.points = 0;
+    }
+}
+
+void StartRush(Player* apex, Unit* prey, ApexTraqueState& state)
+{
+    ClearHunts(apex, state);
+    state.rush = true;
+    state.rushStart = getMSTime();
+    state.rushTotal = RUSH_BASE_MS;
+    state.rushPrey = prey->GetGUID();
+    state.rushMask = 0;
+    state.rushFirstDone = false;
+    if (sSpellMgr->GetSpellInfo(SPELL_RUSH_APEX))
+        apex->AddAura(SPELL_RUSH_APEX, apex);
+    if (prey->IsAlive() && sSpellMgr->GetSpellInfo(SPELL_RUSH_PREY))
+        apex->AddAura(SPELL_RUSH_PREY, prey);
+    SyncRushAuras(apex, state);
+    if (apex->GetLevel() >= APEX_DETONATION_LEVEL && apex->HasSpellCooldown(SPELL_ROCKET_POUNCE))
+        apex->ModifySpellCooldown(SPELL_ROCKET_POUNCE, -RUSH_POUNCE_CDR_MS);
+}
+
+/// End of the phase (time out, death, logout, specialization): the auras go and the points start from zero.
+void EndRush(Player* apex, ApexTraqueState& state)
+{
+    if (!state.rush)
+        return;
+    state.rush = false;
+    apex->RemoveAurasDueToSpell(SPELL_RUSH_APEX, apex->GetGUID());
+    if (Unit* prey = state.rushPrey ? ObjectAccessor::GetUnit(*apex, state.rushPrey) : nullptr)
+        prey->RemoveAurasDueToSpell(SPELL_RUSH_PREY, apex->GetGUID());
+    state.rushPrey.Clear();
+    state.rushMask = 0;
+    ClearHunts(apex, state);
+}
+
+bool RushRunning(ApexTraqueState const& state)
+{
+    return state.rush && int32(getMSTimeDiff(state.rushStart, getMSTime())) < state.rushTotal;
+}
+
+/// A reaction was played on `target`: a point if it is new in the hunt (outside the Blood Rush), or one more second of
+/// Blood Rush if it is new in the phase. Returns true when this reaction is the doubled first one of the phase (the
+/// caller asks BEFORE applying the reaction).
+bool CountReaction(Player* apex, Unit* target, Reaction reaction, ApexTraqueState& state)
+{
+    uint32 const now = getMSTime();
+    // A phase that ran out before the Apex's next update ends now: its clean-up must not wipe the point earned below.
+    if (state.rush && !RushRunning(state))
+        EndRush(apex, state);
+    if (RushRunning(state))
+    {
+        bool const doubled = !state.rushFirstDone;
+        state.rushFirstDone = true;
+        if (!(state.rushMask & reaction))
+        {
+            state.rushMask |= reaction;
+            if (state.rushTotal < RUSH_MAX_MS)
+            {
+                state.rushTotal = std::min(RUSH_MAX_MS, state.rushTotal + RUSH_STEP_MS);
+                SyncRushAuras(apex, state);
+            }
+        }
+        return doubled;
+    }
+    TraqueTarget& hunt = state.targets[target->GetGUID()];
+    if (hunt.points && getMSTimeDiff(hunt.pointAt, now) >= HUNT_MARKS_MS)
+    {
+        hunt.points = 0;
+        hunt.huntMask = 0;
+    }
+    if (!hunt.points)
+        hunt.huntMask = 0;
+    if (hunt.huntMask & reaction)
+        return false;
+    hunt.huntMask |= reaction;
+    hunt.points = std::min<uint8>(hunt.points + 1, HUNT_MARKS_MAX);
+    hunt.pointAt = now;
+    if (hunt.points >= HUNT_MARKS_MAX)
+    {
+        // StartRush clears every hunt, this one included (its marks go with it).
+        StartRush(apex, target, state);
+        return false;
+    }
+    Aura* marks = AddStacks(apex, target, SPELL_HUNT_MARKS, 1);
+    if (marks && marks->GetStackAmount() != hunt.points)
+        marks->SetStackAmount(hunt.points);
+    return false;
+}
+
+/// PvP: Barbed, Nail and Silencing Haft once every 20 s per player. Returns false while locked; takes the lock.
+bool TakePvpLock(Unit* target, uint8 bit, ApexTraqueState& state)
+{
+    if (!PlayerSide(target))
+        return true;
+    TraqueTarget& hunt = state.targets[target->GetGUID()];
+    uint32 const now = getMSTime();
+    if ((hunt.lockMask & (1u << bit)) && getMSTimeDiff(hunt.lockAt[bit], now) < PVP_LOCK_MS)
+        return false;
+    hunt.lockMask |= uint8(1u << bit);
+    hunt.lockAt[bit] = now;
+    return true;
+}
+
+constexpr uint8 LOCK_BARBED = 0;
+constexpr uint8 LOCK_NAIL = 1;
+constexpr uint8 LOCK_HAFT = 2;
+
+/// Can `reaction` play on `target` now (PvP locks)? Nail is decided on what the prey does: Silencing Haft on a caster.
+bool ReactionAllowed(Unit* target, Reaction reaction, ApexTraqueState& state)
+{
+    switch (reaction)
+    {
+        case REACTION_BARBED:
+            return TakePvpLock(target, LOCK_BARBED, state);
+        case REACTION_NAIL:
+            return TakePvpLock(target, target->IsNonMeleeSpellCast(false) ? LOCK_HAFT : LOCK_NAIL, state);
+        default:
+            return true;
+    }
+}
+
+/// Plays `reaction` on `target`. `detonation`: from the pounce (150%, the cannon's sure critical goes on Locked On since
+/// there is no shot to carry it). The trace is already gone.
+void ApplyReaction(Player* apex, Unit* target, Reaction reaction, bool detonation, ApexTraqueState& state)
+{
+    if (!target->IsAlive())
+        return;
+    // Points and phase first: the reaction may kill the prey.
+    bool const doubled = CountReaction(apex, target, detonation ? REACTION_DETONATION : reaction, state);
+    uint8 const times = doubled ? 2 : 1;
+    uint32 pct = 100;
+    if (PlayerSide(target))
+        pct = pct * REACTION_PVP_PCT / 100;
+    if (doubled)
+        pct = pct * REACTION_DOUBLE_PCT / 100;
+    if (detonation)
+        pct = pct * DETONATION_PCT / 100;
+
+    switch (reaction)
+    {
+        case REACTION_BARBED:
+            CastScaled(apex, target, SPELL_BARBED, pct);
+            if (Aura* hemo = AddHemorrhage(apex, target, uint8(HEMO_BARBED * times)))
+            {
+                int32 const duration = hemo->GetDuration() + HEMO_BARBED_EXTEND_MS;
+                hemo->SetMaxDuration(std::max(hemo->GetMaxDuration(), duration));
+                hemo->SetDuration(duration);
+            }
+            break;
+        case REACTION_BOILING:
+            if (target->GetAura(SPELL_HEMORRHAGE, apex->GetGUID()))
+            {
+                TraqueBoil& boil = state.boils[target->GetGUID()];
+                boil = TraqueBoil();
+                boil.pct = pct;
+                if (sSpellMgr->GetSpellInfo(SPELL_BOILING_MARK))
+                    if (Aura* mark = apex->AddAura(SPELL_BOILING_MARK, target))
+                    {
+                        mark->SetMaxDuration(BOIL_MARK_MS);
+                        mark->SetDuration(BOIL_MARK_MS);
+                    }
+            }
+            else if (sSpellMgr->GetSpellInfo(SPELL_BOILING_FIRE))
+            {
+                int32 const amount = int32(uint64(Interpolate(apex, BOIL_FALLBACK_L10, BOIL_FALLBACK_L60)) * pct / 100);
+                if (amount > 0)
+                    apex->CastCustomSpell(SPELL_BOILING_FIRE, SPELLVALUE_BASE_POINT0, amount, target, true);
+            }
+            break;
+        case REACTION_RIP:
+            CastScaled(apex, target, SPELL_RIP, pct);
+            AddStacks(apex, target, SPELL_PEELED_HIDE, uint8(PEELED_HIDE_RIP * times));
+            AddHemorrhage(apex, target, uint8(HEMO_RIP * times));
+            break;
+        case REACTION_OPEN_WOUND:
+            // Fired by the cannon, the shot itself was made a sure critical (OnSpellCritChance). From the pounce there
+            // is no shot: Locked On for the next one.
+            if (detonation && sSpellMgr->GetSpellInfo(SPELL_LOCKED_ON))
+                apex->AddAura(SPELL_LOCKED_ON, apex);
+            ShortenCannon(apex, int32(int64(OPEN_WOUND_CDR_MS) * times * (detonation ? DETONATION_PCT : 100) / 100));
+            break;
+        case REACTION_QUARRY:
+            CastScaled(apex, target, SPELL_FLURRY_MH, pct);
+            AddHemorrhage(apex, target, uint8(HEMO_QUARRY * times));
+            break;
+        case REACTION_NAIL:
+            if (!target->IsAlive())
+                break;
+            if (target->IsNonMeleeSpellCast(false) && sSpellMgr->GetSpellInfo(SPELL_SILENCING_HAFT))
+                apex->CastSpell(target, SPELL_SILENCING_HAFT, true);
+            else
+            {
+                if (sSpellMgr->GetSpellInfo(SPELL_PINNED_DOWN))
+                    apex->CastSpell(target, SPELL_PINNED_DOWN, true);
+                AddStacks(apex, target, SPELL_SKEWERED_ARMOR, uint8(SKEWERED_NAIL * times));
+            }
+            break;
+        default:
+            break;
+    }
+}
+
+/// A technique of `weapon` landed on `target`.
+void TechniqueLanded(Player* apex, Unit* target, Weapon weapon)
+{
+    ApexTraqueState& state = Traque(apex);
+    ObjectGuid const self = apex->GetGUID();
+    Weapon const trace = TraceOn(target, self);
+    if (trace != WEAPON_NONE && trace != weapon)
+    {
+        Reaction const reaction = ReactionOf(trace, weapon);
+        // The consumed trace goes first, whether the reaction plays or a PvP lock holds it: one trace per Apex and prey.
+        target->RemoveAurasDueToSpell(TraceOf(trace), self);
+        if (reaction != REACTION_NONE && ReactionAllowed(target, reaction, state))
+            ApplyReaction(apex, target, reaction, false, state);
+    }
+    if (!target->IsAlive())
+        return;
+    if (Aura* laid = apex->AddAura(TraceOf(weapon), target))   // same weapon: refreshed, no reaction
+        laid->RefreshDuration();
+    if (weapon == WEAPON_CLAWS)
+        AddHemorrhage(apex, target, HEMO_GASH);
+}
+
+/// Rocket Pounce landed on `target` (level 12): Pounce Impact, and the trace reacts as with the next weapon at 150%,
+/// counted as the distinct « detonation ». The trace is consumed, none is laid.
+void PounceLanded(Player* apex, Unit* target)
+{
+    ApexTraqueState& state = Traque(apex);
+    ObjectGuid const self = apex->GetGUID();
+    Weapon const trace = TraceOn(target, self);
+    if (trace == WEAPON_NONE)
+        return;
+    target->RemoveAurasDueToSpell(TraceOf(trace), self);
+    if (sSpellMgr->GetSpellInfo(SPELL_POUNCE_IMPACT))
+        apex->CastSpell(target, SPELL_POUNCE_IMPACT, true);
+    Reaction const reaction = ReactionOf(trace, NextWeapon(trace));
+    if (reaction != REACTION_NONE && target->IsAlive() && ReactionAllowed(target, reaction, state))
+        ApplyReaction(apex, target, reaction, true, state);
+}
+
+/// Multi-target launches (Whirl, a bouncing Spear Throw): the first MULTI_TARGET_CAP targets only.
+bool TakeLaunchSlot(ApexTraqueState& state, Spell const* spell)
+{
+    uint32 const now = getMSTime();
+    if (state.launch != spell || getMSTimeDiff(state.launchAt, now) > LAUNCH_WINDOW_MS)
+    {
+        state.launch = spell;
+        state.launchAt = now;
+        state.launchCount = 0;
+    }
+    return ++state.launchCount <= MULTI_TARGET_CAP;
+}
+
+/// Boiling Blood: one Fire tick a second, each equal to the current Hemorrhage tick (Blood Rush included).
+void UpdateBoils(Player* apex, ApexTraqueState& state, uint32 diff)
+{
+    for (auto itr = state.boils.begin(); itr != state.boils.end();)
+    {
+        TraqueBoil& boil = itr->second;
+        if (boil.nextIn > diff)
+        {
+            boil.nextIn -= diff;
+            ++itr;
+            continue;
+        }
+        boil.nextIn = BOIL_PERIOD_MS;
+        Unit* target = ObjectAccessor::GetUnit(*apex, itr->first);
+        if (!target || !target->IsAlive() || !apex->IsAlive() || !apex->IsValidAttackTarget(target) ||
+            !sSpellMgr->GetSpellInfo(SPELL_BOILING_FIRE))
+        {
+            itr = state.boils.erase(itr);
+            continue;
+        }
+        int32 const amount = int32(uint64(HemorrhageTick(apex, target)) * boil.pct / 100);
+        bool const last = --boil.ticksLeft == 0;
+        if (last)
+            itr = state.boils.erase(itr);
+        else
+            ++itr;
+        // The cast may kill the prey; nothing of the iterator is used after it (a death touches no boil entry).
+        if (amount > 0)
+            apex->CastCustomSpell(SPELL_BOILING_FIRE, SPELLVALUE_BASE_POINT0, amount, target, true);
+        if (last)
+            target->RemoveAurasDueToSpell(SPELL_BOILING_MARK, apex->GetGUID());
+    }
+}
+
+/// Once a second: hunts that ran out and locks that expired go, targets that left the map go.
+void Sweep(Player* apex, ApexTraqueState& state)
+{
+    uint32 const now = getMSTime();
+    for (auto itr = state.targets.begin(); itr != state.targets.end();)
+    {
+        TraqueTarget& hunt = itr->second;
+        if (hunt.points && getMSTimeDiff(hunt.pointAt, now) >= HUNT_MARKS_MS)
+        {
+            hunt.points = 0;
+            hunt.huntMask = 0;
+        }
+        for (uint8 bit = 0; bit < hunt.lockAt.size(); ++bit)
+            if ((hunt.lockMask & (1u << bit)) && getMSTimeDiff(hunt.lockAt[bit], now) >= PVP_LOCK_MS)
+                hunt.lockMask &= uint8(~(1u << bit));
+        bool const idle = !hunt.points && !hunt.lockMask;
+        if (idle || (!hunt.lockMask && !ObjectAccessor::GetUnit(*apex, itr->first)))
+            itr = state.targets.erase(itr);
+        else
+            ++itr;
+    }
+}
+
+/// Everything of the hunt goes (death, logout, out of Apex). The Apex's own Blood Rush aura too; the marks laid on
+/// targets still in reach go with ClearHunts, the rest expire by themselves (12 s).
+void ResetTraque(Player* apex)
+{
+    ApexTraqueState* state = TraqueIfAny(apex);
+    if (!state)
+        return;
+    if (state->rush)
+        EndRush(apex, *state);
+    else
+        ClearHunts(apex, *state);
+    for (auto const& [guid, boil] : state->boils)
+        if (Unit* target = ObjectAccessor::GetUnit(*apex, guid))
+            target->RemoveAurasDueToSpell(SPELL_BOILING_MARK, apex->GetGUID());
+    state->targets.clear();
+    state->boils.clear();
+    state->launch = nullptr;
+    state->launchCount = 0;
+    state->scaleSpell = 0;
+    state->scalePct = 100;
+}
+} // namespace traque
+
+class AscensionApexTraqueSpellScript : public AllSpellScript
+{
+public:
+    AscensionApexTraqueSpellScript() : AllSpellScript("AscensionApexTraqueSpellScript",
+        { ALLSPELLHOOK_ON_HIT_RESULT, ALLSPELLHOOK_ON_CRIT_CHANCE, ALLSPELLHOOK_ON_CALCULATED_TARGET }) { }
+
+    void OnSpellHitResult(Spell* spell, Unit* target, uint8 missInfo, uint32 /*damage*/, uint32 /*healing*/,
+                          bool /*critical*/) override
+    {
+        using namespace traque;
+        if (!spell || !target || missInfo != SPELL_MISS_NONE || !spell->GetSpellInfo())
+            return;
+        uint32 const id = spell->GetSpellInfo()->Id;
+        Weapon const weapon = WeaponOf(id);
+        bool const pounce = id == SPELL_ROCKET_POUNCE;
+        if (weapon == WEAPON_NONE && !pounce)
+            return;
+        Unit* caster = spell->GetCaster();
+        if (!caster || caster == target || !target->IsAlive() || !IsApexHunter(caster) || !EngineReady())
+            return;
+        Player* apex = caster->ToPlayer();
+        if (!apex->IsAlive() || !apex->IsValidAttackTarget(target))
+            return;
+        if (pounce)
+        {
+            if (apex->GetLevel() >= APEX_DETONATION_LEVEL)
+                PounceLanded(apex, target);
+            return;
+        }
+        if ((id == SPELL_WHIRL || id == SPELL_SPEAR_THROW) && !TakeLaunchSlot(Traque(apex), spell))
+            return;
+        TechniqueLanded(apex, target, weapon);
+    }
+
+    // Open Wound fired by the cannon: the bolt that meets Pierced (computed at launch, Spell::DoAllEffectOnLaunchTarget)
+    // is a sure critical. The target's own crit-taken modifiers (resilience) still apply after this hook.
+    void OnSpellCritChance(Spell* spell, Unit* target, float& chance) override
+    {
+        using namespace traque;
+        if (!spell || !target || !spell->GetSpellInfo() || spell->GetSpellInfo()->Id != SPELL_PLASMA_BOLT)
+            return;
+        Unit* caster = spell->GetCaster();
+        if (!caster || caster == target || !IsApexHunter(caster) || !EngineReady())
+            return;
+        if (target->GetAura(SPELL_TRACE_PIERCED, caster->GetGUID()))
+            chance = 100.0f;
+    }
+
+    void OnSpellCalculatedTarget(Spell* spell, Unit* /*target*/, TargetInfo& targetInfo) override
+    {
+        using namespace traque;
+        if (!spell || !spell->GetSpellInfo())
+            return;
+        switch (spell->GetSpellInfo()->Id)
+        {
+            case SPELL_BARBED: case SPELL_RIP: case SPELL_FLURRY_MH:
+                break;
+            default:
+                return;
+        }
+        Unit* caster = spell->GetCaster();
+        if (!IsTinker(caster))
+            return;
+        ApexTraqueState* state = TraqueIfAny(caster->ToPlayer());
+        if (!state || state->scaleSpell != spell->GetSpellInfo()->Id || state->scalePct == 100)
+            return;
+        targetInfo.damage = int32(int64(targetInfo.damage) * state->scalePct / 100);
+        targetInfo.damageBeforeTakenMods = int32(int64(targetInfo.damageBeforeTakenMods) * state->scalePct / 100);
+    }
+};
+
+class AscensionApexTraqueUnitScript : public UnitScript
+{
+public:
+    AscensionApexTraqueUnitScript() : UnitScript("AscensionApexTraqueUnitScript", true,
+        { UNITHOOK_MODIFY_PERIODIC_DAMAGE_AURAS_TICK }) { }
+
+    // Blood Rush: Hemorrhage and Rending Claws' bleed tick twice as hard on the prey (x1.5 against a player). Multiplies
+    // only (the other tick hooks keep their share, whatever the order). Also called for periodic heals: ids filter.
+    void ModifyPeriodicDamageAurasTick(Unit* target, Unit* attacker, uint32& damage, SpellInfo const* spellInfo) override
+    {
+        using namespace traque;
+        if (!damage || !target || !attacker || !spellInfo ||
+            (spellInfo->Id != SPELL_HEMORRHAGE && spellInfo->Id != SPELL_RENDING_CLAWS))
+            return;
+        if (!target->GetAura(SPELL_RUSH_PREY, attacker->GetGUID()) || !IsApexHunter(attacker))
+            return;
+        uint64 const scaled = uint64(damage) * (PlayerSide(target) ? RUSH_TICK_PVP_PCT : RUSH_TICK_PCT) / 100;
+        damage = uint32(std::min<uint64>(scaled, std::numeric_limits<uint32>::max()));
+    }
+};
+
+class AscensionApexTraquePlayerScript : public PlayerScript
+{
+public:
+    AscensionApexTraquePlayerScript() : PlayerScript("AscensionApexTraquePlayerScript",
+        { PLAYERHOOK_ON_UPDATE, PLAYERHOOK_ON_PLAYER_JUST_DIED, PLAYERHOOK_ON_LOGOUT }) { }
+
+    void OnPlayerUpdate(Player* player, uint32 diff) override
+    {
+        using namespace traque;
+        if (!player || player->getClass() != CLASS_TINKER)
+            return;
+        ApexTraqueState* state = TraqueIfAny(player);
+        if (!state)
+            return;
+        if (state->rush && !RushRunning(*state))
+            EndRush(player, *state);
+        if (!state->boils.empty())
+            UpdateBoils(player, *state, diff);
+        if (state->sweepTimer > diff)
+        {
+            state->sweepTimer -= diff;
+            return;
+        }
+        state->sweepTimer = SWEEP_MS;
+        // Out of Apex (specialization changed, level lost) or the DBC half gone: nothing of the hunt survives.
+        if (!IsApexHunter(player) || !EngineReady())
+        {
+            if (!state->Empty())
+                ResetTraque(player);
+            return;
+        }
+        Sweep(player, *state);
+    }
+
+    void OnPlayerJustDied(Player* player) override
+    {
+        if (player && player->getClass() == CLASS_TINKER)
+            traque::ResetTraque(player);
+    }
+
+    void OnPlayerLogout(Player* player) override
+    {
+        if (player && player->getClass() == CLASS_TINKER)
+            traque::ResetTraque(player);
+    }
+};
+
+// ==================================================================================================
 // Hooks without a script name
 // ==================================================================================================
 
@@ -3624,6 +4459,10 @@ void AddAscensionTinkerApexTalentScripts()
     new AscensionApexTalentUnitScript();
     new AscensionApexTalentPlayerScript();
     new AscensionApexSkullSpineWorldScript();
+    // The Hunt v2, tier 10 (01/11)
+    new AscensionApexTraqueSpellScript();
+    new AscensionApexTraqueUnitScript();
+    new AscensionApexTraquePlayerScript();
     // support trunk (28/10)
     RegisterSpellScript(spell_apex_support_cast);
     RegisterSpellScript(spell_apex_cautery_round);
